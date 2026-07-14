@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+.env
+.DS_Store
+
+# runtime artefacts
+*.redb
+abi.json
+nuthatch.toml

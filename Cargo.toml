@@ -1,0 +1,30 @@
+[package]
+name = "nuthatch"
+version = "0.0.1"
+edition = "2021"
+description = "Be your own indexer. One Rust binary, one command, live in under two minutes."
+license = "AGPL-3.0-only"
+repository = "https://github.com/cargopete/nuthatch"
+readme = "README.md"
+
+[[bin]]
+name = "nuthatch"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+redb = "2"
+axum = "0.8"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+
+[profile.release]
+lto = "thin"
+strip = true
