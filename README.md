@@ -89,6 +89,15 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-14 — RFC-0001 step 1: ABI-driven decode engine.** New `src/registry.rs` — a
+  `DecodeRegistry` built from N contract ABIs (via alloy-json-abi / alloy-dyn-abi) maps topic0 →
+  per-`{alias}__{event}` tables, filters by emitting address, and decodes any log into typed rows
+  using the RFC-0001 type mapping (address / uint & int by width / bytesN / string / arrays→JSON /
+  indexed-dynamic→hash). Records a stable, order-independent content hash for verifiability, and
+  skips+counts anonymous events. 7 golden/property tests (real USDC Transfer, multi-contract table
+  routing, type mapping, registry-hash stability, anonymous skip). Foundation only — not yet wired
+  into the pipeline (steps 2-6: multi-contract init, generic storage, per-table sealing, serving);
+  `dead_code` allowed on the module until integration removes it.
 - **2026-07-14 — Slice 6 (first half): ingestion behind a `Source` trait.** Decode, hot store,
   sealing, IVM, and serving are now oblivious to where blocks come from — the indexer sees only
   `Arc<dyn Source>` (`tip` / `block_hash` / `logs`). `RpcSource` is the working impl (RPC polling, no

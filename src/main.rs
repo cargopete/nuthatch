@@ -17,6 +17,7 @@ mod decode;
 mod indexer;
 mod mcp;
 mod project;
+mod registry;
 mod rpc;
 mod seal;
 mod serve;

@@ -21,6 +21,9 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 async-trait = "0.1"
+alloy-json-abi = "1.6"
+alloy-dyn-abi = "1.6"
+alloy-primitives = "1.6"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
