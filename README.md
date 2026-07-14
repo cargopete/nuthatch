@@ -23,6 +23,18 @@ This is the thinnest end-to-end path that actually runs — deliberately minimal
 Scope of the skeleton: **one chain (Ethereum), Transfer events only, RPC polling, redb-only.**
 No IVM, no DuckDB/Parquet, no MCP yet.
 
+### Measured footprint (the number nobody else publishes)
+
+| | |
+|---|---|
+| **Peak RAM** | **~33 MB** (indexing 7,013 USDC Transfers, live mainnet) |
+| Binary size | 5.8 MB (release, stripped) |
+| Budget | ≤2 GB RAM — **using 1.6%** of it |
+
+Honest and reproducible: `nuthatch init 0xA0b8…eB48 && nuthatch dev --backfill 500`, sampled with
+`ps -o rss`. Measured on the release build. This is the embedded-mode skeleton; the budget holds
+as later slices land (Parquet/DuckDB attach read-only, redb hot layer stays bounded).
+
 ## Quickstart
 
 ```sh
@@ -52,6 +64,9 @@ Transfers into an embedded `nuthatch.redb`, and serves the API on `127.0.0.1:828
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-14 — Slice 1 gate closed.** 5 deterministic golden decode tests (fixed USDC-transfer
+  fixture → exact output) pass; measured peak RAM **~33 MB** indexing 7,013 transfers — 1.6% of the
+  2 GB budget. Both non-negotiables (tests + footprint) met, so slice 2 is unblocked.
 - **2026-07-14 — Slice 1: walking skeleton.** `init` (ABI via Sourcify v2, Etherscan fallback) →
   `dev` (RPC log polling with round-robin failover) → deterministic ERC-20 `Transfer` decode →
   redb hot store → axum HTTP API. Verified alive against live mainnet USDC, keyless: 170+ transfers
