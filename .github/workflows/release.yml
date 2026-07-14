@@ -23,10 +23,11 @@ jobs:
         include:
           - os: macos-14        # Apple Silicon
             target: aarch64-apple-darwin
-          - os: macos-13        # Intel
-            target: x86_64-apple-darwin
           - os: ubuntu-latest   # x86_64 Linux (glibc)
             target: x86_64-unknown-linux-gnu
+          # x86_64-apple-darwin (Intel Mac) is intentionally omitted: macos-13 runners are scarce
+          # and Intel Macs are a shrinking minority; those users build from source (cargo install)
+          # or run under a future addition. The installer routes them to the build-from-source path.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.1
