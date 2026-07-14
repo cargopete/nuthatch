@@ -1,0 +1,52 @@
+name: release
+
+# On a version tag, build native binaries per target and attach them to the GitHub Release.
+# Built on the pinned toolchain (rust-toolchain.toml → 1.94.1), so the dbsp/next-solver ICE that
+# breaks `cargo install` on rustc 1.97 never applies — users download a binary and never compile.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14        # Apple Silicon
+            target: aarch64-apple-darwin
+          - os: macos-13        # Intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest   # x86_64 Linux (glibc)
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: package
+        run: |
+          tarball="nuthatch-${{ matrix.target }}.tar.gz"
+          tar czf "$tarball" -C "target/${{ matrix.target }}/release" nuthatch
+          shasum -a 256 "$tarball" > "$tarball.sha256"
+          ls -lh "$tarball"
+      - name: attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            nuthatch-${{ matrix.target }}.tar.gz
+            nuthatch-${{ matrix.target }}.tar.gz.sha256
+          fail_on_unmatched_files: true
