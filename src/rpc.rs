@@ -78,6 +78,14 @@ impl RpcClient {
         parse_hex_u64(result.as_str().unwrap_or_default())
     }
 
+    /// Canonical block hash for a height, or None if the node doesn't have that block.
+    pub async fn block_hash(&self, number: u64) -> Result<Option<String>> {
+        let result = self
+            .call("eth_getBlockByNumber", json!([format!("0x{number:x}"), false]))
+            .await?;
+        Ok(result.get("hash").and_then(Value::as_str).map(String::from))
+    }
+
     pub async fn get_logs(&self, address: &str, topic0: &str, from: u64, to: u64) -> Result<Vec<Log>> {
         let params = json!([{
             "address": address,

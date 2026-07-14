@@ -25,6 +25,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
+
 [profile.release]
 lto = "thin"
 strip = true

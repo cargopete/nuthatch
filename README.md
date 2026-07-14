@@ -17,7 +17,8 @@ This is the thinnest end-to-end path that actually runs — deliberately minimal
 | `init` → ABI resolve (Sourcify → Etherscan) → scaffold | Parquet sealing + DuckDB analytics (slice 2) |
 | RPC log polling with round-robin failover | DBSP declarative views / IVM (slice 3) |
 | Deterministic ERC-20 `Transfer` decode | WASM transform runtime, Arrow WIT (slice 4) |
-| redb hot store, entity point-reads | MCP server + `llms.txt` + skills (slice 5) |
+| Reorg self-healing (hot-store rollback) | MCP server + `llms.txt` + skills (slice 5) |
+| redb hot store, entity point-reads | DuckDB read-only analytical SQL (slice 2, next) |
 | HTTP API (`/`, `/entities`, `/entity/{id}`) | reth ExEx tip mode, scaled Postgres mode (slice 6) |
 
 Scope of the skeleton: **one chain (Ethereum), Transfer events only, RPC polling, redb-only.**
@@ -64,6 +65,12 @@ Transfers into an embedded `nuthatch.redb`, and serves the API on `127.0.0.1:828
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-14 — Slice 2 (in progress): reorg safety.** Block-hash checkpoints + `rollback_to`
+  in the hot store; the indexer detects when its last committed block falls off the canonical
+  chain and rolls back to the deepest surviving checkpoint. Reorgs land *only* in the mutable hot
+  store — the invariant that lets later slices seal to immutable Parquet strictly past finality. A
+  proptest asserts convergence: any random fork depth + alternate branch reaches the same state as
+  indexing the winning branch directly (7 tests green). Verified live: no false reorgs on mainnet.
 - **2026-07-14 — Slice 1 gate closed.** 5 deterministic golden decode tests (fixed USDC-transfer
   fixture → exact output) pass; measured peak RAM **~33 MB** indexing 7,013 transfers — 1.6% of the
   2 GB budget. Both non-negotiables (tests + footprint) met, so slice 2 is unblocked.
@@ -72,7 +79,7 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   redb hot store → axum HTTP API. Verified alive against live mainnet USDC, keyless: 170+ transfers
   indexed in ~1.5s with correct decimal values. Scope: one chain, Transfer-only, RPC-poll, redb-only.
 
-_Next: Slice 2 — Parquet sealing past finality + DuckDB read-only analytical SQL + reorg property tests._
+_Next: finish Slice 2 — Parquet sealing past finality + DuckDB read-only analytical SQL._
 
 ## Licence
 

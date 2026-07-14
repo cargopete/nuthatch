@@ -70,6 +70,23 @@ async fn index_loop(rpc: Arc<RpcClient>, store: Store, address: String, backfill
             }
         };
 
+        // Reorg check: has the last block we committed against stayed canonical? If not, the
+        // mutable hot store rolls back to the deepest surviving checkpoint (the only place a
+        // reorg ever lands — sealed segments, once they exist, are strictly past finality).
+        if next > 0 {
+            match detect_reorg(&rpc, &store, next - 1).await {
+                Ok(Some(ancestor)) => {
+                    let removed = store.rollback_to(ancestor)?;
+                    store.set_meta(LAST_BLOCK_KEY, &ancestor.to_string())?;
+                    tracing::warn!("reorg detected: rolled back to block {ancestor} (removed {removed} entities)");
+                    next = ancestor + 1;
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::debug!("reorg check skipped: {e:#}"),
+            }
+        }
+
         if next > tip {
             // Caught up to the tip — poll for new blocks.
             sleep_secs(2).await;
@@ -88,6 +105,10 @@ async fn index_loop(rpc: Arc<RpcClient>, store: Store, address: String, backfill
                         stored += 1;
                     }
                 }
+                // Checkpoint the window boundary's canonical hash for future reorg detection.
+                if let Ok(Some(hash)) = rpc.block_hash(to).await {
+                    store.set_block_hash(to, &hash)?;
+                }
                 store.set_meta(LAST_BLOCK_KEY, &to.to_string())?;
                 if stored > 0 {
                     tracing::info!("blocks {next}..={to}: +{stored} transfers (total {})", store.count()?);
@@ -100,6 +121,33 @@ async fn index_loop(rpc: Arc<RpcClient>, store: Store, address: String, backfill
             }
         }
     }
+}
+
+/// If the checkpoint at `last` is no longer canonical, return the deepest checkpoint that still
+/// is (the common ancestor to roll back to); otherwise None. Returns Some(0) if none survive.
+async fn detect_reorg(rpc: &RpcClient, store: &Store, last: u64) -> Result<Option<u64>> {
+    let stored = match store.get_block_hash(last)? {
+        Some(h) => h,
+        None => return Ok(None), // no checkpoint here (e.g. cold start) — nothing to verify
+    };
+    let canonical = match rpc.block_hash(last).await? {
+        Some(h) => h,
+        None => return Ok(None), // node can't answer right now; try again next tick
+    };
+    if stored == canonical {
+        return Ok(None);
+    }
+    for (block, hash) in store.checkpoints_desc()? {
+        if block >= last {
+            continue;
+        }
+        if let Some(canon) = rpc.block_hash(block).await? {
+            if canon == hash {
+                return Ok(Some(block));
+            }
+        }
+    }
+    Ok(Some(0))
 }
 
 async fn sleep_secs(s: u64) {
