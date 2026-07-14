@@ -1,0 +1,24 @@
+# Standalone guest component — deliberately NOT a member of the nuthatch workspace, because a
+# wasm32-wasip2 cdylib only links for that target. Build with:
+#   cargo build --manifest-path components/large-transfers/Cargo.toml --target wasm32-wasip2 --release
+# then the staged .wasm is loaded by the host (src/transform.rs).
+[package]
+name = "large-transfers"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.57", default-features = false, features = ["macros"] }
+arrow-array = { version = "56", default-features = false }
+arrow-schema = { version = "56", default-features = false }
+arrow-ipc = { version = "56", default-features = false }
+arrow-select = { version = "56", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

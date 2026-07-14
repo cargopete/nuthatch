@@ -7,3 +7,6 @@
 *.redb
 abi.json
 nuthatch.toml
+
+# guest component build dirs (the staged component .wasm at components/*.wasm IS committed)
+components/*/target

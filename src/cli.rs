@@ -15,6 +15,22 @@ pub enum Command {
     Init(InitArgs),
     /// Run the indexer: poll logs, store entities, and serve the API.
     Dev(DevArgs),
+    /// Run a WASM transform component over a project's stored transfers.
+    Transform(TransformArgs),
+}
+
+#[derive(Args)]
+pub struct TransformArgs {
+    /// Path to the transform component (.wasm, wasm32-wasip2).
+    pub component: String,
+
+    /// Project directory (must contain a nuthatch.redb with indexed transfers).
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+
+    /// How many of the most-recent transfers to feed the transform.
+    #[arg(long, default_value_t = 5_000)]
+    pub limit: usize,
 }
 
 #[derive(Args)]

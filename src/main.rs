@@ -20,6 +20,7 @@ mod rpc;
 mod seal;
 mod serve;
 mod store;
+mod transform;
 mod views;
 
 use anyhow::Result;
@@ -38,5 +39,26 @@ async fn main() -> Result<()> {
     match cli::Cli::parse().command {
         cli::Command::Init(args) => project::init(args).await,
         cli::Command::Dev(args) => indexer::dev(args).await,
+        cli::Command::Transform(args) => run_transform(args),
     }
+}
+
+/// `nuthatch transform` — run a WASM transform component over a project's stored transfers.
+fn run_transform(args: cli::TransformArgs) -> Result<()> {
+    use std::path::{Path, PathBuf};
+    let dir = PathBuf::from(&args.dir);
+    let store = store::Store::open(&dir.join(config::DB_FILE))?;
+    let entities = store.recent(args.limit)?;
+    println!("→ running {} over {} transfers…", args.component, entities.len());
+
+    let input = transform::transfers_to_ipc(&entities)?;
+    let runtime = transform::TransformRuntime::load(Path::new(&args.component))?;
+    let output = runtime.run(&input)?;
+    let facts = transform::ipc_to_json(&output)?;
+
+    println!("✓ {} facts out (pure, deterministic, sandboxed)", facts.len());
+    for f in facts.iter().take(5) {
+        println!("    {f}");
+    }
+    Ok(())
 }

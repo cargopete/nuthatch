@@ -19,8 +19,9 @@ This is the thinnest end-to-end path that actually runs — deliberately minimal
 | Deterministic ERC-20 `Transfer` decode | WASM transform runtime, Arrow WIT (slice 4) |
 | Reorg self-healing (hot-store rollback) | MCP server + `llms.txt` + skills (slice 5) |
 | Finality-gated Parquet sealing (content-addressed) | DBSP declarative views / IVM (slice 3) |
-| Read-only analytical SQL (DuckDB) over sealed segments | WASM transform runtime, Arrow WIT (slice 4) |
+| Read-only analytical SQL (DuckDB) over sealed segments | MCP server + `llms.txt` + skills (slice 5) |
 | **IVM balance view (DBSP) — reorg = retraction** | reth ExEx tip mode, scaled Postgres mode (slice 6) |
+| **WASM transform runtime (pure, sandboxed, batched Arrow)** | effectful transform worlds + pipeline manifests (later) |
 | redb hot store, point-reads with cold fallback | |
 | HTTP API (`/`, `/entities`, `/entity/{id}`) | reth ExEx tip mode, scaled Postgres mode (slice 6) |
 
@@ -70,6 +71,17 @@ Transfers into an embedded `nuthatch.redb`, and serves the API on `127.0.0.1:828
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-14 — Slice 4 (first cut): WASM transform runtime.** Ported from
+  [liminal](https://github.com/lodestar-team/liminal) with the brief's key change — **the WIT call
+  boundary is a whole batch (Arrow IPC), not one event** (liminal was per-event; that can't keep up
+  with backfill). A transform is a `wasm32-wasip2` component exporting `nuthatch:transform/stage`;
+  the host (wasmtime 44) loads it with **zero capabilities** — base WASI only, no http/kv/filesystem
+  — so it's deterministic by construction and its purity is checkable from the component's imports
+  alone (`wasm-tools component wit`), no code inspection. Ships a pure example component
+  (`large-transfers`: keeps transfers ≥ 1,000 USDC) and a `nuthatch transform <component.wasm>` CLI.
+  Verified: 16 tests green incl. an end-to-end host-loads-real-wasm test; live run fed 2,470 USDC
+  transfers → 525 filtered facts, deterministic. _Deferred: effectful worlds (http/kv-granted,
+  annotations-only), wiring transforms as a live indexing stage, and signed pipeline manifests._
 - **2026-07-14 — Slice 3: DBSP declarative views (the IVM core).** The first derived entity —
   per-address token balances — is now a **declarative incremental view**, not a hand-rolled handler.
   Balance is stated as Σ(in) − Σ(out) and maintained by a DBSP circuit: a new transfer is a +1 delta,
@@ -108,7 +120,7 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   redb hot store → axum HTTP API. Verified alive against live mainnet USDC, keyless: 170+ transfers
   indexed in ~1.5s with correct decimal values. Scope: one chain, Transfer-only, RPC-poll, redb-only.
 
-_Next: Slice 4 — WASM transform runtime (ported from liminal) with batched Arrow WIT interfaces._
+_Next: Slice 5 — MCP server compiled into the binary (schema discovery, SQL, entity lookup, subscribe) + `llms.txt` + scaffolded `.claude/skills/`._
 
 ## Licence
 

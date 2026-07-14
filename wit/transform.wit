@@ -1,0 +1,31 @@
+package nuthatch:transform@0.1.0;
+
+// ---------------------------------------------------------------------------
+// The transform stage interface.
+//
+// Ported from liminal's universal `node`, with the one change the standing brief
+// demands: the call boundary is a whole BATCH, not one event. `batch` and the
+// returned payload are Arrow IPC streams (a RecordBatch serialized with the
+// Arrow stream format) — never one event per call. This is what lets a transform
+// keep up with backfill (≥10K events/sec); a per-event component call cannot.
+// Arrow is the interchange format on both sides; we invent no bespoke wire type.
+// ---------------------------------------------------------------------------
+
+interface stage {
+    /// Transform a batch of facts into a derived batch.
+    ///
+    /// - batch  : an Arrow IPC stream (one RecordBatch) of input rows.
+    /// - ok(..) : an Arrow IPC stream of output rows (may be empty/filtered/reshaped).
+    /// - err(s) : a recoverable error for this batch; the host logs it and moves on.
+    run: func(batch: list<u8>) -> result<list<u8>, string>;
+}
+
+/// A PURE transform: exports `stage`, imports nothing but base WASI (stderr for
+/// logging). Zero granted capabilities → deterministic by construction → its
+/// output MAY feed canonical entity derivation. Effectful worlds (that import
+/// host capabilities like wasi:http and may only produce annotations, never
+/// canonical entities) arrive in a later slice — the capability boundary is
+/// checkable from the world's imports alone, no code inspection.
+world pure-transform {
+    export stage;
+}
