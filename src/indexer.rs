@@ -9,13 +9,19 @@ use crate::cli::DevArgs;
 use crate::config::{Config, DB_FILE};
 use crate::decode::{self, TRANSFER_TOPIC0};
 use crate::rpc::RpcClient;
+use crate::seal;
 use crate::serve;
 use crate::store::Store;
 
 /// Block window per `eth_getLogs` call. Kept small so high-volume contracts (e.g. USDC, ~thousands
 /// of Transfers per handful of blocks) stay under public-RPC result-size caps.
 const WINDOW: u64 = 20;
+/// Blocks behind the tip a block must be before we treat it as final and seal it. A conservative
+/// proxy for Ethereum finality (~2 epochs); real finality signals come with the ExEx mode.
+const FINALITY_DEPTH: u64 = 64;
 const LAST_BLOCK_KEY: &str = "last_block";
+const SEALED_THROUGH_KEY: &str = "sealed_through";
+const START_BLOCK_KEY: &str = "start_block";
 
 pub async fn dev(args: DevArgs) -> Result<()> {
     let dir = PathBuf::from(&args.dir);
@@ -35,6 +41,7 @@ pub async fn dev(args: DevArgs) -> Result<()> {
         store.clone(),
         config.address.clone(),
         args.backfill,
+        dir.clone(),
     ));
 
     let app_state = serve::AppState {
@@ -48,13 +55,20 @@ pub async fn dev(args: DevArgs) -> Result<()> {
     Ok(())
 }
 
-async fn index_loop(rpc: Arc<RpcClient>, store: Store, address: String, backfill: u64) -> Result<()> {
+async fn index_loop(
+    rpc: Arc<RpcClient>,
+    store: Store,
+    address: String,
+    backfill: u64,
+    dir: PathBuf,
+) -> Result<()> {
     // Resume from the last committed block, else start `backfill` blocks behind the tip.
     let mut next = match store.get_meta(LAST_BLOCK_KEY)? {
         Some(v) => v.parse::<u64>().context("corrupt last_block")? + 1,
         None => {
             let tip = rpc.block_number().await?;
             let start = tip.saturating_sub(backfill);
+            store.set_meta(START_BLOCK_KEY, &start.to_string())?;
             tracing::info!("cold start: backfilling from block {start} (tip {tip})");
             start
         }
@@ -114,6 +128,11 @@ async fn index_loop(rpc: Arc<RpcClient>, store: Store, address: String, backfill
                     tracing::info!("blocks {next}..={to}: +{stored} transfers (total {})", store.count()?);
                 }
                 next = to + 1;
+
+                // Seal any newly-finalized range to an immutable Parquet segment.
+                if let Err(e) = maybe_seal(&dir, &store, tip) {
+                    tracing::warn!("sealing failed: {e:#}");
+                }
             }
             Err(e) => {
                 tracing::warn!("get_logs {next}..={to} failed: {e:#}; retrying");
@@ -148,6 +167,44 @@ async fn detect_reorg(rpc: &RpcClient, store: &Store, last: u64) -> Result<Optio
         }
     }
     Ok(Some(0))
+}
+
+/// Seal every indexed block that has passed finality but isn't sealed yet, advancing the
+/// `sealed_through` watermark. The hot store is deliberately NOT pruned here (that lands with the
+/// DuckDB serving path), so point-reads keep working against redb meanwhile.
+fn maybe_seal(dir: &std::path::Path, store: &Store, tip: u64) -> Result<()> {
+    if tip < FINALITY_DEPTH {
+        return Ok(());
+    }
+    let finalized_through = tip - FINALITY_DEPTH;
+    let last_indexed = match store.get_meta(LAST_BLOCK_KEY)? {
+        Some(v) => v.parse::<u64>().context("corrupt last_block")?,
+        None => return Ok(()),
+    };
+    let ceiling = finalized_through.min(last_indexed);
+
+    let from = match store.get_meta(SEALED_THROUGH_KEY)? {
+        Some(v) => v.parse::<u64>().context("corrupt sealed_through")? + 1,
+        None => store
+            .get_meta(START_BLOCK_KEY)?
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0),
+    };
+    if ceiling < from {
+        return Ok(()); // nothing new has finalized
+    }
+
+    let entities = store.entities_in_range(from, ceiling)?;
+    match seal::seal_range(dir, &entities, from, ceiling)? {
+        Some(seg) => tracing::info!(
+            "sealed segment {}… blocks {from}..={ceiling} ({} rows)",
+            &seg.hash[..12],
+            seg.rows
+        ),
+        None => tracing::debug!("blocks {from}..={ceiling} finalized with no transfers; watermark advanced"),
+    }
+    store.set_meta(SEALED_THROUGH_KEY, &ceiling.to_string())?;
+    Ok(())
 }
 
 async fn sleep_secs(s: u64) {

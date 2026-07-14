@@ -16,6 +16,7 @@ mod decode;
 mod indexer;
 mod project;
 mod rpc;
+mod seal;
 mod serve;
 mod store;
 

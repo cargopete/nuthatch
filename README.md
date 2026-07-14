@@ -18,7 +18,8 @@ This is the thinnest end-to-end path that actually runs — deliberately minimal
 | RPC log polling with round-robin failover | DBSP declarative views / IVM (slice 3) |
 | Deterministic ERC-20 `Transfer` decode | WASM transform runtime, Arrow WIT (slice 4) |
 | Reorg self-healing (hot-store rollback) | MCP server + `llms.txt` + skills (slice 5) |
-| redb hot store, entity point-reads | DuckDB read-only analytical SQL (slice 2, next) |
+| Finality-gated Parquet sealing (content-addressed) | DuckDB read-only analytical SQL (slice 2, next) |
+| redb hot store, entity point-reads | reth ExEx tip mode, scaled Postgres mode (slice 6) |
 | HTTP API (`/`, `/entities`, `/entity/{id}`) | reth ExEx tip mode, scaled Postgres mode (slice 6) |
 
 Scope of the skeleton: **one chain (Ethereum), Transfer events only, RPC polling, redb-only.**
@@ -65,6 +66,13 @@ Transfers into an embedded `nuthatch.redb`, and serves the API on `127.0.0.1:828
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-14 — Slice 2 (in progress): Parquet sealing.** Once a block range passes finality
+  (a conservative 64-block depth for now), its entities are sealed to an immutable, content-addressed
+  (sha256) Snappy Parquet segment under `segments/`, catalogued in `manifest.json` with block bounds
+  and row count; a monotonic `sealed_through` watermark advances so each block seals exactly once. The
+  hot store is deliberately *not* pruned yet — point-reads keep hitting redb until the DuckDB serving
+  path lands. Verified live: sealed a 2,355-row segment for finalized mainnet USDC; round-trips through
+  Arrow in tests (10 tests green). The append-only cold layer never sees a reorg, by construction.
 - **2026-07-14 — Slice 2 (in progress): reorg safety.** Block-hash checkpoints + `rollback_to`
   in the hot store; the indexer detects when its last committed block falls off the canonical
   chain and rolls back to the deepest surviving checkpoint. Reorgs land *only* in the mutable hot
@@ -79,7 +87,7 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   redb hot store → axum HTTP API. Verified alive against live mainnet USDC, keyless: 170+ transfers
   indexed in ~1.5s with correct decimal values. Scope: one chain, Transfer-only, RPC-poll, redb-only.
 
-_Next: finish Slice 2 — Parquet sealing past finality + DuckDB read-only analytical SQL._
+_Next: finish Slice 2 — DuckDB read-only analytical SQL over sealed segments, then prune the hot store._
 
 ## Licence
 

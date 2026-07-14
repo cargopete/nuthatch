@@ -77,6 +77,21 @@ impl Store {
         Ok(out)
     }
 
+    /// Entity JSON values whose block falls in `[from, to]`, chain-ordered. Used by sealing to
+    /// gather a finalized block range for a Parquet segment.
+    pub fn entities_in_range(&self, from: u64, to: u64) -> Result<Vec<String>> {
+        let lo = format!("{from:012}-000000");
+        let hi = format!("{to:012}-999999");
+        let rtx = self.db.begin_read()?;
+        let t = rtx.open_table(ENTITIES)?;
+        let mut out = Vec::new();
+        for row in t.range(lo.as_str()..=hi.as_str())? {
+            let (_k, v) = row?;
+            out.push(v.value().to_string());
+        }
+        Ok(out)
+    }
+
     pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(META)?;
