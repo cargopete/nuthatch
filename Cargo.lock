@@ -3434,6 +3434,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "arrow 56.2.1",
+ "async-trait",
  "axum",
  "clap",
  "dbsp",

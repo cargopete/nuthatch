@@ -20,9 +20,10 @@ This is the thinnest end-to-end path that actually runs — deliberately minimal
 | Reorg self-healing (hot-store rollback) | MCP server + `llms.txt` + skills (slice 5) |
 | Finality-gated Parquet sealing (content-addressed) | DBSP declarative views / IVM (slice 3) |
 | Read-only analytical SQL (DuckDB) over sealed segments | MCP server + `llms.txt` + skills (slice 5) |
-| **IVM balance view (DBSP) — reorg = retraction** | reth ExEx tip mode, scaled Postgres mode (slice 6) |
+| **IVM balance view (DBSP) — reorg = retraction** | scaled Postgres/DataFusion mode (HotStore trait) |
 | **WASM transform runtime (pure, sandboxed, batched Arrow)** | effectful transform worlds + pipeline manifests (later) |
 | **MCP server (stdio, 6 tools, offline) + `llms.txt` + skills scaffold** | governed semantic layer + NL queries (later) |
+| **Ingestion behind a `Source` trait — RPC live; reth ExEx designed + stubbed** | reth ExEx wired to a node (needs a synced node) |
 | redb hot store, point-reads with cold fallback | |
 | HTTP API (`/`, `/entities`, `/entity/{id}`) | reth ExEx tip mode, scaled Postgres mode (slice 6) |
 
@@ -83,6 +84,16 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-14 — Slice 6 (first half): ingestion behind a `Source` trait.** Decode, hot store,
+  sealing, IVM, and serving are now oblivious to where blocks come from — the indexer sees only
+  `Arc<dyn Source>` (`tip` / `block_hash` / `logs`). `RpcSource` is the working impl (RPC polling, no
+  node). `ExExSource` (feature = "exex") is the "no third-party" sovereignty upgrade — native-block-
+  time tip latency from a colocated reth node — **designed and stubbed** with the push→pull bridge
+  (reth's `CanonStateNotification` push → the loop's pull) implemented and tested; the reth wiring
+  itself is deferred to a node environment (reth is an enormous compile that needs a synced node).
+  See [`docs/exex-design.md`](docs/exex-design.md). No `#[cfg]` forks of business logic — adding ExEx
+  is one new impl. Verified: 18 default tests + the exex stub's bridge test green; live indexing still
+  works through the trait. _Deferred: reth wiring; scaled Postgres mode (a `HotStore` trait, same pattern)._
 - **2026-07-14 — Slice 5: MCP server + AI surface.** `nuthatch mcp` speaks the Model Context
   Protocol over stdio (newline-delimited JSON-RPC), so a coding agent can query a running index
   directly. Six tools — `status`, `schema`, `sql`, `entity`, `balance`, `top_balances` — not a thin
@@ -142,7 +153,7 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   redb hot store → axum HTTP API. Verified alive against live mainnet USDC, keyless: 170+ transfers
   indexed in ~1.5s with correct decimal values. Scope: one chain, Transfer-only, RPC-poll, redb-only.
 
-_Next: Slice 6 — reth ExEx tip-ingestion mode (colocated, the "no third-party" upgrade), then scaled Postgres/DataFusion mode._
+_Next: consolidation — a `HotStore` trait for scaled Postgres mode, CI (test + RAM-budget gate), and closing known gaps (IVM restart-replay, i128 balances). reth ExEx wiring lands in a node environment._
 
 ## Licence
 

@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -31,6 +32,11 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
+
+[features]
+# ExEx tip-ingestion source (colocated reth). Stubbed today — see docs/exex-design.md — so the
+# default build never pulls the (enormous) reth dependency.
+exex = []
 
 [dev-dependencies]
 proptest = "1"

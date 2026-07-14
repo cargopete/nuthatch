@@ -20,6 +20,7 @@ mod project;
 mod rpc;
 mod seal;
 mod serve;
+mod source;
 mod store;
 mod transform;
 mod views;
