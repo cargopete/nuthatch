@@ -66,7 +66,7 @@ impl Store {
     pub fn recent(&self, limit: usize) -> Result<Vec<String>> {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(ENTITIES)?;
-        let mut out = Vec::with_capacity(limit);
+        let mut out = Vec::with_capacity(limit.min(1024));
         for row in t.iter()?.rev() {
             let (_k, v) = row?;
             out.push(v.value().to_string());
@@ -81,7 +81,9 @@ impl Store {
     pub fn recent_by_table(&self, table: &str, limit: usize) -> Result<Vec<String>> {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(ENTITIES)?;
-        let mut out = Vec::with_capacity(limit);
+        // Cap the pre-allocation: `limit` may be usize::MAX (rebuild wants "all rows"); the Vec
+        // still grows as needed, we just don't reserve an absurd capacity up front.
+        let mut out = Vec::with_capacity(limit.min(1024));
         for row in t.iter()?.rev() {
             let (_k, v) = row?;
             let s = v.value();

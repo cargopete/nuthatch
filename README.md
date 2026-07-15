@@ -23,10 +23,11 @@ remains is the scaled (Postgres / DataFusion) mode and wiring reth ExEx to a nod
 | RPC log polling with round-robin failover, behind a `Source` trait | scaled Postgres mode (`HotStore` trait) + DataFusion federation |
 | Deterministic decode of **every declared event of every contract** (topic0-keyed registry → one table per `{alias}__{event}`) | effectful transform worlds + signed pipeline manifests |
 | Reorg self-healing (block-hash checkpoints → hot-store rollback) | governed semantic layer + natural-language queries |
-| Per-table finality-gated content-addressed Parquet sealing + hot-store pruning | IVM restart-replay (persist/rebuild balances across restarts) |
-| Read-only analytical SQL (DuckDB) — one view per table over sealed segments | i128 balances (the view accumulates in i64 base units today) |
-| `GET /tables` + `GET /table/{name}` (hot+cold merged) — the full data model | GraphQL compatibility layer |
-| IVM balance view (DBSP) — reorg = retraction | |
+| Per-table finality-gated content-addressed Parquet sealing + hot-store pruning | governed semantic layer + natural-language queries |
+| Read-only analytical SQL (DuckDB) — one view per table over sealed segments | GraphQL compatibility layer |
+| `GET /tables` + `GET /table/{name}` (hot+cold merged) — the full data model | |
+| IVM balance view (DBSP) — **i128** base units, reorg = retraction | |
+| IVM restart-replay — the view rebuilds from stored facts on restart | |
 | WASM transform runtime (pure, sandboxed, batched Arrow) | |
 | MCP server (stdio, 8 tools, offline) + `schema.json` + `llms.txt` + `.claude/skills` scaffold | |
 | redb hot store, entity point-reads with cold (DuckDB) fallback | |
@@ -96,6 +97,20 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-15 — Correctness gaps closed: i128 balances + IVM restart-replay.** Two teeth-baring
+  fixes to the balance view. **(1) i128 base units.** The view accumulated in i64, so any transfer
+  above ~9.2e18 base units — barely ~9.2 tokens of an 18-decimal token — was *silently dropped*. The
+  circuit, deltas, and storage now use i128 (max ~1.7e38); balances serialise as decimal strings
+  (JSON numbers can't carry i128, and a client parsing a huge balance as f64 would corrupt it). On
+  live WETH, **34 holders exceed i64::MAX** (top ~10,001 WETH = 1.0e22 base units) — every one of
+  them previously mis-counted. **(2) Restart-replay.** The view is derived, not persisted, so it's now
+  reconstructed from the durable facts on a warm restart, using the same circuit that maintains it
+  live: sealed (immutable) segments fold to one net-per-address row directly in DuckDB (`HUGEINT` =
+  i128 — no replaying millions of transfers), and only the small un-sealed hot tail is replayed. Both
+  paths verified live: a cold-only restart reproduced 791/791 holders exactly; a hot-only restart
+  replayed 840 transfers to reproduce 309/309. Transfer column names are read from the registry
+  (USDC `from/to/value`, WETH `src/dst/wad`), never hardcoded. 30 tests green (+3). _RFC-0008 P0 for
+  the compliance angle; both were the last known correctness gaps._
 - **2026-07-15 — RFC-0001 step 6: multi-contract footprint re-measure (RFC-0001 complete).** Measured
   the full embedded pipeline on a genuine three-contract nest — USDC + WETH + DAI, **23 tables** — with
   everything live at once: combined `eth_getLogs`, per-table decode, per-table Parquet sealing + hot

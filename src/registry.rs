@@ -238,6 +238,26 @@ impl EventDecoder {
             event,
         }
     }
+
+    /// If this decoder is ERC-20/721 `Transfer(address, address, uint)`-shaped, the (from, to, value)
+    /// column *names* — which vary by token (USDC: from/to/value; WETH: src/dst/wad). Mirrors
+    /// `DecodedRow::is_erc20_transfer` at the schema level so the balance-view rebuild reads the same
+    /// columns the live path feeds positionally.
+    pub fn transfer_columns(&self) -> Option<(&str, &str, &str)> {
+        if self.table.ends_with("__transfer")
+            && self.columns.len() == 3
+            && matches!(self.columns[0].kind, StorageKind::Address)
+            && matches!(self.columns[1].kind, StorageKind::Address)
+        {
+            Some((
+                &self.columns[0].name,
+                &self.columns[1].name,
+                &self.columns[2].name,
+            ))
+        } else {
+            None
+        }
+    }
 }
 
 /// One decoded log row.

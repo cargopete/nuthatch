@@ -219,11 +219,13 @@ async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl IntoR
 /// Top balances from the IVM view, descending. Balances are in i64 token base units.
 async fn balances(State(s): State<AppState>, Query(q): Query<EntitiesQuery>) -> impl IntoResponse {
     let limit = q.limit.unwrap_or(100).min(1000);
+    // Balances are i128 base units, serialised as decimal strings — JSON numbers can't carry i128
+    // losslessly, and a client parsing a huge balance as an f64 would silently corrupt it.
     let items: Vec<Value> = s
         .balances
         .top(limit)
         .into_iter()
-        .map(|(address, balance)| json!({ "address": address, "balance": balance }))
+        .map(|(address, balance)| json!({ "address": address, "balance": balance.to_string() }))
         .collect();
     Json(json!({ "holders": s.balances.holders(), "count": items.len(), "items": items }))
 }
@@ -232,7 +234,7 @@ async fn balances(State(s): State<AppState>, Query(q): Query<EntitiesQuery>) -> 
 async fn balance(State(s): State<AppState>, Path(address): Path<String>) -> impl IntoResponse {
     let address = address.to_ascii_lowercase();
     match s.balances.balance(&address) {
-        Some(b) => Json(json!({ "address": address, "balance": b })).into_response(),
+        Some(b) => Json(json!({ "address": address, "balance": b.to_string() })).into_response(),
         None => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "no balance", "address": address })),

@@ -50,6 +50,39 @@ pub fn query(dir: &Path, sql: &str) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+/// Net balance per address for one sealed transfer table, summed as i128 (DuckDB HUGEINT). This is
+/// how the IVM view is re-seeded on restart: instead of replaying every sealed transfer through the
+/// circuit, we let DuckDB fold each immutable segment down to one (address, net) row. Addresses
+/// whose net is exactly zero are omitted (matching the view's drop-at-zero behaviour). `table` and
+/// the column names come from the registry (`{alias}__transfer`; from/to/value column names vary by
+/// token — USDC from/to/value, WETH src/dst/wad), never user text, so there is no injection surface.
+pub fn net_balances(
+    dir: &Path,
+    table: &str,
+    from_col: &str,
+    to_col: &str,
+    value_col: &str,
+) -> Result<Vec<(String, i128)>> {
+    // `to` receives (+value), `from` sends (−value); TRY_CAST yields NULL (skipped) for the rare
+    // value that overflows i128, mirroring the caller's i128 parse-or-skip.
+    let sql = format!(
+        "SELECT addr, SUM(d)::VARCHAR AS net FROM (\
+           SELECT \"{to_col}\" AS addr, TRY_CAST(\"{value_col}\" AS HUGEINT) AS d FROM \"{table}\" \
+           UNION ALL \
+           SELECT \"{from_col}\" AS addr, -TRY_CAST(\"{value_col}\" AS HUGEINT) AS d FROM \"{table}\"\
+         ) GROUP BY addr HAVING SUM(d) <> 0"
+    );
+    let mut out = Vec::new();
+    for r in query(dir, &sql)? {
+        if let (Some(addr), Some(net)) = (r["addr"].as_str(), r["net"].as_str()) {
+            if let Ok(n) = net.parse::<i128>() {
+                out.push((addr.to_string(), n));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Point-read fallback: fetch a single sealed transfer by (block, log_index). Used when the hot
 /// store has already pruned it. Integers are interpolated (not user text), so no injection surface.
 pub fn get_row(dir: &Path, block: u64, log_index: u64) -> Result<Option<Value>> {
@@ -140,5 +173,30 @@ mod tests {
         assert_eq!(one["to"], Value::from("0xc"));
         let appr = get_row(dir.path(), 10, 2).unwrap().unwrap();
         assert_eq!(appr["spender"], Value::from("0xd"));
+    }
+
+    #[test]
+    fn net_balances_sum_per_address_as_i128() {
+        let dir = tempfile::tempdir().unwrap();
+        // 1e20 base units > i64::MAX (~9.2e18): the value that an i64 accumulator would have dropped.
+        let big = "100000000000000000000";
+        let entities = vec![
+            format!(
+                r#"{{"table":"t__transfer","from":"0x0","to":"0xa","value":"{big}","block_number":1,"tx_hash":"0xt","log_index":0}}"#
+            ),
+            r#"{"table":"t__transfer","from":"0xa","to":"0xb","value":"30","block_number":1,"tx_hash":"0xt","log_index":1}"#.to_string(),
+        ];
+        crate::seal::seal_range(dir.path(), &entities, 1, 1).unwrap();
+
+        let map: std::collections::HashMap<String, i128> =
+            net_balances(dir.path(), "t__transfer", "from", "to", "value")
+                .unwrap()
+                .into_iter()
+                .collect();
+        let big: i128 = big.parse().unwrap();
+        assert_eq!(map["0x0"], -big); // minted out
+        assert_eq!(map["0xa"], big - 30); // received big, sent 30
+        assert_eq!(map["0xb"], 30);
+        assert!(!map.contains_key("nobody"));
     }
 }

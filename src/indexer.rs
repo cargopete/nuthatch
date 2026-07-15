@@ -37,6 +37,14 @@ pub async fn dev(args: DevArgs) -> Result<()> {
     let source: Arc<dyn Source> = Arc::new(RpcClient::new(config.nest.rpc_urls.clone())?);
     let balances = BalanceView::start()?;
 
+    // Warm restart: the balance view is derived, not persisted, so rebuild it from stored facts
+    // before serving or ingesting. On a cold start there is nothing stored and this is a no-op.
+    if store.get_meta(LAST_BLOCK_KEY)?.is_some() {
+        if let Err(e) = rebuild_balances(&dir, &store, &registry, &balances) {
+            tracing::warn!("balance view rebuild failed (will re-derive as it indexes): {e:#}");
+        }
+    }
+
     // The combined `eth_getLogs` filter: all contract addresses, matching any registered topic0.
     let addresses: Vec<String> = registry
         .addresses()
@@ -167,7 +175,7 @@ async fn index_loop(
                     let key = Store::entity_key(row.block_number, row.log_index);
                     // Feed the IVM balance view for transfer rows (extracted before storing).
                     if let Some((from, to_addr, value, _hex)) = row.erc20_transfer_fields() {
-                        if let Some(v) = value.as_deref().and_then(|s| s.parse::<i64>().ok()) {
+                        if let Some(v) = value.as_deref().and_then(|s| s.parse::<i128>().ok()) {
                             deltas.extend(views::transfer_deltas(&from, &to_addr, v, 1));
                         }
                     }
@@ -280,9 +288,7 @@ fn maybe_seal(dir: &std::path::Path, store: &Store, tip: u64) -> Result<()> {
 }
 
 /// Build a weight −1 retraction batch from stored transfer JSON (used on reorg rollback).
-fn retraction_batch(
-    entity_json: &[String],
-) -> Vec<dbsp::utils::Tup2<dbsp::utils::Tup2<String, i64>, i64>> {
+fn retraction_batch(entity_json: &[String]) -> views::WeightedBatch {
     let mut batch = Vec::new();
     for j in entity_json {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(j) else {
@@ -300,11 +306,85 @@ fn retraction_batch(
         let (Some(from), Some(to)) = (v["from"].as_str(), v["to"].as_str()) else {
             continue;
         };
-        if let Some(val) = v["value"].as_str().and_then(|s| s.parse::<i64>().ok()) {
+        if let Some(val) = v["value"].as_str().and_then(|s| s.parse::<i128>().ok()) {
             batch.extend(views::transfer_deltas(from, to, val, -1));
         }
     }
     batch
+}
+
+/// Rebuild the in-memory IVM balance view from stored facts on a warm restart. The view is derived
+/// state, not durable state — so rather than persist it (and risk drift from the canonical store),
+/// we reconstruct it from the facts that *are* durable, using the same circuit that maintains it
+/// live. Cold (sealed, immutable) segments are folded to one net-per-address row directly in DuckDB
+/// — no need to replay millions of transfers — and only the small un-sealed hot tail is replayed
+/// transfer-by-transfer. Hot and cold are disjoint (sealed rows are pruned from hot), so nothing is
+/// double-counted; the result is identical to a view grown from genesis.
+fn rebuild_balances(
+    dir: &std::path::Path,
+    store: &Store,
+    registry: &DecodeRegistry,
+    balances: &BalanceView,
+) -> Result<()> {
+    // Each transfer table with its (from, to, value) column names — which vary by token (USDC:
+    // from/to/value; WETH: src/dst/wad), so we read them from the registry, never hardcode them.
+    let transfer_tables: Vec<(String, String, String, String)> = registry
+        .tables()
+        .iter()
+        .filter_map(|d| {
+            d.transfer_columns()
+                .map(|(f, t, v)| (d.table.clone(), f.to_string(), t.to_string(), v.to_string()))
+        })
+        .collect();
+    if transfer_tables.is_empty() {
+        return Ok(());
+    }
+
+    let mut batch: views::WeightedBatch = Vec::new();
+
+    // Cold seed: net balance per address, summed in DuckDB (HUGEINT = i128). A table with no sealed
+    // segment yet has no view — that just means it has nothing cold to seed, so skip on error.
+    let mut cold_addrs = 0usize;
+    for (table, from_col, to_col, val_col) in &transfer_tables {
+        match crate::analytics::net_balances(dir, table, from_col, to_col, val_col) {
+            Ok(nets) => {
+                cold_addrs += nets.len();
+                for (addr, net) in nets {
+                    batch.push(views::seed_delta(addr, net));
+                }
+            }
+            Err(e) => tracing::debug!("no cold seed for {table}: {e:#}"),
+        }
+    }
+
+    // Hot replay: the un-sealed tip transfers, fed through the circuit exactly as the live loop does.
+    let mut hot = 0usize;
+    for (table, from_col, to_col, val_col) in &transfer_tables {
+        for raw in store.recent_by_table(table, usize::MAX).unwrap_or_default() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
+            if let (Some(from), Some(to), Some(val)) = (
+                v[from_col].as_str(),
+                v[to_col].as_str(),
+                v[val_col].as_str().and_then(|s| s.parse::<i128>().ok()),
+            ) {
+                batch.extend(views::transfer_deltas(from, to, val, 1));
+                hot += 1;
+            }
+        }
+    }
+
+    if batch.is_empty() {
+        return Ok(());
+    }
+    balances.apply(batch);
+    balances.flush();
+    tracing::info!(
+        "rebuilt balance view: {} holders ({cold_addrs} cold-seeded net(s) + {hot} hot transfer(s) replayed)",
+        balances.holders()
+    );
+    Ok(())
 }
 
 async fn sleep_secs(s: u64) {

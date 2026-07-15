@@ -85,9 +85,9 @@ pub fn tool_specs() -> Value {
           "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "A SELECT or WITH query." } }, "required": ["query"] } },
         { "name": "entity", "description": "Look up one transfer by its id, formatted `{block:012}-{logindex:06}`.",
           "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } },
-        { "name": "balance", "description": "Derived token balance for an address (IVM view, i64 base units).",
+        { "name": "balance", "description": "Derived token balance for an address (IVM view; i128 base units, returned as a decimal string).",
           "inputSchema": { "type": "object", "properties": { "address": { "type": "string" } }, "required": ["address"] } },
-        { "name": "top_balances", "description": "Top holder balances, descending (IVM view).",
+        { "name": "top_balances", "description": "Top holder balances, descending (IVM view; i128 base units as decimal strings).",
           "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 20 } } } }
     ])
 }
@@ -163,8 +163,9 @@ TABLES (one per contract event; id = "{block:012}-{logindex:06}")
   event's decoded params. Discover the exact tables/columns from `GET /` and the nest's schema.
 
 VIEWS (incrementally maintained)
-  balances — per-address net balance = Σ(received) − Σ(sent), in i64 base units, for ERC-20
-             Transfer tables. Query via `balance`/`top_balances`. Reorgs retract automatically.
+  balances — per-address net balance = Σ(received) − Σ(sent), in i128 base units (returned as
+             decimal strings), for ERC-20 Transfer tables. Query via `balance`/`top_balances`.
+             Reorgs retract automatically. Rebuilt from stored facts on restart.
 
 SQL (tool `sql`, read-only, over FINALIZED data)
   Each sealed table is a DuckDB view of the same name (quote it). Examples:
