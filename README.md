@@ -23,7 +23,7 @@ remains is the scaled (Postgres / DataFusion) mode and wiring reth ExEx to a nod
 | RPC log polling with round-robin failover, behind a `Source` trait | scaled Postgres mode (`HotStore` trait) + DataFusion federation |
 | Deterministic decode of **every declared event of every contract** (topic0-keyed registry → one table per `{alias}__{event}`) | effectful transform worlds + signed pipeline manifests |
 | Reorg self-healing (block-hash checkpoints → hot-store rollback) | governed semantic layer + natural-language queries |
-| Per-table finality-gated content-addressed Parquet sealing + hot-store pruning | governed semantic layer + natural-language queries |
+| Per-table finality-gated content-addressed Parquet sealing + hot-store pruning | IVM generalisation (derived views are DuckDB SQL over sealed data today) |
 | Read-only analytical SQL (DuckDB) — one view per table over sealed segments | GraphQL compatibility layer |
 | `GET /tables` + `GET /table/{name}` (hot+cold merged) — the full data model | |
 | IVM balance view (DBSP) — **i128** base units, reorg = retraction | |
@@ -109,6 +109,15 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   of disappearing. Verified live: the full Horizon model (`allocations`, `indexers`, `global`,
   time-bucketed rollups) computes on real Arbitrum data — 390 active allocations, 5 indexers, 70,030
   GRT indexing rewards — with the empty `operators`/`delegations` views present, not fatal. 44 tests.
+- **2026-07-15 — RFC-0002 step 5: `nuthatch check` (invariant/parity framework).** A nest ships
+  `checks/*.sql` — each a read-only query over its sealed data (per-event tables + derived views) —
+  and `nuthatch check [name]` runs them, comparing each result to a recorded expected fixture
+  (`checks/expected/<name>.json`), printing a row-level diff on mismatch and exiting non-zero. For the
+  Horizon nest those fixtures are the deployed subgraph's answers at a pinned block, so this *is* the
+  parity check; the framework is generic (any nest can ship invariants). Hermetic by design — it
+  compares committed fixtures, not a live endpoint, so it runs in CI with no network. `--update`
+  re-records fixtures from current results (authoring). Verified live: recorded 5-row fixtures on USDC,
+  a matching run passed (exit 0), a tampered fixture failed with a clear diff (exit 1). 43 tests.
 - **2026-07-15 — RFC-0002 step 4a: nest-defined derived-entity views.** A nest can ship
   `views/*.sql` — DuckDB views over its per-event tables (e.g. fold Created/Resized/Closed into a
   current-allocation view) — and the analytical `/sql` surface now loads them, in sorted filename

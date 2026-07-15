@@ -11,6 +11,7 @@
 mod abi;
 mod analytics;
 mod chains;
+mod check;
 mod cli;
 mod config;
 mod indexer;
@@ -43,6 +44,7 @@ async fn main() -> Result<()> {
         cli::Command::Dev(args) => indexer::dev(args).await,
         cli::Command::Transform(args) => run_transform(args),
         cli::Command::Mcp(args) => mcp::serve(args.url).await,
+        cli::Command::Check(args) => check::check(args),
     }
 }
 
