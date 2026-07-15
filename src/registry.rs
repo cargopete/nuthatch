@@ -182,22 +182,32 @@ pub struct ColumnSchema {
     pub indexed: bool,
 }
 
-/// The implicit columns every table carries (before the event's own params).
+/// The implicit columns every table carries (before the event's own params). `_seq` is a single
+/// monotonic per-row ordering key, derived deterministically from (block, log_index) — not a mutable
+/// insertion counter, so it stays re-executable and reorg-stable per the determinism rule.
 fn implicit_columns() -> Vec<ColumnSchema> {
-    ["block_number", "log_index", "tx_hash", "address"]
-        .iter()
-        .map(|n| ColumnSchema {
-            name: (*n).to_string(),
-            sol_type: "implicit".to_string(),
-            storage: match *n {
-                "block_number" | "log_index" => "u64",
-                "address" => "address",
-                _ => "string",
-            }
-            .to_string(),
-            indexed: false,
-        })
-        .collect()
+    [
+        "block_number",
+        "block_hash",
+        "tx_hash",
+        "log_index",
+        "address",
+        "_seq",
+    ]
+    .iter()
+    .map(|n| ColumnSchema {
+        name: (*n).to_string(),
+        sol_type: "implicit".to_string(),
+        storage: match *n {
+            "block_number" | "log_index" | "_seq" => "u64",
+            "address" => "address",
+            "block_hash" | "tx_hash" => "bytes32",
+            _ => "string",
+        }
+        .to_string(),
+        indexed: false,
+    })
+    .collect()
 }
 
 /// Decodes one event of one contract into rows of one table.
@@ -217,15 +227,26 @@ impl EventDecoder {
             .inputs
             .iter()
             .enumerate()
-            .map(|(i, p)| Column {
-                name: if p.name.is_empty() {
+            .map(|(i, p)| {
+                let kind = StorageKind::from_sol(&p.ty, p.indexed);
+                let base = if p.name.is_empty() {
                     format!("arg{i}")
                 } else {
                     p.name.clone()
-                },
-                sol_type: p.ty.clone(),
-                kind: StorageKind::from_sol(&p.ty, p.indexed),
-                indexed: p.indexed,
+                };
+                // Indexed dynamic types (string/bytes/arrays) arrive as keccak(value), not the value
+                // (RFC-0001 §Design): suffix `_hash` so the column can't be mistaken for the value.
+                let name = if kind == StorageKind::Hash32 {
+                    format!("{base}_hash")
+                } else {
+                    base
+                };
+                Column {
+                    name,
+                    sol_type: p.ty.clone(),
+                    kind,
+                    indexed: p.indexed,
+                }
             })
             .collect();
         EventDecoder {
@@ -266,19 +287,29 @@ pub struct DecodedRow {
     pub table: String,
     pub params: Vec<(String, Value)>,
     pub block_number: u64,
+    pub block_hash: String,
     pub log_index: u64,
     pub tx_hash: String,
     pub address: String,
 }
 
 impl DecodedRow {
+    /// A single monotonic ordering key for this row within its table, derived deterministically from
+    /// (block, log_index): `block << 20 | log_index`. Deterministic (re-executable) by construction —
+    /// no mutable insertion counter — and total/stable since log_index is unique within a block.
+    pub fn seq(&self) -> u64 {
+        (self.block_number << 20) | (self.log_index & 0xF_FFFF)
+    }
+
     pub fn to_json(&self) -> Json {
         let mut obj = serde_json::Map::new();
         obj.insert("table".into(), json!(self.table));
         obj.insert("block_number".into(), json!(self.block_number));
-        obj.insert("log_index".into(), json!(self.log_index));
+        obj.insert("block_hash".into(), json!(self.block_hash));
         obj.insert("tx_hash".into(), json!(self.tx_hash));
+        obj.insert("log_index".into(), json!(self.log_index));
         obj.insert("address".into(), json!(self.address));
+        obj.insert("_seq".into(), json!(self.seq()));
         for (name, v) in &self.params {
             obj.insert(name.clone(), v.to_json());
         }
@@ -498,6 +529,7 @@ impl DecodeRegistry {
             table: dec.table.clone(),
             params,
             block_number: log.block_number,
+            block_hash: log.block_hash.clone(),
             log_index: log.log_index,
             tx_hash: log.tx_hash.clone(),
             address: format!("0x{}", hex::encode(emitter)),
@@ -643,6 +675,7 @@ mod tests {
             topics: topics.iter().map(|s| s.to_string()).collect(),
             data: data.into(),
             block_number: block,
+            block_hash: "0xbh".into(),
             tx_hash: "0xtx".into(),
             log_index: li,
         }
@@ -752,6 +785,97 @@ mod tests {
         // indexed dynamic → hash
         assert_eq!(StorageKind::from_sol("string", true), StorageKind::Hash32);
         assert_eq!(StorageKind::from_sol("uint256", true), StorageKind::Word32);
+    }
+
+    /// Golden: an address-heavy event with an indexed non-address type (Uniswap V3 `PoolCreated`):
+    /// three indexed params (two addresses + a uint24) and two in the data (int24 + address).
+    #[test]
+    fn decodes_address_heavy_pool_created() {
+        const FACTORY: &str = "0x1f98431c8ad98523631ae4a59f267346ea31f984";
+        const POOL_ABI: &str = r#"[
+            {"type":"event","name":"PoolCreated","inputs":[
+                {"name":"token0","type":"address","indexed":true},
+                {"name":"token1","type":"address","indexed":true},
+                {"name":"fee","type":"uint24","indexed":true},
+                {"name":"tickSpacing","type":"int24","indexed":false},
+                {"name":"pool","type":"address","indexed":false}],"anonymous":false}
+        ]"#;
+        let reg = DecodeRegistry::build(vec![spec("uni", FACTORY, POOL_ABI)]).unwrap();
+        let topic0 = format!("0x{}", hex::encode(reg.tables()[0].topic0));
+
+        let t0 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let t1 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let pool = "cccccccccccccccccccccccccccccccccccccccc";
+        let topic_addr = |a: &str| format!("0x000000000000000000000000{a}");
+        let fee = format!("0x{:064x}", 3000u64);
+        let data = format!("{:064x}000000000000000000000000{pool}", 60u64); // tickSpacing=60, pool
+        let l = log(
+            FACTORY,
+            &[&topic0, &topic_addr(t0), &topic_addr(t1), &fee],
+            &format!("0x{data}"),
+            100,
+            5,
+        );
+
+        let row = reg.decode(&l).unwrap().unwrap();
+        assert_eq!(row.table, "uni__pool_created");
+        assert_eq!(row.params[0].0, "token0");
+        assert_eq!(
+            row.params[0].1,
+            Value::Address(hex::decode(t0).unwrap().try_into().unwrap())
+        );
+        assert_eq!(row.params[2].0, "fee");
+        assert_eq!(row.params[2].1, Value::U64(3000)); // uint24 indexed → not hashed, fits u64
+        assert_eq!(row.params[3].0, "tickSpacing");
+        assert_eq!(row.params[3].1, Value::I64(60));
+        assert_eq!(
+            row.params[4].1,
+            Value::Address(hex::decode(pool).unwrap().try_into().unwrap())
+        );
+    }
+
+    /// Golden: an indexed dynamic type (`string indexed`) — the topic holds keccak(value), not the
+    /// value, so it's stored as a 32-byte hash under a `_hash`-suffixed column.
+    #[test]
+    fn decodes_indexed_string_as_hash() {
+        const C: &str = "0x2222222222222222222222222222222222222222";
+        const ABI: &str = r#"[
+            {"type":"event","name":"Named","inputs":[
+                {"name":"label","type":"string","indexed":true},
+                {"name":"amount","type":"uint256","indexed":false}],"anonymous":false}
+        ]"#;
+        let reg = DecodeRegistry::build(vec![spec("c", C, ABI)]).unwrap();
+        let dec = reg.tables()[0];
+        assert_eq!(dec.columns[0].name, "label_hash", "indexed dynamic → _hash");
+        assert_eq!(dec.columns[0].kind, StorageKind::Hash32);
+        let topic0 = format!("0x{}", hex::encode(dec.topic0));
+
+        let label_hash = "1234567890123456789012345678901234567890123456789012345678901234";
+        let l = log(
+            C,
+            &[&topic0, &format!("0x{label_hash}")],
+            &format!("0x{:064x}", 42u64),
+            7,
+            0,
+        );
+        let row = reg.decode(&l).unwrap().unwrap();
+        assert_eq!(row.params[0].0, "label_hash");
+        assert_eq!(
+            row.params[0].1,
+            Value::Hash32(hex::decode(label_hash).unwrap().try_into().unwrap())
+        );
+        assert_eq!(
+            row.params[1].1,
+            Value::Word32({
+                let mut b = [0u8; 32];
+                b[31] = 42;
+                b
+            })
+        );
+        // Serving JSON carries the implicit provenance columns.
+        let j = row.to_json();
+        assert_eq!(j["block_hash"], "0xbh");
+        assert_eq!(j["_seq"], json!(7u64 << 20));
     }
 
     #[test]

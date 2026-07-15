@@ -100,8 +100,14 @@ pub fn get_row(dir: &Path, block: u64, log_index: u64) -> Result<Option<Value>> 
 
 /// Expose each table's sealed segments as a read-only DuckDB view named after the table. Tables with
 /// no sealed segments yet simply have no view (they hold only unsealed tip data, served from hot).
+///
+/// Big-integer columns (uint/int > 64 bits) are stored as exact text (canonical form). For ergonomic
+/// SQL (RFC-0001 §2) each such column `c` gets two derived view columns: `c_dec` — the value as
+/// `DECIMAL(38,0)` when it fits, else NULL — and `c_overflow` — true when the exact value exceeds
+/// 38 digits (so `c_dec` is NULL but `c` isn't). Analytics can `SUM(c_dec)` without hand-casting.
 fn define_views(conn: &Connection, dir: &Path) -> Result<()> {
     let manifest = crate::seal::load_manifest(dir)?;
+    let bigints = bigint_columns(dir);
     let seg_dir = dir.join(crate::seal::SEGMENTS_DIR);
     for (table, segments) in &manifest.tables {
         if segments.is_empty() {
@@ -111,14 +117,60 @@ fn define_views(conn: &Connection, dir: &Path) -> Result<()> {
             .iter()
             .map(|s| format!("'{}'", seg_dir.join(&s.file).display()))
             .collect();
+        let mut derived = String::new();
+        for c in bigints.get(table).into_iter().flatten() {
+            derived.push_str(&format!(
+                ", TRY_CAST(\"{c}\" AS DECIMAL(38,0)) AS \"{c}_dec\", \
+                   (\"{c}\" IS NOT NULL AND TRY_CAST(\"{c}\" AS DECIMAL(38,0)) IS NULL) AS \"{c}_overflow\""
+            ));
+        }
         let ddl = format!(
-            "CREATE VIEW \"{table}\" AS SELECT * FROM read_parquet([{}])",
+            "CREATE VIEW \"{table}\" AS SELECT *{derived} FROM read_parquet([{}])",
             files.join(", ")
         );
         conn.execute_batch(&ddl)
             .with_context(|| format!("failed to define view {table}"))?;
     }
     Ok(())
+}
+
+/// Big-integer (uint/int > 64-bit) columns per table, read from the nest's `schema.json` (the decode
+/// registry's manifest). Absent or unparseable schema → no derived columns (graceful; plain views).
+fn bigint_columns(dir: &Path) -> std::collections::HashMap<String, Vec<String>> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(raw) = std::fs::read_to_string(dir.join("schema.json")) else {
+        return map;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+        return map;
+    };
+    for t in v
+        .get("tables")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(name) = t.get("table").and_then(Value::as_str) else {
+            continue;
+        };
+        let cols: Vec<String> = t
+            .get("columns")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|c| {
+                matches!(
+                    c.get("storage").and_then(Value::as_str),
+                    Some("word16") | Some("word32")
+                )
+            })
+            .filter_map(|c| c.get("name").and_then(Value::as_str).map(String::from))
+            .collect();
+        if !cols.is_empty() {
+            map.insert(name.to_string(), cols);
+        }
+    }
+    map
 }
 
 fn value_to_json(v: ValueRef<'_>) -> Value {
@@ -198,5 +250,75 @@ mod tests {
         assert_eq!(map["0xa"], big - 30); // received big, sent 30
         assert_eq!(map["0xb"], 30);
         assert!(!map.contains_key("nobody"));
+    }
+
+    /// RFC-0001 §2: a uint256 column gets a derived `_dec` DECIMAL(38) view column (value when it
+    /// fits in 38 digits, else NULL) and an `_overflow` flag — so ad-hoc SQL can aggregate big ints
+    /// without hand-casting.
+    #[test]
+    fn bigint_columns_get_decimal_and_overflow_views() {
+        let dir = tempfile::tempdir().unwrap();
+        // schema.json marks `value` as a word32 (uint256) column, driving the derived columns.
+        std::fs::write(
+            dir.path().join("schema.json"),
+            r#"{"registry_hash":"0x0","tables":[{"table":"t__transfer","alias":"t","event":"Transfer","topic0":"0x","columns":[{"name":"value","sol_type":"uint256","storage":"word32","indexed":false}]}]}"#,
+        )
+        .unwrap();
+        // One value that fits DECIMAL(38) (37 digits) and one that overflows it (a 39-digit u128).
+        let fits = "1000000000000000000000000000000000000"; // 1e36, 37 digits
+        let overflows = "340282366920938463463374607431768211455"; // u128::MAX, 39 digits > DECIMAL(38)
+        let entities = vec![
+            format!(
+                r#"{{"table":"t__transfer","from":"0xa","to":"0xb","value":"{fits}","block_number":1,"tx_hash":"0xt","log_index":0}}"#
+            ),
+            format!(
+                r#"{{"table":"t__transfer","from":"0xa","to":"0xb","value":"{overflows}","block_number":1,"tx_hash":"0xt","log_index":1}}"#
+            ),
+        ];
+        crate::seal::seal_range(dir.path(), &entities, 1, 1).unwrap();
+
+        let rows = query(
+            dir.path(),
+            r#"SELECT value_dec, value_overflow FROM "t__transfer" ORDER BY log_index"#,
+        )
+        .unwrap();
+        // Row 0 fits: value_dec present (HUGEINT/DECIMAL stringified), not overflow.
+        assert_eq!(rows[0]["value_dec"], Value::from(fits));
+        assert_eq!(rows[0]["value_overflow"], Value::from(false));
+        // Row 1 overflows DECIMAL(38): value_dec NULL, overflow flagged.
+        assert_eq!(rows[1]["value_dec"], Value::Null);
+        assert_eq!(rows[1]["value_overflow"], Value::from(true));
+
+        // And SUM(value_dec) works over the fitting rows without a manual cast.
+        let s = query(
+            dir.path(),
+            r#"SELECT SUM(value_dec)::VARCHAR AS s FROM "t__transfer""#,
+        )
+        .unwrap();
+        assert_eq!(s[0]["s"], Value::from(fits));
+    }
+
+    /// RFC-0001 acceptance: `/sql` can JOIN across two per-event tables.
+    #[test]
+    fn sql_joins_across_two_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let entities = vec![
+            r#"{"table":"usdc__transfer","from":"0xa","to":"0xb","value":"5","block_number":10,"tx_hash":"0xt","log_index":0}"#.to_string(),
+            r#"{"table":"usdc__transfer","from":"0xa","to":"0xc","value":"7","block_number":11,"tx_hash":"0xu","log_index":0}"#.to_string(),
+            r#"{"table":"usdc__approval","owner":"0xa","spender":"0xd","value":"9","block_number":10,"tx_hash":"0xt","log_index":1}"#.to_string(),
+        ];
+        crate::seal::seal_range(dir.path(), &entities, 10, 11).unwrap();
+
+        // Transfers that occurred in a block where an approval also happened (join on block_number).
+        let rows = query(
+            dir.path(),
+            r#"SELECT t.block_number AS b, t."to" AS recip, a.spender AS appr
+               FROM "usdc__transfer" t JOIN "usdc__approval" a USING (block_number)"#,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1); // only block 10 has both
+        assert_eq!(rows[0]["b"], Value::from(10u64));
+        assert_eq!(rows[0]["recip"], Value::from("0xb"));
+        assert_eq!(rows[0]["appr"], Value::from("0xd"));
     }
 }

@@ -97,6 +97,18 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-15 — RFC-0001 finished to the letter.** Closed the last deviations between the shipped
+  indexer and RFC-0001's design. **u256 SQL ergonomics (§2):** every big-integer column now gets two
+  derived DuckDB view columns — `{col}_dec` (the value as `DECIMAL(38,0)` when it fits, else NULL) and
+  `{col}_overflow` (true when the exact value exceeds 38 digits) — so analytics can `SUM(value_dec)`
+  without hand-casting text. **Implicit provenance columns (§2):** every table now carries `block_hash`
+  and `_seq` (a deterministic monotonic ordering key = `block << 20 | log_index`, not a mutable
+  counter — re-executable by construction) alongside the existing `block_number/tx_hash/log_index/
+  address`. **Indexed dynamic types** get a `_hash`-suffixed column name (the topic holds
+  `keccak(value)`, not the value). Added the acceptance tests the RFC named: golden decodes for an
+  address-heavy event (Uniswap V3 `PoolCreated`) and an indexed-string event, plus a cross-table
+  `/sql` JOIN. Verified live on USDC: `SUM(value_dec)` over 8,736 transfers, `block_hash`/`_seq`
+  present on every row. 34 tests green (+4). **RFC-0001 is now complete in spirit and letter.**
 - **2026-07-15 — Correctness gaps closed: i128 balances + IVM restart-replay.** Two teeth-baring
   fixes to the balance view. **(1) i128 base units.** The view accumulated in i64, so any transfer
   above ~9.2e18 base units — barely ~9.2 tokens of an 18-decimal token — was *silently dropped*. The

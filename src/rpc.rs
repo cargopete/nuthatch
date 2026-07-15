@@ -20,6 +20,7 @@ pub struct Log {
     pub topics: Vec<String>,
     pub data: String,
     pub block_number: u64,
+    pub block_hash: String,
     pub tx_hash: String,
     pub log_index: u64,
 }
@@ -149,6 +150,7 @@ fn parse_log(v: &Value) -> Result<Log> {
         topics,
         data: field_str(v, "data").unwrap_or_default(),
         block_number: parse_hex_u64(&field_str(v, "blockNumber")?)?,
+        block_hash: field_str(v, "blockHash").unwrap_or_default(),
         tx_hash: field_str(v, "transactionHash")?,
         log_index: parse_hex_u64(&field_str(v, "logIndex")?)?,
     })

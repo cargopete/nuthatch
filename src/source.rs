@@ -183,6 +183,7 @@ pub mod exex {
                 topics: vec![topic.clone()],
                 data: "0x".into(),
                 block_number: 10,
+                block_hash: "0xhash10".into(),
                 tx_hash: "0xt".into(),
                 log_index: 0,
             };
