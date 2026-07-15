@@ -23,6 +23,23 @@ pub enum Command {
     Transform(TransformArgs),
     /// Serve the Model Context Protocol over stdio (bridges to a running `nuthatch dev`).
     Mcp(McpArgs),
+    /// Run a nest's invariant/parity checks (`checks/*.sql`) against recorded expected results.
+    Check(CheckArgs),
+}
+
+#[derive(Args)]
+pub struct CheckArgs {
+    /// Optional check-name filter (substring). Omit to run every `checks/*.sql`. E.g. `parity`.
+    pub name: Option<String>,
+
+    /// Nest directory (must contain a `checks/` folder).
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+
+    /// Record current query results as the expected fixtures (`checks/expected/*.json`) instead of
+    /// comparing — the authoring mode, run once against known-good sealed data.
+    #[arg(long)]
+    pub update: bool,
 }
 
 #[derive(Args)]
