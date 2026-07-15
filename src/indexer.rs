@@ -74,6 +74,10 @@ pub async fn dev(args: DevArgs) -> Result<()> {
         &hex::encode(registry.hash())[..12],
     );
 
+    // A nest that vendors deployment blocks backfills from the earliest one (full history from
+    // deployment); otherwise a cold start falls back to the `--backfill` tip offset.
+    let start_block = config.contracts.iter().filter_map(|c| c.start_block).min();
+
     // Kick off the indexing loop in the background; serve the API on this task.
     let ingest = tokio::spawn(index_loop(
         source.clone(),
@@ -82,6 +86,7 @@ pub async fn dev(args: DevArgs) -> Result<()> {
         addresses,
         topic0s,
         args.backfill,
+        start_block,
         dir.clone(),
         balances.clone(),
         finality,
@@ -110,19 +115,28 @@ async fn index_loop(
     addresses: Vec<String>,
     topic0s: Vec<String>,
     backfill: u64,
+    start_block: Option<u64>,
     dir: PathBuf,
     balances: BalanceView,
     finality: Finality,
     window: u64,
 ) -> Result<()> {
-    // Resume from the last committed block, else start `backfill` blocks behind the tip.
+    // Resume from the last committed block; on a cold start, backfill from the nest's earliest
+    // vendored deployment block (full history) if it has one, else from `--backfill` behind the tip.
     let mut next = match store.get_meta(LAST_BLOCK_KEY)? {
         Some(v) => v.parse::<u64>().context("corrupt last_block")? + 1,
         None => {
             let tip = source.tip().await?;
-            let start = tip.saturating_sub(backfill);
+            let start = cold_start_block(start_block, backfill, tip);
             store.set_meta(START_BLOCK_KEY, &start.to_string())?;
-            tracing::info!("cold start: backfilling from block {start} (tip {tip})");
+            match start_block {
+                Some(b) => {
+                    tracing::info!("cold start: backfilling from deployment block {b} (tip {tip})")
+                }
+                None => {
+                    tracing::info!("cold start: backfilling from block {start} (tip {tip})")
+                }
+            }
             start
         }
     };
@@ -272,6 +286,16 @@ async fn detect_reorg(source: &dyn Source, store: &Store, last: u64) -> Result<O
         }
     }
     Ok(Some(0))
+}
+
+/// Where a cold start begins backfilling: the nest's earliest vendored deployment block (clamped to
+/// the tip) when present — full history from deployment — else `--backfill` blocks behind the tip.
+/// Pure, so the origin policy is unit-testable.
+fn cold_start_block(start_block: Option<u64>, backfill: u64, tip: u64) -> u64 {
+    match start_block {
+        Some(b) => b.min(tip),
+        None => tip.saturating_sub(backfill),
+    }
 }
 
 /// The highest block safe to seal under `finality`: the `finalized` tag when the chain uses it and
@@ -440,6 +464,19 @@ async fn sleep_secs(s: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cold_start_prefers_vendored_deploy_block() {
+        // A vendored start_block wins (full history), clamped to the tip.
+        assert_eq!(
+            cold_start_block(Some(42_449_585), 5_000, 484_000_000),
+            42_449_585
+        );
+        assert_eq!(cold_start_block(Some(999), 5_000, 500), 500); // clamp to tip
+                                                                  // No start_block → fall back to the --backfill offset.
+        assert_eq!(cold_start_block(None, 5_000, 1_000_000), 995_000);
+        assert_eq!(cold_start_block(None, 5_000, 100), 0); // no underflow
+    }
 
     #[test]
     fn depth_finality_seals_behind_the_tip() {

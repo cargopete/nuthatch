@@ -97,6 +97,14 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-15 — RFC-0002: `dev` honours vendored deployment blocks.** A nest that vendors
+  per-contract `start_block`s was storing them but the indexer ignored them — a cold start always used
+  the `--backfill` tip offset, so "index this nest" never meant "from deployment". Now a cold start
+  backfills from the nest's **earliest** vendored `start_block` (clamped to the tip) when present, else
+  the `--backfill` offset as before — via a pure, unit-tested `cold_start_block(...)`. Verified live on
+  the Horizon nest against an archive Arbitrum RPC: `dev` logs "backfilling from deployment block
+  42449585". (Deploy blocks were detected reliably against an archive node — public
+  sequencer/non-archive endpoints give inconsistent historical `eth_getCode`.) 47 tests.
 - **2026-07-15 — RFC-0002: robustness fixes from Horizon dogfooding.** Authoring the Horizon nest
   (three real Arbitrum contracts, derived views) surfaced two engine bugs, both now fixed and
   regression-tested. **(1)** The read-only `/sql` guard checked `starts_with("select"/"with")` on raw
