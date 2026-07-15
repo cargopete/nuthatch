@@ -11,6 +11,7 @@
 //!   `docs/exex-design.md`.
 
 use anyhow::Result;
+use std::collections::HashMap;
 
 use crate::rpc::{Log, RpcClient};
 
@@ -28,6 +29,12 @@ pub trait Source: Send + Sync {
     /// "no finalized signal available" — the caller falls back to a depth-based finality policy.
     async fn finalized(&self) -> Result<Option<u64>> {
         Ok(None)
+    }
+
+    /// Unix timestamps (seconds) for the given blocks. Best-effort: a source that can't answer omits
+    /// them (default: none). Used to populate every row's implicit `block_timestamp` column.
+    async fn block_timestamps(&self, _blocks: &[u64]) -> Result<HashMap<u64, u64>> {
+        Ok(HashMap::new())
     }
 
     /// Logs matching any of `addresses` + any of `topic0s` over the inclusive range `[from, to]`.
@@ -53,6 +60,10 @@ impl Source for RpcClient {
 
     async fn finalized(&self) -> Result<Option<u64>> {
         self.finalized_block().await
+    }
+
+    async fn block_timestamps(&self, blocks: &[u64]) -> Result<HashMap<u64, u64>> {
+        RpcClient::block_timestamps(self, blocks).await
     }
 
     async fn logs(

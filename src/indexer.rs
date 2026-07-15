@@ -172,17 +172,34 @@ async fn index_loop(
         let to = (next + window - 1).min(tip);
         match source.logs(&addresses, &topic0s, next, to).await {
             Ok(logs) => {
-                let mut stored = 0usize;
-                let mut deltas = Vec::new();
-                for log in &logs {
-                    let row = match registry.decode(log) {
-                        Ok(Some(r)) => r,
-                        Ok(None) => continue,
+                // Decode first so we know which blocks actually produced rows, then fetch just those
+                // blocks' timestamps in one batch (cheap even for a dense window) and stamp each row.
+                let mut rows: Vec<_> = logs
+                    .iter()
+                    .filter_map(|log| match registry.decode(log) {
+                        Ok(Some(r)) => Some(r),
+                        Ok(None) => None,
                         Err(e) => {
                             tracing::debug!("decode skipped: {e:#}");
-                            continue;
+                            None
                         }
-                    };
+                    })
+                    .collect();
+                let mut blocks: Vec<u64> = rows.iter().map(|r| r.block_number).collect();
+                blocks.sort_unstable();
+                blocks.dedup();
+                let timestamps = match source.block_timestamps(&blocks).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::debug!("block timestamps unavailable: {e:#}");
+                        std::collections::HashMap::new()
+                    }
+                };
+
+                let mut stored = 0usize;
+                let mut deltas = Vec::new();
+                for row in &mut rows {
+                    row.block_timestamp = timestamps.get(&row.block_number).copied().unwrap_or(0);
                     let key = Store::entity_key(row.block_number, row.log_index);
                     // Feed the IVM balance view for transfer rows (extracted before storing).
                     if let Some((from, to_addr, value, _hex)) = row.erc20_transfer_fields() {

@@ -3,6 +3,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct RpcClient {
@@ -59,6 +60,37 @@ impl RpcClient {
         Err(last_err)
     }
 
+    /// POST a raw JSON-RPC body (single object or a batch array) with the same round-robin failover
+    /// as `call`, returning the parsed response. Used for batch requests `call` can't express.
+    async fn post_with_failover(&self, body: &Value) -> Result<Value> {
+        let n = self.urls.len();
+        let start = self.cursor.fetch_add(1, Ordering::Relaxed);
+        let mut last_err = anyhow!("all RPC endpoints failed");
+        for i in 0..n {
+            let url = &self.urls[(start + i) % n];
+            match self.post_one(url, body).await {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    tracing::debug!("rpc {url} failed for batch: {e:#}");
+                    last_err = e;
+                }
+            }
+        }
+        Err(last_err)
+    }
+
+    async fn post_one(&self, url: &str, body: &Value) -> Result<Value> {
+        Ok(self
+            .http
+            .post(url)
+            .json(body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
     async fn call_one(&self, url: &str, method: &str, params: &Value) -> Result<Value> {
         let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
         let resp: Value = self
@@ -97,6 +129,41 @@ impl RpcClient {
             .call("eth_getCode", json!([address, format!("0x{block:x}")]))
             .await?;
         Ok(result.as_str().unwrap_or("0x").to_string())
+    }
+
+    /// Unix timestamps (seconds) for the given block numbers, fetched in a single JSON-RPC batch so
+    /// even a dense window costs one round-trip. Best-effort: blocks the endpoint can't answer are
+    /// simply absent from the map (the caller stores timestamp 0 for those).
+    pub async fn block_timestamps(&self, blocks: &[u64]) -> Result<HashMap<u64, u64>> {
+        if blocks.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let batch: Vec<Value> = blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                json!({ "jsonrpc": "2.0", "id": i, "method": "eth_getBlockByNumber",
+                        "params": [format!("0x{b:x}"), false] })
+            })
+            .collect();
+        let resp = self.post_with_failover(&Value::Array(batch)).await?;
+        let mut out = HashMap::new();
+        for item in resp.as_array().into_iter().flatten() {
+            let Some(idx) = item.get("id").and_then(Value::as_u64) else {
+                continue;
+            };
+            let Some(&block) = blocks.get(idx as usize) else {
+                continue;
+            };
+            if let Some(ts) = item
+                .pointer("/result/timestamp")
+                .and_then(Value::as_str)
+                .and_then(|s| parse_hex_u64(s).ok())
+            {
+                out.insert(block, ts);
+            }
+        }
+        Ok(out)
     }
 
     /// The node's `finalized` block number (L1-aware on an L2 like Arbitrum), or None if the

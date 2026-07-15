@@ -97,6 +97,14 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-15 — RFC-0002 step 2: `block_timestamp` implicit column.** Every row now carries
+  `block_timestamp` (u64 unix seconds) from the block header — the RFC-0001 amendment the time-bucketed
+  aggregation views need. It's batch-fetched: after decoding a window the indexer collects the distinct
+  blocks that produced rows and asks for their timestamps in a *single* JSON-RPC batch (one round-trip
+  even for a dense window), via new `RpcClient::block_timestamps` / `Source::block_timestamps`.
+  Best-effort — a block the endpoint can't answer stores 0. Verified live on USDC: hot rows carry a
+  current timestamp, and `date_trunc('minute', to_timestamp(block_timestamp))` yields clean per-minute
+  rollups over sealed data. 39 tests.
 - **2026-07-15 — RFC-0002 step 1: chain registry + Arbitrum One + L2 finality.** The chain registry
   generalises beyond mainnet — each chain now carries a **finality policy** and an `eth_getLogs`
   window, so an L2 is a data entry, not a fork of the indexing loop. New `arbitrum-one` (chain 42161,

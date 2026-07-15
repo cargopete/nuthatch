@@ -189,6 +189,7 @@ fn implicit_columns() -> Vec<ColumnSchema> {
     [
         "block_number",
         "block_hash",
+        "block_timestamp",
         "tx_hash",
         "log_index",
         "address",
@@ -199,7 +200,7 @@ fn implicit_columns() -> Vec<ColumnSchema> {
         name: (*n).to_string(),
         sol_type: "implicit".to_string(),
         storage: match *n {
-            "block_number" | "log_index" | "_seq" => "u64",
+            "block_number" | "log_index" | "_seq" | "block_timestamp" => "u64",
             "address" => "address",
             "block_hash" | "tx_hash" => "bytes32",
             _ => "string",
@@ -288,6 +289,9 @@ pub struct DecodedRow {
     pub params: Vec<(String, Value)>,
     pub block_number: u64,
     pub block_hash: String,
+    /// Unix seconds from the block header. Set by the indexer after decode (the log doesn't carry
+    /// it); 0 until then, and 0 if the source couldn't supply it.
+    pub block_timestamp: u64,
     pub log_index: u64,
     pub tx_hash: String,
     pub address: String,
@@ -306,6 +310,7 @@ impl DecodedRow {
         obj.insert("table".into(), json!(self.table));
         obj.insert("block_number".into(), json!(self.block_number));
         obj.insert("block_hash".into(), json!(self.block_hash));
+        obj.insert("block_timestamp".into(), json!(self.block_timestamp));
         obj.insert("tx_hash".into(), json!(self.tx_hash));
         obj.insert("log_index".into(), json!(self.log_index));
         obj.insert("address".into(), json!(self.address));
@@ -530,6 +535,7 @@ impl DecodeRegistry {
             params,
             block_number: log.block_number,
             block_hash: log.block_hash.clone(),
+            block_timestamp: 0, // filled by the indexer from the block header (see index_loop)
             log_index: log.log_index,
             tx_hash: log.tx_hash.clone(),
             address: format!("0x{}", hex::encode(emitter)),
@@ -873,9 +879,12 @@ mod tests {
             })
         );
         // Serving JSON carries the implicit provenance columns.
+        let mut row = row;
+        row.block_timestamp = 1_700_000_000;
         let j = row.to_json();
         assert_eq!(j["block_hash"], "0xbh");
         assert_eq!(j["_seq"], json!(7u64 << 20));
+        assert_eq!(j["block_timestamp"], json!(1_700_000_000u64));
     }
 
     #[test]

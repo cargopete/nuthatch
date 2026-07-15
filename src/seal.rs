@@ -113,7 +113,8 @@ fn rows_to_batch(rows: &[Value]) -> Result<RecordBatch> {
     let mut fields = Vec::with_capacity(columns.len());
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
     for col in &columns {
-        if col == "block_number" || col == "log_index" || col == "_seq" {
+        if col == "block_number" || col == "log_index" || col == "_seq" || col == "block_timestamp"
+        {
             let vals: Vec<u64> = rows
                 .iter()
                 .map(|r| r.get(col).and_then(Value::as_u64).unwrap_or(0))
