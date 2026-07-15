@@ -14,8 +14,10 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 
 use crate::analytics;
+use crate::registry::TableSchema;
 use crate::store::Store;
 use crate::views::BalanceView;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,12 +26,16 @@ pub struct AppState {
     pub chain: String,
     pub dir: PathBuf,
     pub balances: BalanceView,
+    /// The nest's table schemas (from the decode registry) — the source of truth for `/tables`.
+    pub tables: Arc<Vec<TableSchema>>,
 }
 
 pub async fn run(listen: &str, state: AppState) -> Result<()> {
     let app = Router::new()
         .route("/", get(summary))
         .route("/health", get(|| async { "ok" }))
+        .route("/tables", get(tables))
+        .route("/table/{name}", get(table))
         .route("/entities", get(entities))
         .route("/entity/{id}", get(entity))
         .route("/sql", get(sql))
@@ -56,9 +62,12 @@ async fn summary(State(s): State<AppState>) -> impl IntoResponse {
         "last_block": last_block,
         "sealed_through": s.store.get_meta("sealed_through").ok().flatten(),
         "holders": s.balances.holders(),
+        "tables": s.tables.len(),
         "views": ["balances (IVM)"],
         "endpoints": [
             "/health",
+            "/tables",
+            "/table/{name}?limit=100",
             "/entities?limit=100",
             "/entity/{block:012}-{log_index:06}",
             "/sql?q=SELECT count(*) FROM \"<alias>__<event>\"",
@@ -66,6 +75,77 @@ async fn summary(State(s): State<AppState>) -> impl IntoResponse {
             "/balance/{address}",
         ],
     }))
+}
+
+/// List every table and its columns (the decoded data model).
+async fn tables(State(s): State<AppState>) -> impl IntoResponse {
+    Json(json!({ "count": s.tables.len(), "tables": &*s.tables }))
+}
+
+#[derive(Deserialize)]
+struct TableQuery {
+    limit: Option<usize>,
+    from_block: Option<u64>,
+    to_block: Option<u64>,
+}
+
+/// Recent rows of one table, merged across the hot store and the sealed cold segments.
+async fn table(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<TableQuery>,
+) -> impl IntoResponse {
+    if !s.tables.iter().any(|t| t.table == name) {
+        return not_found(&name);
+    }
+    let limit = q.limit.unwrap_or(100).min(1000);
+    let in_range = |v: &Value| {
+        let b = v.get("block_number").and_then(Value::as_u64).unwrap_or(0);
+        q.from_block.map(|f| b >= f).unwrap_or(true) && q.to_block.map(|t| b <= t).unwrap_or(true)
+    };
+
+    // Hot rows (tip), newest first.
+    let mut items: Vec<Value> = s
+        .store
+        .recent_by_table(&name, limit)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| serde_json::from_str::<Value>(r).ok())
+        .filter(&in_range)
+        .collect();
+
+    // Fill from cold (sealed segments) if the hot store didn't satisfy the limit.
+    if items.len() < limit {
+        let need = limit - items.len();
+        let mut where_ = String::new();
+        if let Some(f) = q.from_block {
+            where_.push_str(&format!(" AND block_number >= {f}"));
+        }
+        if let Some(t) = q.to_block {
+            where_.push_str(&format!(" AND block_number <= {t}"));
+        }
+        let sql = format!(
+            "SELECT * FROM \"{name}\" WHERE 1=1{where_} ORDER BY block_number DESC, log_index DESC LIMIT {need}"
+        );
+        let dir = s.dir.clone();
+        if let Ok(Ok(rows)) =
+            tokio::task::spawn_blocking(move || analytics::query(&dir, &sql)).await
+        {
+            items.extend(rows);
+        }
+    }
+
+    // Dedup by (block, log_index); hot wins over cold.
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|v| {
+        let id = (
+            v.get("block_number").and_then(Value::as_u64),
+            v.get("log_index").and_then(Value::as_u64),
+        );
+        seen.insert(id)
+    });
+    items.truncate(limit);
+    Json(json!({ "table": name, "count": items.len(), "items": items })).into_response()
 }
 
 #[derive(Deserialize)]

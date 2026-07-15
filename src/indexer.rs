@@ -77,6 +77,7 @@ pub async fn dev(args: DevArgs) -> Result<()> {
         chain: config.nest.chain.clone(),
         dir: dir.clone(),
         balances,
+        tables: Arc::new(registry.schema()),
     };
     serve::run(&args.listen, app_state).await?;
 

@@ -9,6 +9,7 @@ use alloy_dyn_abi::{DynSolValue, EventExt};
 use alloy_json_abi::{Event, JsonAbi};
 use alloy_primitives::{Address, B256};
 use anyhow::{anyhow, Context, Result};
+use serde::Serialize;
 use serde_json::{json, Value as Json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -161,6 +162,42 @@ pub struct Column {
     pub sol_type: String,
     pub kind: StorageKind,
     pub indexed: bool,
+}
+
+/// A serializable table schema (per-event table + its columns).
+#[derive(Debug, Clone, Serialize)]
+pub struct TableSchema {
+    pub table: String,
+    pub alias: String,
+    pub event: String,
+    pub topic0: String,
+    pub columns: Vec<ColumnSchema>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ColumnSchema {
+    pub name: String,
+    pub sol_type: String,
+    pub storage: String,
+    pub indexed: bool,
+}
+
+/// The implicit columns every table carries (before the event's own params).
+fn implicit_columns() -> Vec<ColumnSchema> {
+    ["block_number", "log_index", "tx_hash", "address"]
+        .iter()
+        .map(|n| ColumnSchema {
+            name: (*n).to_string(),
+            sol_type: "implicit".to_string(),
+            storage: match *n {
+                "block_number" | "log_index" => "u64",
+                "address" => "address",
+                _ => "string",
+            }
+            .to_string(),
+            indexed: false,
+        })
+        .collect()
 }
 
 /// Decodes one event of one contract into rows of one table.
@@ -372,6 +409,30 @@ impl DecodeRegistry {
         let mut v: Vec<&EventDecoder> = self.by_topic0.values().flatten().collect();
         v.sort_by(|a, b| a.table.cmp(&b.table));
         v
+    }
+
+    /// A serializable schema of every table — the single source of truth for `/tables`, the MCP
+    /// `schema`/`tables` tools, `llms.txt`, and the nest's `schema.json`.
+    pub fn schema(&self) -> Vec<TableSchema> {
+        self.tables()
+            .iter()
+            .map(|d| {
+                let mut columns = implicit_columns();
+                columns.extend(d.columns.iter().map(|c| ColumnSchema {
+                    name: c.name.clone(),
+                    sol_type: c.sol_type.clone(),
+                    storage: c.kind.as_str().to_string(),
+                    indexed: c.indexed,
+                }));
+                TableSchema {
+                    table: d.table.clone(),
+                    alias: d.alias.clone(),
+                    event: d.signature.clone(),
+                    topic0: format!("0x{}", hex::encode(d.topic0)),
+                    columns,
+                }
+            })
+            .collect()
     }
 
     /// Decode a log. Returns None if no decoder matches (topic0 + emitting address).

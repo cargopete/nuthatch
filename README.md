@@ -89,6 +89,16 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-15 — RFC-0001 step 5: generalised serving from the registry.** The API and AI surface
+  now describe the *whole* data model, not just transfers. `GET /tables` lists every decoded table
+  with its columns, Solidity types and topic0; `GET /table/{name}?limit=N` returns recent rows merged
+  across the hot tip and the sealed segments (deduped by `(block, log_index)`, hot wins), with optional
+  `from_block`/`to_block`. Two matching MCP tools (`tables`, `table`) bridge the same endpoints — the
+  tool count is now 8. `init` builds the registry up front and writes `schema.json` (`{registry_hash,
+  tables}`); `llms.txt` and the Claude skill enumerate the real tables instead of hand-waving at them.
+  Verified live on USDC (17 tables): `/tables` and both MCP tools return the full schema, `/table`
+  serves merged hot+cold rows and 404s on an unknown table. 27 tests green. _Remaining: step 6
+  (footprint re-measure on a multi-contract nest + README table refresh)._
 - **2026-07-15 — RFC-0001 step 4: per-table cold storage.** Sealing generalises from transfer-only
   to every table: rows are grouped by their `table` field and each becomes its own content-addressed
   Parquet segment; `manifest.json` is now `{tables: {name: [segments]}}`. DuckDB exposes one view per

@@ -75,8 +75,12 @@ pub fn tool_specs() -> Value {
     json!([
         { "name": "status", "description": "Index status: contract, chain, transfers indexed, holders, last & sealed block.",
           "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "schema", "description": "The data model — entities, the derived balances view, and how to query it. Read this first.",
+        { "name": "schema", "description": "The data model — how tables/views are named and queried. Read this first, then `tables` for the exact tables and columns.",
           "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "tables", "description": "List every decoded table (`{alias}__{event}`) with its columns, Solidity types, and topic0.",
+          "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "table", "description": "Recent rows of one table, merged across the hot tip and sealed segments.",
+          "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "limit": { "type": "integer", "default": 50 } }, "required": ["name"] } },
         { "name": "sql", "description": "Run a read-only SQL query over sealed (finalized) data. Each event is a DuckDB view named `{alias}__{event}` (e.g. \"usdc__transfer\") with block_number, log_index, tx_hash, address + the event's params. Call `schema` first. SELECT/WITH only.",
           "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "A SELECT or WITH query." } }, "required": ["query"] } },
         { "name": "entity", "description": "Look up one transfer by its id, formatted `{block:012}-{logindex:06}`.",
@@ -100,6 +104,14 @@ async fn call_tool(params: &Value, client: &reqwest::Client, base: &str) -> Resu
     match name {
         "status" => get(client, &format!("{base}/")).await,
         "schema" => Ok(schema_doc()),
+        "tables" => get(client, &format!("{base}/tables")).await,
+        "table" => {
+            let name = args["name"]
+                .as_str()
+                .ok_or_else(|| anyhow!("`name` is required"))?;
+            let n = args["limit"].as_u64().unwrap_or(50);
+            get(client, &format!("{base}/table/{name}?limit={n}")).await
+        }
         "sql" => {
             let q = args["query"]
                 .as_str()
@@ -194,8 +206,9 @@ mod tests {
         let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle(&list, &client, "http://127.0.0.1:1").await.unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 8);
         assert!(tools.iter().any(|t| t["name"] == "sql"));
+        assert!(tools.iter().any(|t| t["name"] == "tables"));
     }
 
     #[tokio::test]

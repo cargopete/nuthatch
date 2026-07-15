@@ -77,6 +77,28 @@ impl Store {
         Ok(out)
     }
 
+    /// The `limit` most-recent hot rows belonging to `table` (highest keys first).
+    pub fn recent_by_table(&self, table: &str, limit: usize) -> Result<Vec<String>> {
+        let rtx = self.db.begin_read()?;
+        let t = rtx.open_table(ENTITIES)?;
+        let mut out = Vec::with_capacity(limit);
+        for row in t.iter()?.rev() {
+            let (_k, v) = row?;
+            let s = v.value();
+            let matches = serde_json::from_str::<serde_json::Value>(s)
+                .ok()
+                .and_then(|j| j.get("table").and_then(|t| t.as_str()).map(|t| t == table))
+                .unwrap_or(false);
+            if matches {
+                out.push(s.to_string());
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Entity JSON values whose block falls in `[from, to]`, chain-ordered. Used by sealing to
     /// gather a finalized block range for a Parquet segment.
     pub fn entities_in_range(&self, from: u64, to: u64) -> Result<Vec<String>> {

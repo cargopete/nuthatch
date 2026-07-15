@@ -70,16 +70,31 @@ pub async fn init(args: InitArgs) -> Result<()> {
         contracts,
     };
     config.save(&dir)?;
-    scaffold_ai_surface(&dir, chain.name, &config.contracts)?;
+
+    // Build the registry from the vendored ABIs to generate the schema artifact + AI surface (one
+    // source of truth: schema.json, llms.txt, the skill, and `/tables` all come from here).
+    let registry = crate::registry::DecodeRegistry::from_nest(&dir, &config)?;
+    let schema = registry.schema();
+    std::fs::write(
+        dir.join("schema.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "registry_hash": format!("0x{}", hex::encode(registry.hash())),
+            "tables": &schema,
+        }))?,
+    )
+    .context("failed to write schema.json")?;
+    scaffold_ai_surface(&dir, chain.name, &config.contracts, &schema)?;
 
     println!(
-        "✓ scaffolded nest '{}' ({} contract(s)) in {}",
+        "✓ scaffolded nest '{}' ({} contract(s), {} table(s)) in {}",
         config.nest.name,
         config.contracts.len(),
+        schema.len(),
         dir.display()
     );
     println!("    nuthatch.toml              config");
     println!("    abis/                      resolved ABIs");
+    println!("    schema.json                decoded tables + columns");
     println!("    llms.txt                   how an AI agent queries this index");
     println!("    .claude/skills/nuthatch/   Claude Code skill (offline, no phone-home)");
     println!();
@@ -185,10 +200,22 @@ fn is_empty_code(code: &str) -> bool {
     code.trim_start_matches("0x").is_empty()
 }
 
-fn scaffold_ai_surface(dir: &Path, chain: &str, contracts: &[Contract]) -> Result<()> {
+fn scaffold_ai_surface(
+    dir: &Path,
+    chain: &str,
+    contracts: &[Contract],
+    schema: &[crate::registry::TableSchema],
+) -> Result<()> {
     let list: String = contracts
         .iter()
         .map(|c| format!("- `{}` = {}\n", c.alias, c.address))
+        .collect();
+    let tables: String = schema
+        .iter()
+        .map(|t| {
+            let cols: Vec<String> = t.columns.iter().map(|c| c.name.clone()).collect();
+            format!("- `{}` — {} ({})\n", t.table, t.event, cols.join(", "))
+        })
         .collect();
     let llms = format!(
         "# nuthatch nest on {chain}\n\
@@ -196,17 +223,19 @@ fn scaffold_ai_surface(dir: &Path, chain: &str, contracts: &[Contract]) -> Resul
          A self-hosted blockchain index. Query it locally; there is no third-party API.\n\
          \n\
          ## Contracts\n{list}\n\
+         ## Tables (one per contract event)\n{tables}\n\
          ## Live HTTP API (run `nuthatch dev`)\n\
          - `GET /`                    index status\n\
-         - `GET /entities?limit=N`    recent rows\n\
+         - `GET /tables`              every table with its columns\n\
+         - `GET /table/{{name}}?limit=N` recent rows of one table (hot + sealed)\n\
          - `GET /entity/{{id}}`         one row by id (`{{block:012}}-{{logindex:06}}`)\n\
-         - `GET /sql?q=SELECT...`     read-only SQL over sealed (finalized) rows\n\
+         - `GET /sql?q=SELECT...`     read-only SQL; each table is a view named `{{alias}}__{{event}}`\n\
          - `GET /balances?limit=N`    top holder balances (when an ERC-20 Transfer table is present)\n\
          - `GET /balance/{{address}}`   one address's derived balance\n\
          \n\
          ## MCP (for coding agents)\n\
-         Run `nuthatch mcp` (stdio) to expose tools: status, schema, sql, entity, balance,\n\
-         top_balances. Fully offline against the local instance; nothing phones home.\n"
+         Run `nuthatch mcp` (stdio) to expose tools: status, schema, tables, table, sql, entity,\n\
+         balance, top_balances. Fully offline against the local instance; nothing phones home.\n"
     );
     std::fs::write(dir.join("llms.txt"), llms).context("failed to write llms.txt")?;
 
