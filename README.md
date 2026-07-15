@@ -97,6 +97,13 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-15 — RFC-0003 groundwork: expose the core as a library.** `nuthatch` is now a lib + bin,
+  not bin-only — `src/lib.rs` re-exports every module (decode, hot store, seal, IVM, serve, the
+  `Source` trait, …). The binary is one front-end over that library; `nuthatch-node` (the colocated
+  reth ExEx build) will be another, reusing the *same* indexing core through the `Source` trait rather
+  than forking it. Also confirmed the other RFC-0003 gate: reth v2.4.0 (git) **resolves cleanly
+  alongside our `alloy 1.6`** (913 packages, no version conflict). Pure refactor — 47 tests, clippy,
+  fmt all green. Both RFC-0003 blockers (toolchain, dependency resolution) are now cleared.
 - **2026-07-15 — RFC-0003 groundwork: toolchain 1.94.1 → 1.95.0 (unblocks reth).** RFC-0003 embeds
   reth as a colocated ExEx (`nuthatch-node`) reusing the same dbsp-backed indexing core. reth v2.4.0's
   MSRV is **rustc 1.95**, but our pin was 1.94.1 (chosen only to dodge the `dbsp` next-solver ICE that

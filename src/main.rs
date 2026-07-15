@@ -8,23 +8,7 @@
 //! redb-only storage (no DuckDB/Parquet yet), no IVM, no MCP. Those are the next layers to grow
 //! onto this spine — see docs/ROADMAP as it lands. What matters here is that it's *alive*.
 
-mod abi;
-mod analytics;
-mod chains;
-mod check;
-mod cli;
-mod config;
-mod indexer;
-mod mcp;
-mod project;
-mod registry;
-mod rpc;
-mod seal;
-mod serve;
-mod source;
-mod store;
-mod transform;
-mod views;
+use nuthatch::{check, cli, config, indexer, mcp, project, store, transform};
 
 use anyhow::Result;
 use clap::Parser;
