@@ -24,16 +24,32 @@ const LAST_BLOCK_KEY: &str = "last_block";
 const SEALED_THROUGH_KEY: &str = "sealed_through";
 const START_BLOCK_KEY: &str = "start_block";
 
+/// `nuthatch dev` — the RPC front-end. Builds an RPC `Source` from the nest's `rpc_urls` and runs
+/// the shared pipeline. The colocated-reth front-end (`nuthatch-node`, RFC-0003) builds an ExEx
+/// `Source` instead and calls [`run`] directly — same core, different tip source.
 pub async fn dev(args: DevArgs) -> Result<()> {
     let dir = PathBuf::from(&args.dir);
     let config = Config::load(&dir)?;
+    // Today: RPC polling. The indexer only sees `dyn Source`, so an ExEx tip source slots in here
+    // with no change to anything downstream.
+    let source: Arc<dyn Source> = Arc::new(RpcClient::new(config.nest.rpc_urls.clone())?);
+    run(source, dir, config, args.listen, args.backfill).await
+}
+
+/// Run the indexing pipeline against any `Source` and serve the API — the source-agnostic entry both
+/// front-ends share. Decode → hot store → seal → IVM → serve is identical regardless of whether tips
+/// arrive by RPC polling or in-process from a reth ExEx.
+pub async fn run(
+    source: Arc<dyn Source>,
+    dir: PathBuf,
+    config: Config,
+    listen: String,
+    backfill: u64,
+) -> Result<()> {
     let store = Store::open(&dir.join(DB_FILE))?;
     // The decode registry drives all contracts; the indexer decodes every declared event of every
     // contract in the nest into per-table rows.
     let registry = Arc::new(DecodeRegistry::from_nest(&dir, &config)?);
-    // Today: RPC polling. The indexer only sees `dyn Source`, so an ExEx tip source (feature = "exex")
-    // slots in here with no change to anything downstream.
-    let source: Arc<dyn Source> = Arc::new(RpcClient::new(config.nest.rpc_urls.clone())?);
     let balances = BalanceView::start()?;
 
     // Warm restart: the balance view is derived, not persisted, so rebuild it from stored facts
@@ -85,7 +101,7 @@ pub async fn dev(args: DevArgs) -> Result<()> {
         registry.clone(),
         addresses,
         topic0s,
-        args.backfill,
+        backfill,
         start_block,
         dir.clone(),
         balances.clone(),
@@ -101,7 +117,7 @@ pub async fn dev(args: DevArgs) -> Result<()> {
         balances,
         tables: Arc::new(registry.schema()),
     };
-    serve::run(&args.listen, app_state).await?;
+    serve::run(&listen, app_state).await?;
 
     ingest.abort();
     Ok(())

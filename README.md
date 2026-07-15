@@ -97,6 +97,12 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-15 — RFC-0003 groundwork: source-agnostic `indexer::run`.** Split `dev` into the RPC
+  front-end (builds an `RpcClient` source) and a shared `run(source, dir, config, listen, backfill)`
+  that drives the whole pipeline — decode → hot store → seal → IVM → serve — against any `Source`.
+  `dev` is now a thin wrapper; `nuthatch-node` will build an ExEx `Source` and call `run` directly, so
+  the reth path reuses the identical core with zero business-logic fork (the Source-trait promise, now
+  cashed in). 47 tests, clippy, fmt green.
 - **2026-07-15 — RFC-0003 groundwork: expose the core as a library.** `nuthatch` is now a lib + bin,
   not bin-only — `src/lib.rs` re-exports every module (decode, hot store, seal, IVM, serve, the
   `Source` trait, …). The binary is one front-end over that library; `nuthatch-node` (the colocated
