@@ -12,42 +12,46 @@ design brief.
 
 ## Status: embedded mode built end-to-end; scaled mode + reth ExEx outstanding
 
-The embedded single-binary path works from `init → dev → live API`, with reorg-safe storage,
-finality-sealed Parquet, DuckDB SQL, an incrementally-maintained balance view, sandboxed WASM
-transforms, and an MCP server — all in one process, no external services. What remains is the
-scaled (Postgres / DataFusion) mode and wiring reth ExEx to a node.
+The embedded single-binary path works from `init → dev → live API`, with multi-contract ABI-driven
+decode, reorg-safe storage, finality-sealed Parquet, DuckDB SQL, an incrementally-maintained balance
+view, sandboxed WASM transforms, and an MCP server — all in one process, no external services. What
+remains is the scaled (Postgres / DataFusion) mode and wiring reth ExEx to a node.
 
 | Working now | Outstanding |
 |---|---|
-| `init` → ABI resolve (Sourcify → Etherscan) → scaffold (+ `llms.txt`, skills) | reth ExEx wiring — `Source` trait ready; needs a synced node |
+| `init` → multi-contract ABI resolve (Sourcify → Etherscan, EIP-1967/legacy-OZ proxy) → scaffold (+ `schema.json`, `llms.txt`, skills) | reth ExEx wiring — `Source` trait ready; needs a synced node |
 | RPC log polling with round-robin failover, behind a `Source` trait | scaled Postgres mode (`HotStore` trait) + DataFusion federation |
-| Deterministic ERC-20 `Transfer` decode | effectful transform worlds + signed pipeline manifests |
+| Deterministic decode of **every declared event of every contract** (topic0-keyed registry → one table per `{alias}__{event}`) | effectful transform worlds + signed pipeline manifests |
 | Reorg self-healing (block-hash checkpoints → hot-store rollback) | governed semantic layer + natural-language queries |
-| Finality-gated content-addressed Parquet sealing + hot-store pruning | IVM restart-replay (persist/rebuild balances across restarts) |
-| Read-only analytical SQL (DuckDB) over sealed segments | i128 balances (the view accumulates in i64 base units today) |
-| IVM balance view (DBSP) — reorg = retraction | GraphQL compatibility layer |
+| Per-table finality-gated content-addressed Parquet sealing + hot-store pruning | IVM restart-replay (persist/rebuild balances across restarts) |
+| Read-only analytical SQL (DuckDB) — one view per table over sealed segments | i128 balances (the view accumulates in i64 base units today) |
+| `GET /tables` + `GET /table/{name}` (hot+cold merged) — the full data model | GraphQL compatibility layer |
+| IVM balance view (DBSP) — reorg = retraction | |
 | WASM transform runtime (pure, sandboxed, batched Arrow) | |
-| MCP server (stdio, 6 tools, offline) + `llms.txt` + `.claude/skills` scaffold | |
+| MCP server (stdio, 8 tools, offline) + `schema.json` + `llms.txt` + `.claude/skills` scaffold | |
 | redb hot store, entity point-reads with cold (DuckDB) fallback | |
 
-Scope today: **one chain (Ethereum), ERC-20 `Transfer` events, RPC polling (reth ExEx designed +
-stubbed), embedded storage (redb hot + DuckDB/Parquet cold).** Multi-chain, non-Transfer decode,
-and the scaled mode are not built yet.
+Scope today: **one chain (Ethereum), all contract events decoded across a multi-contract nest, RPC
+polling (reth ExEx designed + stubbed), embedded storage (redb hot + DuckDB/Parquet cold).**
+Multi-chain and the scaled mode are not built yet.
 
 ### Measured footprint (the number nobody else publishes)
 
 | | |
 |---|---|
-| **Peak RAM** | **~37 MB** (hot indexing + sealing + DuckDB SQL, live mainnet) |
+| **Peak RAM** | **~58 MB** (3-contract nest, 23 tables — hot indexing + per-table sealing + DuckDB SQL + IVM, live mainnet) |
+| Single contract | ~37 MB (USDC alone) |
 | Binary size | 67 MB (release; DuckDB + DBSP + wasmtime statically bundled — 5.8 MB without them) |
-| Budget | ≤2 GB RAM — **using 1.8%** of it |
+| Budget | ≤2 GB RAM — **using 2.8%** of it |
 
-Honest and reproducible: `nuthatch init 0xA0b8…eB48 && nuthatch dev --backfill 200`, sampled with
-`ps -o rss`. Measured on the release build with the full embedded pipeline active. The RAM budget is
-enforced in CI (a `footprint` job fails the build above 256 MB — generous headroom over the measured
-~37 MB); the binary grew because DuckDB, DBSP, and wasmtime are statically bundled (still a single
-file — the embedded-mode non-negotiable). Hot layer stays bounded by pruning sealed rows to Parquet
-past finality.
+Honest and reproducible: `nuthatch init 0xA0b8…eB48 0xC02a…6Cc2 0x6B17…71d0F && nuthatch dev
+--backfill 400`, sampled with `ps -o rss`. Measured on the release build with the full embedded
+pipeline active — the run above sealed 16,986 rows across 11 tables of the three contracts (USDC,
+WETH, DAI; 23 tables total) and pruned the hot store, while the IVM view tracked 5,005 holders. The
+RAM budget is enforced in CI (a `footprint` job fails the build above 256 MB — generous headroom over
+the measured ~58 MB); the binary is large because DuckDB, DBSP, and wasmtime are statically bundled
+(still a single file — the embedded-mode non-negotiable). Hot layer stays bounded by pruning sealed
+rows to Parquet past finality.
 
 ## Quickstart
 
@@ -60,11 +64,14 @@ cargo build --release
 
 # in another shell
 curl localhost:8288/
-curl localhost:8288/entities?limit=5
+curl localhost:8288/tables
+curl 'localhost:8288/table/c0__transfer?limit=5'
 ```
 
-`init` writes `nuthatch.toml` (config) and `abi.json` (resolved ABI). `dev` polls logs, decodes
-Transfers into an embedded `nuthatch.redb`, and serves the API on `127.0.0.1:8288`.
+`init` writes `nuthatch.toml` (config), the resolved ABIs under `abis/`, and `schema.json` (the
+decoded tables + columns). `dev` polls logs, decodes every declared event of every contract into an
+embedded `nuthatch.redb`, and serves the API on `127.0.0.1:8288`. Pass several addresses to `init`
+(optionally with `--alias`) to index a multi-contract nest in one process.
 
 ### AI-native, offline
 
@@ -72,7 +79,7 @@ Transfers into an embedded `nuthatch.redb`, and serves the API on `127.0.0.1:828
 the real query surface. Expose a running index to an agent over the Model Context Protocol:
 
 ```sh
-nuthatch mcp                 # stdio MCP server: status, schema, sql, entity, balance, top_balances
+nuthatch mcp                 # stdio MCP server: status, schema, tables, table, sql, entity, balance, top_balances
 ```
 
 It bridges to the local `nuthatch dev` — no external calls, no telemetry, no gated data API.
@@ -89,6 +96,15 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-15 — RFC-0001 step 6: multi-contract footprint re-measure (RFC-0001 complete).** Measured
+  the full embedded pipeline on a genuine three-contract nest — USDC + WETH + DAI, **23 tables** — with
+  everything live at once: combined `eth_getLogs`, per-table decode, per-table Parquet sealing + hot
+  pruning, DuckDB SQL, and the IVM balance view (5,005 holders). **Peak RAM ~58 MB** (vs ~37 MB for a
+  single contract), sealing 16,986 rows across 11 tables and pruning the hot store — still **2.8%** of
+  the 2 GB budget, well under the 256 MB CI gate. Confirmed cross-contract serving: `/tables` returns
+  all 23, WETH `c1__deposit` and DAI `c2__transfer` serve and query by their own columns. README status
+  table + footprint section refreshed to the generalised (multi-contract, 8-tool) reality. This closes
+  RFC-0001 — the transfer-only indexer is now a general ABI-driven multi-contract one, end to end.
 - **2026-07-15 — RFC-0001 step 5: generalised serving from the registry.** The API and AI surface
   now describe the *whole* data model, not just transfers. `GET /tables` lists every decoded table
   with its columns, Solidity types and topic0; `GET /table/{name}?limit=N` returns recent rows merged
