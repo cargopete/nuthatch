@@ -18,8 +18,10 @@ const MAX_THREADS: u32 = 2;
 /// Run a read-only query. A `transfers` view over all sealed segments is in scope. Only
 /// SELECT/WITH statements are accepted — this is a query surface, not a mutation surface.
 pub fn query(dir: &Path, sql: &str) -> Result<Vec<Value>> {
-    let trimmed = sql.trim_start().to_ascii_lowercase();
-    if !(trimmed.starts_with("select") || trimmed.starts_with("with")) {
+    // Check the first *statement keyword*, past any leading whitespace and SQL comments — a query
+    // that opens with `-- note` or `/* … */` is still a SELECT. DuckDB gets the original text.
+    let head = strip_leading_sql_comments(sql).to_ascii_lowercase();
+    if !(head.starts_with("select") || head.starts_with("with")) {
         bail!("only SELECT/WITH queries are allowed on the read-only SQL surface");
     }
 
@@ -52,6 +54,27 @@ pub fn query(dir: &Path, sql: &str) -> Result<Vec<Value>> {
         out.push(Value::Object(obj));
     }
     Ok(out)
+}
+
+/// Skip leading whitespace and SQL comments (`-- line` and `/* block */`) so the read-only guard
+/// sees the first real keyword. Returns the remainder starting at that keyword.
+fn strip_leading_sql_comments(sql: &str) -> &str {
+    let mut s = sql.trim_start();
+    loop {
+        if let Some(rest) = s.strip_prefix("--") {
+            s = match rest.find('\n') {
+                Some(i) => rest[i + 1..].trim_start(),
+                None => "",
+            };
+        } else if let Some(rest) = s.strip_prefix("/*") {
+            s = match rest.find("*/") {
+                Some(i) => rest[i + 2..].trim_start(),
+                None => "",
+            };
+        } else {
+            return s;
+        }
+    }
 }
 
 /// Net balance per address for one sealed transfer table, summed as i128 (DuckDB HUGEINT). This is
@@ -111,8 +134,17 @@ pub fn get_row(dir: &Path, block: u64, log_index: u64) -> Result<Option<Value>> 
 /// 38 digits (so `c_dec` is NULL but `c` isn't). Analytics can `SUM(c_dec)` without hand-casting.
 fn define_views(conn: &Connection, dir: &Path) -> Result<()> {
     let manifest = crate::seal::load_manifest(dir)?;
-    let bigints = bigint_columns(dir);
+    let schema = schema_columns(dir);
+    let cols_of = |table: &str| -> &[(String, String)] {
+        schema
+            .iter()
+            .find(|(t, _)| t == table)
+            .map(|(_, c)| c.as_slice())
+            .unwrap_or(&[])
+    };
     let seg_dir = dir.join(crate::seal::SEGMENTS_DIR);
+
+    // Real views over the sealed segments.
     for (table, segments) in &manifest.tables {
         if segments.is_empty() {
             continue;
@@ -121,19 +153,31 @@ fn define_views(conn: &Connection, dir: &Path) -> Result<()> {
             .iter()
             .map(|s| format!("'{}'", seg_dir.join(&s.file).display()))
             .collect();
-        let mut derived = String::new();
-        for c in bigints.get(table).into_iter().flatten() {
-            derived.push_str(&format!(
-                ", TRY_CAST(\"{c}\" AS DECIMAL(38,0)) AS \"{c}_dec\", \
-                   (\"{c}\" IS NOT NULL AND TRY_CAST(\"{c}\" AS DECIMAL(38,0)) IS NULL) AS \"{c}_overflow\""
-            ));
-        }
         let ddl = format!(
-            "CREATE VIEW \"{table}\" AS SELECT *{derived} FROM read_parquet([{}])",
+            "CREATE VIEW \"{table}\" AS SELECT *{} FROM read_parquet([{}])",
+            derived_bigint_cols(cols_of(table)),
             files.join(", ")
         );
         conn.execute_batch(&ddl)
             .with_context(|| format!("failed to define view {table}"))?;
+    }
+
+    // Empty typed views for every *declared* table that hasn't sealed yet, so nest views over sparse
+    // data resolve to zero rows instead of cascade-failing (a table with no events is common early on
+    // and on a low-traffic contract). Best-effort — a bad schema entry just leaves that view absent.
+    let sealed: std::collections::HashSet<&str> = manifest
+        .tables
+        .iter()
+        .filter(|(_, s)| !s.is_empty())
+        .map(|(t, _)| t.as_str())
+        .collect();
+    for (table, cols) in &schema {
+        if sealed.contains(table.as_str()) || cols.is_empty() {
+            continue;
+        }
+        if let Err(e) = conn.execute_batch(&empty_view_ddl(table, cols)) {
+            tracing::debug!("empty view {table} skipped: {e}");
+        }
     }
     Ok(())
 }
@@ -163,15 +207,15 @@ fn define_nest_views(conn: &Connection, dir: &Path) {
     }
 }
 
-/// Big-integer (uint/int > 64-bit) columns per table, read from the nest's `schema.json` (the decode
-/// registry's manifest). Absent or unparseable schema → no derived columns (graceful; plain views).
-fn bigint_columns(dir: &Path) -> std::collections::HashMap<String, Vec<String>> {
-    let mut map = std::collections::HashMap::new();
+/// (table, [(column, storage)]) for every declared table, from the nest's `schema.json`. Empty if
+/// the file is absent/unparseable. Drives both the derived `*_dec` columns and the empty typed views.
+fn schema_columns(dir: &Path) -> Vec<(String, Vec<(String, String)>)> {
+    let mut out = Vec::new();
     let Ok(raw) = std::fs::read_to_string(dir.join("schema.json")) else {
-        return map;
+        return out;
     };
     let Ok(v) = serde_json::from_str::<Value>(&raw) else {
-        return map;
+        return out;
     };
     for t in v
         .get("tables")
@@ -182,24 +226,64 @@ fn bigint_columns(dir: &Path) -> std::collections::HashMap<String, Vec<String>> 
         let Some(name) = t.get("table").and_then(Value::as_str) else {
             continue;
         };
-        let cols: Vec<String> = t
+        let cols: Vec<(String, String)> = t
             .get("columns")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter(|c| {
-                matches!(
-                    c.get("storage").and_then(Value::as_str),
-                    Some("word16") | Some("word32")
-                )
+            .filter_map(|c| {
+                Some((
+                    c.get("name")?.as_str()?.to_string(),
+                    c.get("storage")?.as_str()?.to_string(),
+                ))
             })
-            .filter_map(|c| c.get("name").and_then(Value::as_str).map(String::from))
             .collect();
-        if !cols.is_empty() {
-            map.insert(name.to_string(), cols);
+        out.push((name.to_string(), cols));
+    }
+    out
+}
+
+/// True for a big-integer (uint/int > 64-bit) storage kind — the columns that get `*_dec`/`*_overflow`.
+fn is_bigint(storage: &str) -> bool {
+    storage == "word16" || storage == "word32"
+}
+
+/// The extra `SELECT` items projecting the derived `{c}_dec` / `{c}_overflow` columns for a table's
+/// big-integer columns (empty string if none), shared by the sealed and empty view builders.
+fn derived_bigint_cols(cols: &[(String, String)]) -> String {
+    let mut s = String::new();
+    for (c, _) in cols.iter().filter(|(_, s)| is_bigint(s)) {
+        s.push_str(&format!(
+            ", TRY_CAST(\"{c}\" AS DECIMAL(38,0)) AS \"{c}_dec\", \
+               (\"{c}\" IS NOT NULL AND TRY_CAST(\"{c}\" AS DECIMAL(38,0)) IS NULL) AS \"{c}_overflow\""
+        ));
+    }
+    s
+}
+
+/// An empty but correctly-typed view for a declared table that has no sealed segment yet, so a nest
+/// view that references it (or UNIONs it with a table that *does* have data) resolves instead of
+/// silently vanishing. Columns and their `*_dec`/`*_overflow` siblings match the sealed view's shape;
+/// `WHERE false` yields zero rows.
+fn empty_view_ddl(table: &str, cols: &[(String, String)]) -> String {
+    let mut sel: Vec<String> = Vec::new();
+    for (name, storage) in cols {
+        // u64 implicit columns are UBIGINT in parquet; everything else is stored as text (VARCHAR).
+        let ty = if storage == "u64" {
+            "UBIGINT"
+        } else {
+            "VARCHAR"
+        };
+        sel.push(format!("CAST(NULL AS {ty}) AS \"{name}\""));
+        if is_bigint(storage) {
+            sel.push(format!("CAST(NULL AS DECIMAL(38,0)) AS \"{name}_dec\""));
+            sel.push(format!("CAST(NULL AS BOOLEAN) AS \"{name}_overflow\""));
         }
     }
-    map
+    format!(
+        "CREATE VIEW \"{table}\" AS SELECT {} WHERE false",
+        sel.join(", ")
+    )
 }
 
 fn value_to_json(v: ValueRef<'_>) -> Value {
@@ -325,6 +409,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s[0]["s"], Value::from(fits));
+    }
+
+    #[test]
+    fn query_guard_sees_past_leading_comments() {
+        assert_eq!(
+            strip_leading_sql_comments("  \n-- hi\nSELECT 1").trim_start(),
+            "SELECT 1"
+        );
+        assert_eq!(
+            strip_leading_sql_comments("/* a */ WITH x AS (SELECT 1) SELECT 1")
+                .trim_start()
+                .split(' ')
+                .next(),
+            Some("WITH")
+        );
+        let dir = tempfile::tempdir().unwrap();
+        // A comment-prefixed SELECT must be accepted (not rejected as non-SELECT); a DROP still fails.
+        assert!(query(dir.path(), "-- a note\nSELECT 42 AS n").is_ok());
+        assert!(query(dir.path(), "/* x */ DROP TABLE t").is_err());
+    }
+
+    /// A declared-but-unsealed table still resolves as an empty typed view, so a nest view that
+    /// UNIONs it with a table that *does* have data doesn't cascade-fail (RFC-0002 dogfood fix).
+    #[test]
+    fn unsealed_tables_get_empty_typed_views() {
+        let dir = tempfile::tempdir().unwrap();
+        // schema declares two transfer-ish tables; only `a__ev` will have sealed data.
+        std::fs::write(
+            dir.path().join("schema.json"),
+            r#"{"registry_hash":"0x0","tables":[
+                {"table":"a__ev","alias":"a","event":"E","topic0":"0x","columns":[
+                    {"name":"block_number","sol_type":"implicit","storage":"u64","indexed":false},
+                    {"name":"amount","sol_type":"uint256","storage":"word32","indexed":false}]},
+                {"table":"b__ev","alias":"b","event":"E","topic0":"0x","columns":[
+                    {"name":"block_number","sol_type":"implicit","storage":"u64","indexed":false},
+                    {"name":"amount","sol_type":"uint256","storage":"word32","indexed":false}]}
+            ]}"#,
+        )
+        .unwrap();
+        crate::seal::seal_range(
+            dir.path(),
+            &[r#"{"table":"a__ev","amount":"100","block_number":1,"log_index":0}"#.to_string()],
+            1,
+            1,
+        )
+        .unwrap();
+
+        // b__ev has no segment, but a UNION of both (incl. the derived `_dec` column) must still work.
+        let rows = query(
+            dir.path(),
+            r#"SELECT SUM(amount_dec)::VARCHAR AS total FROM (
+                 SELECT amount_dec FROM "a__ev" UNION ALL SELECT amount_dec FROM "b__ev")"#,
+        )
+        .unwrap();
+        assert_eq!(rows[0]["total"], Value::from("100"));
     }
 
     /// RFC-0002 §4: a nest's `views/*.sql` derived views are loaded and queryable via `/sql`, and
