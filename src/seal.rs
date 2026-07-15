@@ -62,13 +62,15 @@ pub fn seal_range(
     from: u64,
     to: u64,
 ) -> Result<Option<Segment>> {
-    if entity_json.is_empty() {
-        return Ok(None);
-    }
+    // Step 3: the hot store holds mixed tables. Seal only transfer-shaped rows (they parse as `Row`);
+    // generic non-transfer rows are skipped here (per-table sealing lands in step 4).
     let rows: Vec<Row> = entity_json
         .iter()
-        .map(|j| serde_json::from_str(j).context("corrupt entity JSON while sealing"))
-        .collect::<Result<_>>()?;
+        .filter_map(|j| serde_json::from_str::<Row>(j).ok())
+        .collect();
+    if rows.is_empty() {
+        return Ok(None);
+    }
 
     let batch = to_batch(&rows)?;
     let bytes = write_parquet(&batch)?;

@@ -82,6 +82,14 @@ impl RpcClient {
         parse_hex_u64(result.as_str().unwrap_or_default())
     }
 
+    /// A storage slot's value at `address` (latest block) — used to read the EIP-1967 proxy slot.
+    pub async fn get_storage_at(&self, address: &str, slot: &str) -> Result<String> {
+        let result = self
+            .call("eth_getStorageAt", json!([address, slot, "latest"]))
+            .await?;
+        Ok(result.as_str().unwrap_or("0x0").to_string())
+    }
+
     /// Contract bytecode at `address` as of `block`. `"0x"` (empty) means not yet deployed.
     pub async fn get_code(&self, address: &str, block: u64) -> Result<String> {
         let result = self
@@ -101,20 +109,24 @@ impl RpcClient {
         Ok(result.get("hash").and_then(Value::as_str).map(String::from))
     }
 
+    /// One combined `eth_getLogs` across all `addresses`, matching any of `topic0s`.
     pub async fn get_logs(
         &self,
-        address: &str,
-        topic0: &str,
+        addresses: &[String],
+        topic0s: &[String],
         from: u64,
         to: u64,
     ) -> Result<Vec<Log>> {
-        let params = json!([{
-            "address": address,
-            "topics": [topic0],
-            "fromBlock": format!("0x{from:x}"),
-            "toBlock": format!("0x{to:x}"),
-        }]);
-        let result = self.call("eth_getLogs", params).await?;
+        let mut filter = serde_json::Map::new();
+        filter.insert("address".into(), json!(addresses));
+        if !topic0s.is_empty() {
+            filter.insert("topics".into(), json!([topic0s]));
+        }
+        filter.insert("fromBlock".into(), json!(format!("0x{from:x}")));
+        filter.insert("toBlock".into(), json!(format!("0x{to:x}")));
+        let result = self
+            .call("eth_getLogs", json!([Value::Object(filter)]))
+            .await?;
         let arr = result
             .as_array()
             .ok_or_else(|| anyhow!("eth_getLogs did not return an array"))?;

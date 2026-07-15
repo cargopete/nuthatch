@@ -179,8 +179,10 @@ impl Store {
     }
 
     /// Prune sealed entities from the hot store: remove entity rows whose block is in `[from, to]`.
-    /// Only ever called on a finalized, already-sealed range — the data survives in Parquet and is
-    /// reachable via the DuckDB point-read fallback. Returns the number of rows removed.
+    /// Returns the number of rows removed. Not called on the RFC-0001 step-3 path (which seals
+    /// transfers but doesn't prune, to avoid dropping unsealed non-transfer rows); RFC-0001 step 4's
+    /// per-table sealing prunes each table once its own segment is durable.
+    #[allow(dead_code)]
     pub fn prune_range(&self, from: u64, to: u64) -> Result<u64> {
         let lo = format!("{from:012}-000000");
         let hi = format!("{to:012}-999999");
@@ -234,6 +236,44 @@ mod tests {
             store.put_entity(&key, "{}").unwrap();
         }
         store.set_block_hash(block, hash).unwrap();
+    }
+
+    #[test]
+    fn prune_range_removes_only_blocks_in_range() {
+        let (store, _d) = temp_store();
+        apply_block(&store, 10, 2, "h10");
+        apply_block(&store, 11, 3, "h11");
+        apply_block(&store, 12, 1, "h12");
+        let removed = store.prune_range(10, 11).unwrap();
+        assert_eq!(removed, 5); // blocks 10 (2) + 11 (3)
+        assert_eq!(store.count().unwrap(), 1); // only block 12 remains
+    }
+
+    #[test]
+    fn rollback_is_multi_table_correct() {
+        // Rows from two logical tables interleaved by block; a reorg must drop them uniformly by
+        // block regardless of table (storage is block-keyed, so this is multi-table convergence).
+        let (store, _d) = temp_store();
+        store
+            .put_entity(&Store::entity_key(10, 0), r#"{"table":"a__x"}"#)
+            .unwrap();
+        store
+            .put_entity(&Store::entity_key(10, 1), r#"{"table":"b__y"}"#)
+            .unwrap();
+        store
+            .put_entity(&Store::entity_key(12, 0), r#"{"table":"a__x"}"#)
+            .unwrap();
+        store
+            .put_entity(&Store::entity_key(12, 1), r#"{"table":"b__y"}"#)
+            .unwrap();
+        store.rollback_to(11).unwrap();
+        let keys = store.entity_keys().unwrap();
+        assert_eq!(
+            keys.len(),
+            2,
+            "both block-12 rows (both tables) rolled back"
+        );
+        assert!(keys.iter().all(|k| k.starts_with("000000000010")));
     }
 
     #[test]

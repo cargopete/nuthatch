@@ -30,7 +30,7 @@ pub async fn init(args: InitArgs) -> Result<()> {
     let mut contracts = Vec::with_capacity(addresses.len());
     for (address, alias) in addresses.iter().zip(&aliases) {
         println!("→ resolving ABI for {alias} ({address}) on {}…", chain.name);
-        let abi_json = abi::resolve(chain.chain_id, address).await?;
+        let abi_json = resolve_abi(&rpc, chain.chain_id, address).await?;
         let abi_path = format!("abis/{alias}.json");
         std::fs::write(
             dir.join(&abi_path),
@@ -86,6 +86,48 @@ pub async fn init(args: InitArgs) -> Result<()> {
     println!("next:  nuthatch dev{}", dir_hint(&args.dir));
     println!("       nuthatch mcp   (expose this index to a coding agent over MCP)");
     Ok(())
+}
+
+/// Well-known proxy implementation storage slots, tried in order:
+/// - EIP-1967: keccak256("eip1967.proxy.implementation") − 1
+/// - legacy OpenZeppelin/zeppelinos: keccak256("org.zeppelinos.proxy.implementation") (e.g. USDC)
+const PROXY_IMPL_SLOTS: &[&str] = &[
+    "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc",
+    "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3",
+];
+
+/// Resolve the ABI to index events with. For a proxy (e.g. USDC), events emit from the proxy address
+/// but use the *implementation's* event definitions, so resolve the implementation's ABI. Falls back
+/// to the address's own ABI if it isn't a proxy or the implementation can't resolve.
+async fn resolve_abi(rpc: &RpcClient, chain_id: u64, address: &str) -> Result<serde_json::Value> {
+    for slot in PROXY_IMPL_SLOTS {
+        let Ok(word) = rpc.get_storage_at(address, slot).await else {
+            continue;
+        };
+        let Some(implementation) = impl_from_slot(&word) else {
+            continue;
+        };
+        println!("  · proxy → implementation {implementation}");
+        if let Ok(abi) = abi::resolve(chain_id, &implementation).await {
+            return Ok(abi);
+        }
+        println!("  · implementation ABI unresolved; using the proxy's own ABI");
+        break;
+    }
+    abi::resolve(chain_id, address).await
+}
+
+/// Extract a non-zero implementation address from a 32-byte storage word.
+fn impl_from_slot(slot: &str) -> Option<String> {
+    let h = slot.trim_start_matches("0x");
+    if h.len() < 40 {
+        return None;
+    }
+    let addr = &h[h.len() - 40..];
+    if addr.chars().all(|c| c == '0') {
+        return None;
+    }
+    Some(format!("0x{addr}"))
 }
 
 /// Aliases from `--alias` (validated, one per address) or defaults c0, c1, ….
@@ -254,6 +296,18 @@ mod tests {
         assert!(resolve_aliases(&["usdc".into()], 2).is_err()); // count mismatch
         assert!(resolve_aliases(&["USDC".into()], 1).is_err()); // uppercase invalid
         assert!(resolve_aliases(&["1bad".into()], 1).is_err()); // leading digit invalid
+    }
+
+    #[test]
+    fn eip1967_impl_extraction() {
+        assert!(impl_from_slot(
+            "0x0000000000000000000000000000000000000000000000000000000000000000"
+        )
+        .is_none());
+        assert_eq!(
+            impl_from_slot("0x00000000000000000000000043506849d7c04f9138d1a2050bbf3a0c054402dd"),
+            Some("0x43506849d7c04f9138d1a2050bbf3a0c054402dd".to_string())
+        );
     }
 
     #[test]

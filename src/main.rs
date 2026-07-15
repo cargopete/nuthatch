@@ -13,7 +13,6 @@ mod analytics;
 mod chains;
 mod cli;
 mod config;
-mod decode;
 mod indexer;
 mod mcp;
 mod project;
