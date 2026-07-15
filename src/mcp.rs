@@ -77,7 +77,7 @@ pub fn tool_specs() -> Value {
           "inputSchema": { "type": "object", "properties": {} } },
         { "name": "schema", "description": "The data model — entities, the derived balances view, and how to query it. Read this first.",
           "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "sql", "description": "Run a read-only SQL query over sealed (finalized) transfers. A `transfers` view (columns: block_number, log_index, from, to, value, value_hex, tx_hash) is in scope. SELECT/WITH only.",
+        { "name": "sql", "description": "Run a read-only SQL query over sealed (finalized) data. Each event is a DuckDB view named `{alias}__{event}` (e.g. \"usdc__transfer\") with block_number, log_index, tx_hash, address + the event's params. Call `schema` first. SELECT/WITH only.",
           "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "A SELECT or WITH query." } }, "required": ["query"] } },
         { "name": "entity", "description": "Look up one transfer by its id, formatted `{block:012}-{logindex:06}`.",
           "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } },
@@ -143,23 +143,23 @@ async fn fetch(req: reqwest::RequestBuilder, url: &str) -> Result<String> {
 
 /// The semantic hint an agent reads before querying — the seed of the governed semantic layer.
 fn schema_doc() -> String {
-    r#"nuthatch data model (skeleton)
+    r#"nuthatch data model
 
-ENTITIES
-  transfer — one ERC-20 Transfer. id = "{block:012}-{logindex:06}".
-    fields: block_number, log_index, from, to, value (decimal base units, i64), value_hex, tx_hash
+TABLES (one per contract event; id = "{block:012}-{logindex:06}")
+  Each event of each contract is a table named `{alias}__{event}` (e.g. usdc__transfer,
+  usdc__approval). Every table has: block_number, log_index, tx_hash, address (emitter) + the
+  event's decoded params. Discover the exact tables/columns from `GET /` and the nest's schema.
 
 VIEWS (incrementally maintained)
-  balances — per-address net balance = Σ(received) − Σ(sent), in i64 base units.
-             query via `balance`/`top_balances`. Reorgs retract automatically.
+  balances — per-address net balance = Σ(received) − Σ(sent), in i64 base units, for ERC-20
+             Transfer tables. Query via `balance`/`top_balances`. Reorgs retract automatically.
 
-SQL (tool `sql`, read-only, over FINALIZED transfers)
-  A `transfers` view is in scope. Examples:
-    SELECT count(*) FROM transfers
-    SELECT "to", count(*) n FROM transfers GROUP BY "to" ORDER BY n DESC LIMIT 10
-    SELECT * FROM transfers WHERE value > 1000000000 ORDER BY value DESC LIMIT 20
+SQL (tool `sql`, read-only, over FINALIZED data)
+  Each sealed table is a DuckDB view of the same name (quote it). Examples:
+    SELECT count(*) FROM "usdc__transfer"
+    SELECT "to", count(*) n FROM "usdc__transfer" GROUP BY "to" ORDER BY n DESC LIMIT 10
   Note: `sql` sees only sealed (past-finality) data; recent tip data is served by the point-read
-  tools (`entity`) and the live IVM views (`balance`, `top_balances`)."#
+  tool (`entity`) and the live IVM views (`balance`, `top_balances`)."#
         .to_string()
 }
 

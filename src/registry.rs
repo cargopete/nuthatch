@@ -135,8 +135,16 @@ impl Value {
             Value::Address(a) => json!(format!("0x{}", hex::encode(a))),
             Value::U64(n) => json!(n),
             Value::I64(n) => json!(n),
-            Value::Word16(b) => json!(format!("0x{}", hex::encode(b))),
-            Value::Word32(b) => json!(format!("0x{}", hex::encode(b))),
+            // Big integers: decimal string when it fits u128 (the common case, and queryable), else
+            // hex. i256/negatives beyond u128 fall back to hex (a signed-decimal refinement is later).
+            Value::Word16(b) => json!(u128::from_be_bytes(*b).to_string()),
+            Value::Word32(b) => {
+                if b[..16].iter().all(|&x| x == 0) {
+                    json!(u128::from_be_bytes(b[16..].try_into().unwrap()).to_string())
+                } else {
+                    json!(format!("0x{}", hex::encode(b)))
+                }
+            }
             Value::Bool(b) => json!(b),
             Value::Bytes(b) => json!(format!("0x{}", hex::encode(b))),
             Value::Str(s) => json!(s),

@@ -28,7 +28,7 @@ pub fn query(dir: &Path, sql: &str) -> Result<Vec<Value>> {
         "SET memory_limit='{MEM_LIMIT}'; SET threads={MAX_THREADS};"
     ))
     .context("failed to configure DuckDB")?;
-    define_transfers_view(&conn, dir)?;
+    define_views(&conn, dir)?;
 
     let mut stmt = conn.prepare(sql).context("failed to prepare query")?;
     let mut rows = stmt.query([]).context("query failed")?;
@@ -52,45 +52,39 @@ pub fn query(dir: &Path, sql: &str) -> Result<Vec<Value>> {
 
 /// Point-read fallback: fetch a single sealed transfer by (block, log_index). Used when the hot
 /// store has already pruned it. Integers are interpolated (not user text), so no injection surface.
-pub fn get_transfer(dir: &Path, block: u64, log_index: u64) -> Result<Option<Value>> {
-    let sql = format!(
-        "SELECT * FROM transfers WHERE block_number = {block} AND log_index = {log_index} LIMIT 1"
-    );
-    Ok(query(dir, &sql)?.into_iter().next())
+pub fn get_row(dir: &Path, block: u64, log_index: u64) -> Result<Option<Value>> {
+    let manifest = crate::seal::load_manifest(dir)?;
+    for table in manifest.tables.keys() {
+        let sql = format!(
+            "SELECT * FROM \"{table}\" WHERE block_number = {block} AND log_index = {log_index} LIMIT 1"
+        );
+        if let Some(row) = query(dir, &sql)?.into_iter().next() {
+            return Ok(Some(row));
+        }
+    }
+    Ok(None)
 }
 
-/// Expose the sealed segments as a `transfers` view. When nothing is sealed yet, define an empty
-/// but correctly-typed view so queries still parse and return zero rows.
-fn define_transfers_view(conn: &Connection, dir: &Path) -> Result<()> {
+/// Expose each table's sealed segments as a read-only DuckDB view named after the table. Tables with
+/// no sealed segments yet simply have no view (they hold only unsealed tip data, served from hot).
+fn define_views(conn: &Connection, dir: &Path) -> Result<()> {
+    let manifest = crate::seal::load_manifest(dir)?;
     let seg_dir = dir.join(crate::seal::SEGMENTS_DIR);
-    let has_segments = std::fs::read_dir(&seg_dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .any(|e| e.path().extension().is_some_and(|x| x == "parquet"))
-        })
-        .unwrap_or(false);
-
-    let ddl = if has_segments {
-        let glob = seg_dir.join("*.parquet");
-        format!(
-            "CREATE VIEW transfers AS SELECT * FROM read_parquet('{}')",
-            glob.display()
-        )
-    } else {
-        // Empty, correctly-typed view (schema mirrors seal::schema()).
-        "CREATE VIEW transfers AS SELECT \
-            CAST(NULL AS UBIGINT) AS block_number, \
-            CAST(NULL AS UBIGINT) AS log_index, \
-            CAST(NULL AS VARCHAR) AS \"from\", \
-            CAST(NULL AS VARCHAR) AS \"to\", \
-            CAST(NULL AS VARCHAR) AS value, \
-            CAST(NULL AS VARCHAR) AS value_hex, \
-            CAST(NULL AS VARCHAR) AS tx_hash \
-         WHERE 1=0"
-            .to_string()
-    };
-    conn.execute_batch(&ddl)
-        .context("failed to define transfers view")?;
+    for (table, segments) in &manifest.tables {
+        if segments.is_empty() {
+            continue;
+        }
+        let files: Vec<String> = segments
+            .iter()
+            .map(|s| format!("'{}'", seg_dir.join(&s.file).display()))
+            .collect();
+        let ddl = format!(
+            "CREATE VIEW \"{table}\" AS SELECT * FROM read_parquet([{}])",
+            files.join(", ")
+        );
+        conn.execute_batch(&ddl)
+            .with_context(|| format!("failed to define view {table}"))?;
+    }
     Ok(())
 }
 
@@ -120,33 +114,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_project_returns_no_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let rows = query(dir.path(), "SELECT count(*) AS n FROM transfers").unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["n"], Value::from(0u64));
-    }
-
-    #[test]
     fn rejects_non_select() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(query(dir.path(), "DROP VIEW transfers").is_err());
+        assert!(query(dir.path(), "DROP TABLE x").is_err());
     }
 
     #[test]
-    fn queries_a_sealed_segment() {
+    fn queries_a_sealed_per_table_segment() {
         let dir = tempfile::tempdir().unwrap();
         let entities = vec![
-            r#"{"from":"0xa","to":"0xb","value":"5","value_hex":"0x5","block_number":10,"tx_hash":"0xt","log_index":0}"#.to_string(),
-            r#"{"from":"0xa","to":"0xc","value":"7","value_hex":"0x7","block_number":10,"tx_hash":"0xt","log_index":1}"#.to_string(),
+            r#"{"table":"usdc__transfer","from":"0xa","to":"0xb","value":"5","block_number":10,"tx_hash":"0xt","log_index":0}"#.to_string(),
+            r#"{"table":"usdc__transfer","from":"0xa","to":"0xc","value":"7","block_number":10,"tx_hash":"0xt","log_index":1}"#.to_string(),
+            r#"{"table":"usdc__approval","owner":"0xa","spender":"0xd","value":"9","block_number":10,"tx_hash":"0xt","log_index":2}"#.to_string(),
         ];
         crate::seal::seal_range(dir.path(), &entities, 10, 10).unwrap();
 
-        let rows = query(dir.path(), "SELECT count(*) AS n FROM transfers").unwrap();
-        assert_eq!(rows[0]["n"], Value::from(2u64));
+        // Each table is its own view.
+        let t = query(dir.path(), r#"SELECT count(*) AS n FROM "usdc__transfer""#).unwrap();
+        assert_eq!(t[0]["n"], Value::from(2u64));
+        let a = query(dir.path(), r#"SELECT count(*) AS n FROM "usdc__approval""#).unwrap();
+        assert_eq!(a[0]["n"], Value::from(1u64));
 
-        let one = get_transfer(dir.path(), 10, 1).unwrap().unwrap();
+        // Point-read searches all tables by (block, log_index).
+        let one = get_row(dir.path(), 10, 1).unwrap().unwrap();
         assert_eq!(one["to"], Value::from("0xc"));
-        assert_eq!(one["value"], Value::from("7"));
+        let appr = get_row(dir.path(), 10, 2).unwrap().unwrap();
+        assert_eq!(appr["spender"], Value::from("0xd"));
     }
 }

@@ -89,6 +89,17 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-15 — RFC-0001 step 4: per-table cold storage.** Sealing generalises from transfer-only
+  to every table: rows are grouped by their `table` field and each becomes its own content-addressed
+  Parquet segment; `manifest.json` is now `{tables: {name: [segments]}}`. DuckDB exposes one view per
+  table (`{alias}__{event}`); `/sql` queries any table and `/entity` point-reads search all tables
+  across the hot→cold seam. **Hot-store pruning is restored** — the whole finalized range is pruned
+  once every table's segment is durable (single global watermark). Row storage is unified (all rows
+  are typed JSON with a `table` field; big ints render as decimal when they fit u128). Verified live
+  on USDC: 2,893 rows sealed across 5 tables (transfer/approval/mint/burn/authorization_used) and
+  pruned; `/sql` per-table (2,737 transfers, 292 approvals); a pruned row served via the DuckDB
+  fallback. 27 tests green. _Remaining: step 5 (generalised `/tables` + `/table/{name}` serving,
+  MCP + `llms.txt` regenerated from a schema manifest); step 6 (footprint re-measure)._
 - **2026-07-15 — RFC-0001 step 3: multi-contract decode wired end-to-end.** `dev` now drives the
   `DecodeRegistry`: one combined `eth_getLogs` (all addresses × all topic0s) → decode *every* declared
   event of *every* contract → per-table rows in the hot store. The hardcoded Transfer path is retired

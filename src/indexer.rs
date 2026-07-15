@@ -164,29 +164,15 @@ async fn index_loop(
                         }
                     };
                     let key = Store::entity_key(row.block_number, row.log_index);
-                    if let Some((from, to_addr, value, value_hex)) = row.erc20_transfer_fields() {
-                        // Transfer rows are stored in the transfer-compatible shape so the balance
-                        // view, sealing, and the `transfers` SQL view keep working unchanged.
-                        let json = serde_json::json!({
-                            "from": from,
-                            "to": to_addr,
-                            "value": value,
-                            "value_hex": value_hex,
-                            "block_number": row.block_number,
-                            "tx_hash": row.tx_hash,
-                            "log_index": row.log_index,
-                        })
-                        .to_string();
-                        store.put_entity(&key, &json)?;
+                    // Feed the IVM balance view for transfer rows (extracted before storing).
+                    if let Some((from, to_addr, value, _hex)) = row.erc20_transfer_fields() {
                         if let Some(v) = value.as_deref().and_then(|s| s.parse::<i64>().ok()) {
                             deltas.extend(views::transfer_deltas(&from, &to_addr, v, 1));
                         }
-                    } else {
-                        // Non-transfer rows: generic typed JSON (with a `table` field). They live in
-                        // the hot store and are visible via `/entities`; per-table sealing + SQL land
-                        // in step 4.
-                        store.put_entity(&key, &row.to_json().to_string())?;
                     }
+                    // Every row is stored uniformly as typed JSON with a `table` field; per-table
+                    // sealing groups by it.
+                    store.put_entity(&key, &row.to_json().to_string())?;
                     stored += 1;
                 }
                 balances.apply(deltas);
@@ -269,17 +255,16 @@ fn maybe_seal(dir: &std::path::Path, store: &Store, tip: u64) -> Result<()> {
     }
 
     let entities = store.entities_in_range(from, ceiling)?;
-    // `seal_range` seals only transfer-shaped rows (it skips rows it can't parse). Step 3 does NOT
-    // prune the hot store: pruning by block range would drop the unsealed non-transfer rows too.
-    // Per-table sealing + pruning lands in step 4; until then the hot store isn't bounded on long
-    // runs (fine for the CI footprint scenario).
+    // Every table in the range seals together (per-table segments), so once sealing succeeds the
+    // whole range is safe to prune from the hot store — the watermark stays global.
     match seal::seal_range(dir, &entities, from, ceiling)? {
-        Some(seg) => {
+        Some(summary) => {
             store.set_meta(SEALED_THROUGH_KEY, &ceiling.to_string())?;
+            let pruned = store.prune_range(from, ceiling)?;
             tracing::info!(
-                "sealed segment {}… blocks {from}..={ceiling} ({} transfer rows)",
-                &seg.hash[..12],
-                seg.rows
+                "sealed blocks {from}..={ceiling}: {} rows across {} table(s); pruned {pruned} from hot",
+                summary.rows,
+                summary.tables
             );
         }
         None => {
@@ -302,8 +287,13 @@ fn retraction_batch(
         let Ok(v) = serde_json::from_str::<serde_json::Value>(j) else {
             continue;
         };
-        // Only transfer rows were fed to the balance view (they carry `value_hex`); retract only those.
-        if v.get("value_hex").is_none() {
+        // Only transfer rows were fed to the balance view; retract only those.
+        let is_transfer = v
+            .get("table")
+            .and_then(|t| t.as_str())
+            .map(|t| t.ends_with("__transfer"))
+            .unwrap_or(false);
+        if !is_transfer {
             continue;
         }
         let (Some(from), Some(to)) = (v["from"].as_str(), v["to"].as_str()) else {

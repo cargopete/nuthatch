@@ -52,7 +52,6 @@ async fn summary(State(s): State<AppState>) -> impl IntoResponse {
         "name": "nuthatch",
         "chain": s.chain,
         "address": s.address,
-        "event": "Transfer",
         "entities": count,
         "last_block": last_block,
         "sealed_through": s.store.get_meta("sealed_through").ok().flatten(),
@@ -62,7 +61,7 @@ async fn summary(State(s): State<AppState>) -> impl IntoResponse {
             "/health",
             "/entities?limit=100",
             "/entity/{block:012}-{log_index:06}",
-            "/sql?q=SELECT count(*) FROM transfers",
+            "/sql?q=SELECT count(*) FROM \"<alias>__<event>\"",
             "/balances?limit=100",
             "/balance/{address}",
         ],
@@ -103,10 +102,9 @@ async fn entity(State(s): State<AppState>, Path(id): Path<String>) -> impl IntoR
     match parse_id(&id) {
         Some((block, log_index)) => {
             let dir = s.dir.clone();
-            let sealed = tokio::task::spawn_blocking(move || {
-                analytics::get_transfer(&dir, block, log_index)
-            })
-            .await;
+            let sealed =
+                tokio::task::spawn_blocking(move || analytics::get_row(&dir, block, log_index))
+                    .await;
             match sealed {
                 Ok(Ok(Some(v))) => Json(v).into_response(),
                 Ok(Ok(None)) => not_found(&id),
@@ -123,7 +121,7 @@ struct SqlQuery {
     q: String,
 }
 
-/// Read-only analytical SQL over the sealed segments. A `transfers` view is in scope.
+/// Read-only analytical SQL over the sealed segments; one view per `{alias}__{event}` table.
 async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl IntoResponse {
     let dir = s.dir.clone();
     let result = tokio::task::spawn_blocking(move || analytics::query(&dir, &q.q)).await;

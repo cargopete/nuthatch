@@ -179,10 +179,9 @@ impl Store {
     }
 
     /// Prune sealed entities from the hot store: remove entity rows whose block is in `[from, to]`.
-    /// Returns the number of rows removed. Not called on the RFC-0001 step-3 path (which seals
-    /// transfers but doesn't prune, to avoid dropping unsealed non-transfer rows); RFC-0001 step 4's
-    /// per-table sealing prunes each table once its own segment is durable.
-    #[allow(dead_code)]
+    /// Returns the number of rows removed. Called once every table in the range has been sealed to
+    /// its own Parquet segment (the whole range is safe to drop; the data survives in Parquet and is
+    /// reachable via the DuckDB point-read fallback).
     pub fn prune_range(&self, from: u64, to: u64) -> Result<u64> {
         let lo = format!("{from:012}-000000");
         let hi = format!("{to:012}-999999");
