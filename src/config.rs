@@ -4,7 +4,7 @@
 //! v1 file (single top-level `address`) is migrated transparently on load, so existing projects
 //! keep working.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -12,6 +12,14 @@ pub const CONFIG_FILE: &str = "nuthatch.toml";
 pub const DB_FILE: &str = "nuthatch.redb";
 /// v1 default ABI filename, retained for migration of old single-contract projects.
 pub const ABI_FILE: &str = "abi.json";
+
+/// The nest-config schema this build understands. A nest declaring a higher version is rejected on
+/// load (it was authored by a newer nuthatch) — the guard that makes `init --from` safe.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    CURRENT_SCHEMA_VERSION
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -26,6 +34,9 @@ pub struct Nest {
     pub chain: String,
     pub chain_id: u64,
     pub rpc_urls: Vec<String>,
+    /// Config schema version (see `CURRENT_SCHEMA_VERSION`). Absent in older nests → treated as 1.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -49,12 +60,20 @@ impl Config {
             )
         })?;
         // v2 first; fall back to migrating a v1 file.
-        match toml::from_str::<Config>(&raw) {
-            Ok(cfg) => Ok(cfg),
+        let cfg = match toml::from_str::<Config>(&raw) {
+            Ok(cfg) => cfg,
             Err(v2_err) => Self::from_v1(&raw).map_err(|v1_err| {
                 anyhow!("nuthatch.toml is neither v2 ({v2_err}) nor v1 ({v1_err})")
-            }),
+            })?,
+        };
+        if cfg.nest.schema_version > CURRENT_SCHEMA_VERSION {
+            bail!(
+                "this nest needs config schema v{} but this nuthatch supports up to v{} — upgrade nuthatch",
+                cfg.nest.schema_version,
+                CURRENT_SCHEMA_VERSION
+            );
         }
+        Ok(cfg)
     }
 
     fn from_v1(raw: &str) -> Result<Config> {
@@ -72,6 +91,7 @@ impl Config {
                 chain: v1.chain,
                 chain_id: v1.chain_id,
                 rpc_urls: v1.rpc_urls,
+                schema_version: CURRENT_SCHEMA_VERSION,
             },
             contracts: vec![Contract {
                 alias: "c0".to_string(),
@@ -129,6 +149,7 @@ mod tests {
                 chain: "mainnet".into(),
                 chain_id: 1,
                 rpc_urls: vec!["https://rpc.example".into()],
+                schema_version: CURRENT_SCHEMA_VERSION,
             },
             contracts: vec![
                 Contract {

@@ -6,12 +6,23 @@ use std::path::{Path, PathBuf};
 use crate::abi;
 use crate::chains;
 use crate::cli::InitArgs;
-use crate::config::{Config, Contract, Nest};
+use crate::config::{Config, Contract, Nest, CURRENT_SCHEMA_VERSION};
 use crate::rpc::RpcClient;
 
 pub async fn init(args: InitArgs) -> Result<()> {
-    let chain = chains::lookup(&args.chain)
-        .with_context(|| format!("unknown chain '{}' (try: mainnet)", args.chain))?;
+    // Two ways to start a nest: clone/copy a published one (`--from`), or resolve from addresses.
+    if let Some(source) = args.from.clone() {
+        return init_from(&source, &args.dir);
+    }
+    if args.addresses.is_empty() {
+        bail!("provide one or more contract addresses, or --from <git-url|dir>");
+    }
+    let chain = chains::lookup(&args.chain).with_context(|| {
+        format!(
+            "unknown chain '{}' (try: mainnet, arbitrum-one)",
+            args.chain
+        )
+    })?;
     let dir = PathBuf::from(&args.dir);
     std::fs::create_dir_all(dir.join("abis"))
         .with_context(|| format!("cannot create {}", dir.display()))?;
@@ -66,6 +77,7 @@ pub async fn init(args: InitArgs) -> Result<()> {
             chain: chain.name.to_string(),
             chain_id: chain.chain_id,
             rpc_urls: chain.rpc_urls.iter().map(|s| s.to_string()).collect(),
+            schema_version: CURRENT_SCHEMA_VERSION,
         },
         contracts,
     };
@@ -100,6 +112,112 @@ pub async fn init(args: InitArgs) -> Result<()> {
     println!();
     println!("next:  nuthatch dev{}", dir_hint(&args.dir));
     println!("       nuthatch mcp   (expose this index to a coding agent over MCP)");
+    Ok(())
+}
+
+/// Initialise a nest from a published one — a git URL or a local directory — instead of resolving
+/// from addresses. The nest is self-contained (ABIs vendored, `nuthatch.toml` committed), so this
+/// clones/copies it and validates it: the toml parses at a supported schema version and the decode
+/// registry builds from the vendored ABIs. Publishing a nest is `git push`; consuming it is this.
+fn init_from(source: &str, dir_arg: &str) -> Result<()> {
+    // Default the target dir to the nest's own name (repo/dir basename) unless one was given.
+    let target = if dir_arg == "." {
+        PathBuf::from(source_basename(source))
+    } else {
+        PathBuf::from(dir_arg)
+    };
+    if target.exists() && target.read_dir().map(|mut d| d.next().is_some())? {
+        bail!(
+            "target '{}' already exists and is not empty",
+            target.display()
+        );
+    }
+
+    if is_git_source(source) {
+        println!("→ cloning nest from {source} …");
+        clone_repo(source, &target)?;
+        // Drop the clone's history: a consumed nest is a plain working copy, not a live checkout.
+        let _ = std::fs::remove_dir_all(target.join(".git"));
+    } else {
+        let src = PathBuf::from(source);
+        if !src.is_dir() {
+            bail!("--from '{source}' is neither a git URL nor an existing local directory");
+        }
+        println!("→ copying nest from {} …", src.display());
+        copy_dir(&src, &target)?;
+    }
+
+    // Validate: it must be a real nest — toml at a supported schema version, ABIs present + decodable.
+    let config = Config::load(&target)
+        .with_context(|| format!("'{}' is not a valid nuthatch nest", target.display()))?;
+    let registry = crate::registry::DecodeRegistry::from_nest(&target, &config)
+        .context("nest ABIs failed to build a decode registry (is the nest self-contained?)")?;
+
+    println!(
+        "✓ nest '{}' ready — {} on {}, {} contract(s), {} table(s), {} anonymous event(s) skipped",
+        config.nest.name,
+        source_basename(source),
+        config.nest.chain,
+        config.contracts.len(),
+        registry.tables().len(),
+        registry.skipped_anonymous(),
+    );
+    println!("next:  nuthatch dev --dir {}", target.display());
+    Ok(())
+}
+
+/// Whether `--from` names a git remote (vs. a local directory).
+fn is_git_source(source: &str) -> bool {
+    source.starts_with("http://")
+        || source.starts_with("https://")
+        || source.starts_with("git@")
+        || source.starts_with("ssh://")
+        || source.ends_with(".git")
+}
+
+/// The nest's own name: the last path component, minus a trailing `.git` or slash.
+fn source_basename(source: &str) -> String {
+    source
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplit(['/', ':'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("nest")
+        .to_string()
+}
+
+/// Shallow-clone a nest repo into `target` using the system `git` (no in-process git dependency).
+fn clone_repo(url: &str, target: &Path) -> Result<()> {
+    let status = std::process::Command::new("git")
+        .args(["clone", "--depth", "1", url])
+        .arg(target)
+        .status()
+        .context("failed to run `git` — is it installed and on PATH?")?;
+    if !status.success() {
+        bail!("git clone of '{url}' failed");
+    }
+    Ok(())
+}
+
+/// Recursively copy a local nest directory (skipping any `.git`).
+fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst).with_context(|| format!("cannot create {}", dst.display()))?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("cannot read {}", src.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        if entry.file_type()?.is_dir() {
+            copy_dir(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)
+                .with_context(|| format!("failed to copy {}", from.display()))?;
+        }
+    }
     Ok(())
 }
 
@@ -346,5 +464,31 @@ mod tests {
             "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
         );
         assert!(normalise_address("0x123").is_err());
+    }
+
+    #[test]
+    fn git_source_detection() {
+        assert!(is_git_source("https://github.com/cargopete/horizon-nest"));
+        assert!(is_git_source("git@github.com:cargopete/horizon-nest.git"));
+        assert!(is_git_source("./local-bare-repo.git"));
+        assert!(!is_git_source("./horizon-nest"));
+        assert!(!is_git_source("/abs/path/to/nest"));
+    }
+
+    #[test]
+    fn source_basename_derives_nest_dir() {
+        assert_eq!(
+            source_basename("https://github.com/cargopete/horizon-nest"),
+            "horizon-nest"
+        );
+        assert_eq!(
+            source_basename("https://github.com/cargopete/horizon-nest.git"),
+            "horizon-nest"
+        );
+        assert_eq!(
+            source_basename("git@github.com:cargopete/horizon-nest.git"),
+            "horizon-nest"
+        );
+        assert_eq!(source_basename("./local/my-nest/"), "my-nest");
     }
 }

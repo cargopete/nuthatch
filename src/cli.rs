@@ -48,19 +48,25 @@ pub struct TransformArgs {
 
 #[derive(Args)]
 pub struct InitArgs {
-    /// One or more contract addresses to index, e.g. 0xA0b8…eB48 (USDC).
-    #[arg(required = true, num_args = 1..)]
+    /// One or more contract addresses to index, e.g. 0xA0b8…eB48 (USDC). Omit when using `--from`.
+    #[arg(num_args = 0..)]
     pub addresses: Vec<String>,
+
+    /// Initialise from a published nest instead of addresses: a git URL or a local directory. The
+    /// nest is self-contained (ABIs vendored), so nothing is resolved — just cloned/copied + validated.
+    #[arg(long, conflicts_with = "addresses")]
+    pub from: Option<String>,
 
     /// Optional aliases, one per address in order (comma-separated). Defaults to c0, c1, ….
     #[arg(long, value_delimiter = ',')]
     pub alias: Vec<String>,
 
-    /// Chain to index. Currently: mainnet.
+    /// Chain to index. E.g. mainnet, arbitrum-one.
     #[arg(long, default_value = "mainnet")]
     pub chain: String,
 
-    /// Directory to scaffold into (defaults to the current directory).
+    /// Directory to scaffold into (defaults to the current directory; for `--from`, defaults to the
+    /// nest's own name).
     #[arg(long, default_value = ".")]
     pub dir: String,
 }

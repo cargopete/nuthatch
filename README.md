@@ -97,6 +97,16 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-15 — RFC-0002 step 3: `init --from` + config schema versioning.** A nest is just a repo
+  (committed `nuthatch.toml` + vendored ABIs), so publishing one is `git push` and consuming one is
+  `nuthatch init --from <git-url | ./dir>` — no registry service, deliberately. `--from` clones (shallow)
+  or copies the nest, strips the clone's `.git`, and **validates** it: the toml parses at a supported
+  schema version and the decode registry builds from the vendored ABIs (nothing is re-resolved — the
+  nest is self-contained). New `schema_version` in `[nest]` (default 1); a nest declaring a newer
+  version is rejected with a clear upgrade message — the guard that makes consuming third-party nests
+  safe. Verified live: `init --from` over both a local dir and a git repo produced a runnable nest
+  (`dev` indexed it with no ABI resolution); the version guard and the `addresses`/`--from` conflict
+  both fire. 41 tests (+2).
 - **2026-07-15 — RFC-0002 step 2: `block_timestamp` implicit column.** Every row now carries
   `block_timestamp` (u64 unix seconds) from the block header — the RFC-0001 amendment the time-bucketed
   aggregation views need. It's batch-fetched: after decoding a window the indexer collects the distinct
