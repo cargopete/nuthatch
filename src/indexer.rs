@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::cli::DevArgs;
 use crate::config::{Config, DB_FILE};
-use crate::decode::{self, TRANSFER_TOPIC0};
+use crate::registry::DecodeRegistry;
 use crate::rpc::RpcClient;
 use crate::seal;
 use crate::serve;
@@ -28,34 +28,44 @@ const START_BLOCK_KEY: &str = "start_block";
 pub async fn dev(args: DevArgs) -> Result<()> {
     let dir = PathBuf::from(&args.dir);
     let config = Config::load(&dir)?;
-    // Step 2 runs the existing single-contract Transfer path on the nest's primary contract; step 3
-    // generalises decode + storage to every contract via the DecodeRegistry.
-    let primary = config.primary()?.clone();
     let store = Store::open(&dir.join(DB_FILE))?;
+    // The decode registry drives all contracts; the indexer decodes every declared event of every
+    // contract in the nest into per-table rows.
+    let registry = Arc::new(DecodeRegistry::from_nest(&dir, &config)?);
     // Today: RPC polling. The indexer only sees `dyn Source`, so an ExEx tip source (feature = "exex")
     // slots in here with no change to anything downstream.
     let source: Arc<dyn Source> = Arc::new(RpcClient::new(config.nest.rpc_urls.clone())?);
     let balances = BalanceView::start()?;
 
-    if config.contracts.len() > 1 {
-        tracing::warn!(
-            "nest has {} contracts; `dev` indexes only the primary ('{}') until RFC-0001 step 3",
-            config.contracts.len(),
-            primary.alias
-        );
-    }
+    // The combined `eth_getLogs` filter: all contract addresses, matching any registered topic0.
+    let addresses: Vec<String> = registry
+        .addresses()
+        .iter()
+        .map(|a| format!("0x{}", hex::encode(a)))
+        .collect();
+    let topic0s: Vec<String> = registry
+        .topic0s()
+        .iter()
+        .map(|t| format!("0x{}", hex::encode(t)))
+        .collect();
+
     tracing::info!(
-        "indexing {} ({}) on {} — Transfer events only",
-        primary.address,
-        primary.alias,
-        config.nest.chain
+        "indexing nest '{}' on {}: {} contract(s), {} table(s), {} anonymous skipped, registry {}…",
+        config.nest.name,
+        config.nest.chain,
+        config.contracts.len(),
+        registry.tables().len(),
+        registry.skipped_anonymous(),
+        &hex::encode(registry.hash())[..12],
     );
 
     // Kick off the indexing loop in the background; serve the API on this task.
     let ingest = tokio::spawn(index_loop(
         source.clone(),
         store.clone(),
-        primary.address.clone(),
+        registry.clone(),
+        addresses,
+        topic0s,
         args.backfill,
         dir.clone(),
         balances.clone(),
@@ -63,7 +73,7 @@ pub async fn dev(args: DevArgs) -> Result<()> {
 
     let app_state = serve::AppState {
         store: store.clone(),
-        address: primary.address.clone(),
+        address: config.primary()?.address.clone(),
         chain: config.nest.chain.clone(),
         dir: dir.clone(),
         balances,
@@ -74,10 +84,13 @@ pub async fn dev(args: DevArgs) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn index_loop(
     source: Arc<dyn Source>,
     store: Store,
-    address: String,
+    registry: Arc<DecodeRegistry>,
+    addresses: Vec<String>,
+    topic0s: Vec<String>,
     backfill: u64,
     dir: PathBuf,
     balances: BalanceView,
@@ -137,22 +150,44 @@ async fn index_loop(
         }
 
         let to = (next + WINDOW - 1).min(tip);
-        match source.logs(&address, TRANSFER_TOPIC0, next, to).await {
+        match source.logs(&addresses, &topic0s, next, to).await {
             Ok(logs) => {
                 let mut stored = 0usize;
                 let mut deltas = Vec::new();
                 for log in &logs {
-                    if let Some(t) = decode::transfer(log) {
-                        let key = Store::entity_key(t.block_number, t.log_index);
-                        let json = serde_json::to_string(&t)?;
-                        store.put_entity(&key, &json)?;
-                        stored += 1;
-                        // Feed the IVM balance view (weight +1). Values that don't fit i64 are
-                        // skipped for now — the view accumulates in i64 base units.
-                        if let Some(v) = t.value.as_deref().and_then(|s| s.parse::<i64>().ok()) {
-                            deltas.extend(views::transfer_deltas(&t.from, &t.to, v, 1));
+                    let row = match registry.decode(log) {
+                        Ok(Some(r)) => r,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            tracing::debug!("decode skipped: {e:#}");
+                            continue;
                         }
+                    };
+                    let key = Store::entity_key(row.block_number, row.log_index);
+                    if let Some((from, to_addr, value, value_hex)) = row.erc20_transfer_fields() {
+                        // Transfer rows are stored in the transfer-compatible shape so the balance
+                        // view, sealing, and the `transfers` SQL view keep working unchanged.
+                        let json = serde_json::json!({
+                            "from": from,
+                            "to": to_addr,
+                            "value": value,
+                            "value_hex": value_hex,
+                            "block_number": row.block_number,
+                            "tx_hash": row.tx_hash,
+                            "log_index": row.log_index,
+                        })
+                        .to_string();
+                        store.put_entity(&key, &json)?;
+                        if let Some(v) = value.as_deref().and_then(|s| s.parse::<i64>().ok()) {
+                            deltas.extend(views::transfer_deltas(&from, &to_addr, v, 1));
+                        }
+                    } else {
+                        // Non-transfer rows: generic typed JSON (with a `table` field). They live in
+                        // the hot store and are visible via `/entities`; per-table sealing + SQL land
+                        // in step 4.
+                        store.put_entity(&key, &row.to_json().to_string())?;
                     }
+                    stored += 1;
                 }
                 balances.apply(deltas);
                 // Checkpoint the window boundary's canonical hash for future reorg detection.
@@ -162,7 +197,7 @@ async fn index_loop(
                 store.set_meta(LAST_BLOCK_KEY, &to.to_string())?;
                 if stored > 0 {
                     tracing::info!(
-                        "blocks {next}..={to}: +{stored} transfers (total {})",
+                        "blocks {next}..={to}: +{stored} rows (total {})",
                         store.count()?
                     );
                 }
@@ -234,14 +269,15 @@ fn maybe_seal(dir: &std::path::Path, store: &Store, tip: u64) -> Result<()> {
     }
 
     let entities = store.entities_in_range(from, ceiling)?;
+    // `seal_range` seals only transfer-shaped rows (it skips rows it can't parse). Step 3 does NOT
+    // prune the hot store: pruning by block range would drop the unsealed non-transfer rows too.
+    // Per-table sealing + pruning lands in step 4; until then the hot store isn't bounded on long
+    // runs (fine for the CI footprint scenario).
     match seal::seal_range(dir, &entities, from, ceiling)? {
         Some(seg) => {
-            // Watermark advances only after the segment is durably on disk + catalogued; only then
-            // is it safe to prune the now-redundant rows from the hot store.
             store.set_meta(SEALED_THROUGH_KEY, &ceiling.to_string())?;
-            let pruned = store.prune_range(from, ceiling)?;
             tracing::info!(
-                "sealed segment {}… blocks {from}..={ceiling} ({} rows); pruned {pruned} from hot",
+                "sealed segment {}… blocks {from}..={ceiling} ({} transfer rows)",
                 &seg.hash[..12],
                 seg.rows
             );
@@ -266,6 +302,10 @@ fn retraction_batch(
         let Ok(v) = serde_json::from_str::<serde_json::Value>(j) else {
             continue;
         };
+        // Only transfer rows were fed to the balance view (they carry `value_hex`); retract only those.
+        if v.get("value_hex").is_none() {
+            continue;
+        }
         let (Some(from), Some(to)) = (v["from"].as_str(), v["to"].as_str()) else {
             continue;
         };

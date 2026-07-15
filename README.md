@@ -89,6 +89,16 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-15 — RFC-0001 step 3: multi-contract decode wired end-to-end.** `dev` now drives the
+  `DecodeRegistry`: one combined `eth_getLogs` (all addresses × all topic0s) → decode *every* declared
+  event of *every* contract → per-table rows in the hot store. The hardcoded Transfer path is retired
+  (`decode.rs` deleted). Transfer-shaped rows keep the balance view, sealing, and the `transfers` SQL
+  view working unchanged; non-transfer rows are stored generically (visible via `/entities`; per-table
+  sealing + SQL land in step 4). Reorg rollback is table-agnostic (multi-table convergence test).
+  **Proxy resolution at init** — EIP-1967 + legacy-OZ implementation slots — so USDC resolves to its
+  FiatToken implementation (17 tables) instead of the bare proxy. Verified live: 2,844 rows across
+  `usdc__transfer`/`approval`/`burn`/`authorization_used`, 1,444 holders. 28 tests green. _Step-3 limit:
+  the hot store isn't pruned yet (step 4 does per-table seal + prune); only the transfer table is in `/sql`._
 - **2026-07-15 — RFC-0001 step 2: multi-contract `init` + `nuthatch.toml` v2.** `init` now takes N
   addresses (+ optional `--alias`), resolves each ABI to `abis/{alias}.json`, and auto-detects each
   deployment block via an `eth_getCode` binary search (~25 calls — verified live: USDC→6,082,465,

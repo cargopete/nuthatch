@@ -1,8 +1,3 @@
-// TODO(RFC-0001): this module is the decode foundation (step 1); its API is consumed by the
-// pipeline integration in steps 2-6 (config, storage, sealing, serving). Until then the binary
-// doesn't call it, so allow dead_code at the module level. Remove this attribute once wired in.
-#![allow(dead_code)]
-
 //! The decode registry (RFC-0001): ABI-driven, deterministic event decode for N contracts.
 //!
 //! Replaces the hardcoded `Transfer` path. Given each contract's resolved ABI, we build one
@@ -18,7 +13,9 @@ use serde_json::{json, Value as Json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+use crate::config::Config;
 use crate::rpc::Log;
+use std::path::Path;
 
 /// How a Solidity value is stored canonically (exact form; SQL convenience forms are derived).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +50,7 @@ impl StorageKind {
         } else if let Some(bits) = ty.strip_prefix("uint").and_then(parse_bits) {
             uint_kind(bits)
         } else if let Some(bits) = ty.strip_prefix("int").and_then(parse_bits) {
-            uint_kind(bits) // signed/unsigned share byte widths; sign lives in the sol type
+            int_kind(bits)
         } else if ty.starts_with("bytes") {
             StorageKind::FixedBytes // bytes1..=bytes32
         } else {
@@ -81,6 +78,16 @@ impl StorageKind {
 fn uint_kind(bits: usize) -> StorageKind {
     if bits <= 64 {
         StorageKind::U64
+    } else if bits <= 128 {
+        StorageKind::Word16
+    } else {
+        StorageKind::Word32
+    }
+}
+
+fn int_kind(bits: usize) -> StorageKind {
+    if bits <= 64 {
+        StorageKind::I64
     } else if bits <= 128 {
         StorageKind::Word16
     } else {
@@ -202,6 +209,7 @@ pub struct DecodedRow {
 impl DecodedRow {
     pub fn to_json(&self) -> Json {
         let mut obj = serde_json::Map::new();
+        obj.insert("table".into(), json!(self.table));
         obj.insert("block_number".into(), json!(self.block_number));
         obj.insert("log_index".into(), json!(self.log_index));
         obj.insert("tx_hash".into(), json!(self.tx_hash));
@@ -210,6 +218,49 @@ impl DecodedRow {
             obj.insert(name.clone(), v.to_json());
         }
         Json::Object(obj)
+    }
+
+    /// True if this row looks like an ERC-20/721 `Transfer(address, address, uint)` — the shape the
+    /// hardcoded balance view + transfer sealing understand.
+    pub fn is_erc20_transfer(&self) -> bool {
+        self.table.ends_with("__transfer")
+            && self.params.len() == 3
+            && matches!(self.params[0].1, Value::Address(_))
+            && matches!(self.params[1].1, Value::Address(_))
+    }
+
+    /// (from, to, value-decimal-if-it-fits-u128, value-hex) for a transfer row, else None.
+    pub fn erc20_transfer_fields(&self) -> Option<(String, String, Option<String>, String)> {
+        if !self.is_erc20_transfer() {
+            return None;
+        }
+        let addr = |v: &Value| match v {
+            Value::Address(a) => Some(format!("0x{}", hex::encode(a))),
+            _ => None,
+        };
+        let from = addr(&self.params[0].1)?;
+        let to = addr(&self.params[1].1)?;
+        let (value, value_hex) = match &self.params[2].1 {
+            Value::U64(n) => (Some(n.to_string()), format!("0x{:064x}", n)),
+            Value::Word16(b) => {
+                let mut full = [0u8; 32];
+                full[16..].copy_from_slice(b);
+                (
+                    Some(u128::from_be_bytes(*b).to_string()),
+                    format!("0x{}", hex::encode(full)),
+                )
+            }
+            Value::Word32(b) => {
+                let hex = format!("0x{}", hex::encode(b));
+                let value = b[..16]
+                    .iter()
+                    .all(|&x| x == 0)
+                    .then(|| u128::from_be_bytes(b[16..].try_into().unwrap()).to_string());
+                (value, hex)
+            }
+            _ => return None,
+        };
+        Some((from, to, value, value_hex))
     }
 }
 
@@ -228,6 +279,24 @@ pub struct DecodeRegistry {
 }
 
 impl DecodeRegistry {
+    /// Build from a nest's config: load each contract's vendored ABI and register its events.
+    pub fn from_nest(dir: &Path, config: &Config) -> Result<DecodeRegistry> {
+        let mut specs = Vec::with_capacity(config.contracts.len());
+        for c in &config.contracts {
+            let abi_path = dir.join(&c.abi);
+            let raw = std::fs::read_to_string(&abi_path)
+                .with_context(|| format!("reading ABI {}", abi_path.display()))?;
+            let abi: JsonAbi = serde_json::from_str(&raw)
+                .with_context(|| format!("parsing ABI {}", abi_path.display()))?;
+            specs.push(ContractSpec {
+                alias: c.alias.clone(),
+                address: parse_address(&c.address)?,
+                abi,
+            });
+        }
+        Self::build(specs)
+    }
+
     pub fn build(contracts: Vec<ContractSpec>) -> Result<DecodeRegistry> {
         let mut by_topic0: HashMap<B256, Vec<EventDecoder>> = HashMap::new();
         let mut skipped_anonymous = 0usize;
@@ -581,7 +650,8 @@ mod tests {
         assert_eq!(StorageKind::from_sol("uint256", false), StorageKind::Word32);
         assert_eq!(StorageKind::from_sol("uint128", false), StorageKind::Word16);
         assert_eq!(StorageKind::from_sol("uint64", false), StorageKind::U64);
-        assert_eq!(StorageKind::from_sol("int24", false), StorageKind::U64);
+        assert_eq!(StorageKind::from_sol("int24", false), StorageKind::I64);
+        assert_eq!(StorageKind::from_sol("int256", false), StorageKind::Word32);
         assert_eq!(StorageKind::from_sol("bool", false), StorageKind::Bool);
         assert_eq!(
             StorageKind::from_sol("bytes32", false),

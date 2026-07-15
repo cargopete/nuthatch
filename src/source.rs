@@ -24,8 +24,14 @@ pub trait Source: Send + Sync {
     /// Canonical block hash at `number`, or `None` if the source can't answer (retry later).
     async fn block_hash(&self, number: u64) -> Result<Option<String>>;
 
-    /// Decoded logs matching `address` + `topic0` over the inclusive range `[from, to]`.
-    async fn logs(&self, address: &str, topic0: &str, from: u64, to: u64) -> Result<Vec<Log>>;
+    /// Logs matching any of `addresses` + any of `topic0s` over the inclusive range `[from, to]`.
+    async fn logs(
+        &self,
+        addresses: &[String],
+        topic0s: &[String],
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<Log>>;
 }
 
 #[async_trait::async_trait]
@@ -39,8 +45,14 @@ impl Source for RpcClient {
         RpcClient::block_hash(self, number).await
     }
 
-    async fn logs(&self, address: &str, topic0: &str, from: u64, to: u64) -> Result<Vec<Log>> {
-        self.get_logs(address, topic0, from, to).await
+    async fn logs(
+        &self,
+        addresses: &[String],
+        topic0s: &[String],
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<Log>> {
+        self.get_logs(addresses, topic0s, from, to).await
     }
 }
 
@@ -128,16 +140,24 @@ pub mod exex {
                 .map(|c| c.hash.clone()))
         }
 
-        async fn logs(&self, address: &str, topic0: &str, from: u64, to: u64) -> Result<Vec<Log>> {
+        async fn logs(
+            &self,
+            addresses: &[String],
+            topic0s: &[String],
+            from: u64,
+            to: u64,
+        ) -> Result<Vec<Log>> {
             let blocks = self.blocks.lock().unwrap();
             let mut out = Vec::new();
             for (_, c) in blocks.range(from..=to) {
                 for log in &c.logs {
-                    let matches_addr = log.address.eq_ignore_ascii_case(address);
+                    let matches_addr = addresses
+                        .iter()
+                        .any(|a| log.address.eq_ignore_ascii_case(a));
                     let matches_topic = log
                         .topics
                         .first()
-                        .map(|t| t.eq_ignore_ascii_case(topic0))
+                        .map(|t| topic0s.iter().any(|s| s.eq_ignore_ascii_case(t)))
                         .unwrap_or(false);
                     if matches_addr && matches_topic {
                         out.push(log.clone());
@@ -155,7 +175,9 @@ pub mod exex {
         #[tokio::test]
         async fn buffers_commits_and_serves_range() {
             let s = ExExSource::new();
-            let topic = crate::decode::TRANSFER_TOPIC0.to_string();
+            // ERC-20 Transfer topic0.
+            let topic =
+                "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef".to_string();
             let log = Log {
                 address: "0xabc".into(),
                 topics: vec![topic.clone()],
@@ -167,7 +189,13 @@ pub mod exex {
             s.commit(10, "0xhash10".into(), vec![log]);
             assert_eq!(s.tip().await.unwrap(), 10);
             assert_eq!(s.block_hash(10).await.unwrap().as_deref(), Some("0xhash10"));
-            assert_eq!(s.logs("0xABC", &topic, 0, 20).await.unwrap().len(), 1);
+            assert_eq!(
+                s.logs(&["0xABC".to_string()], &[topic.clone()], 0, 20)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
 
             s.revert(10); // reorg drops block 10
             assert_eq!(s.tip().await.unwrap(), 0);
