@@ -97,6 +97,14 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-15 — RFC-0003 groundwork: toolchain 1.94.1 → 1.95.0 (unblocks reth).** RFC-0003 embeds
+  reth as a colocated ExEx (`nuthatch-node`) reusing the same dbsp-backed indexing core. reth v2.4.0's
+  MSRV is **rustc 1.95**, but our pin was 1.94.1 (chosen only to dodge the `dbsp` next-solver ICE that
+  lands on 1.97). The open question was whether *any* toolchain satisfies both — and **1.95.0 does**:
+  verified dbsp 0.320 compiles clean in release on 1.95, and the full nuthatch suite (47 tests) +
+  clippy are green. Bumped `rust-toolchain.toml` and CI to 1.95.0. So the ExEx build can reuse the
+  core with no toolchain fork — RFC-0003 is feasible with no hardware spend (build + unit-test against
+  reth's ExEx test harness; a real node is only needed for the published latency soak).
 - **2026-07-15 — RFC-0002: `dev` honours vendored deployment blocks.** A nest that vendors
   per-contract `start_block`s was storing them but the indexer ignored them — a cold start always used
   the `--backfill` tip offset, so "index this nest" never meant "from deployment". Now a cold start

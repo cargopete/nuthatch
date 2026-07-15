@@ -1,8 +1,9 @@
-# Pinned to 1.94.1: rustc 1.97.0 hits an internal compiler error (ICE) in the next-trait-solver
-# (rustc_next_trait_solver/.../structural_traits.rs) when building this dependency graph in release
-# mode. 1.94.1 is known-good. This pin keeps local builds, CI, `cargo publish`, and the release
-# binary consistent and ICE-free. Revert to a newer stable once the upstream regression is fixed.
+# Pinned to 1.95.0 — the lowest stable that (a) compiles `dbsp` 0.320 without the next-trait-solver
+# ICE that lands on 1.97 (rustc_next_trait_solver/.../structural_traits.rs, release mode) and (b)
+# meets reth's MSRV (rust-version = "1.95"), so the `nuthatch-node` ExEx build (RFC-0003) can reuse
+# the same dbsp-containing core. Verified: full test suite + clippy green on 1.95.0. Keeps local
+# builds, CI, `cargo publish`, and the release binary consistent. Revisit when the 1.97 ICE is fixed.
 [toolchain]
-channel = "1.94.1"
+channel = "1.95.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

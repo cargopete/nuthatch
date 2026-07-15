@@ -1,7 +1,7 @@
 name: release
 
 # On a version tag, build native binaries per target and attach them to the GitHub Release.
-# Built on the pinned toolchain (rust-toolchain.toml → 1.94.1), so the dbsp/next-solver ICE that
+# Built on the pinned toolchain (rust-toolchain.toml → 1.95.0), so the dbsp/next-solver ICE that
 # breaks `cargo install` on rustc 1.97 never applies — users download a binary and never compile.
 on:
   push:
@@ -30,7 +30,7 @@ jobs:
           # or run under a future addition. The installer routes them to the build-from-source path.
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
