@@ -97,6 +97,18 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-15 — RFC-0002: robustness fixes from Horizon dogfooding.** Authoring the Horizon nest
+  (three real Arbitrum contracts, derived views) surfaced two engine bugs, both now fixed and
+  regression-tested. **(1)** The read-only `/sql` guard checked `starts_with("select"/"with")` on raw
+  text, so a query opening with a `-- comment` (or `/* … */`) was wrongly rejected — it now skips
+  leading SQL comments before checking. **(2)** A nest view that UNIONs several event tables
+  cascade-failed when one of them had no sealed data yet (common on a sparse/low-traffic contract):
+  the whole view silently vanished. Now every *declared* table resolves — a sealed one as a real
+  view, an unsealed one as an **empty typed view** (columns and their `*_dec`/`*_overflow` siblings
+  reconstructed from `schema.json`, `WHERE false`) — so derived views compute over sparse data instead
+  of disappearing. Verified live: the full Horizon model (`allocations`, `indexers`, `global`,
+  time-bucketed rollups) computes on real Arbitrum data — 390 active allocations, 5 indexers, 70,030
+  GRT indexing rewards — with the empty `operators`/`delegations` views present, not fatal. 44 tests.
 - **2026-07-15 — RFC-0002 step 4a: nest-defined derived-entity views.** A nest can ship
   `views/*.sql` — DuckDB views over its per-event tables (e.g. fold Created/Resized/Closed into a
   current-allocation view) — and the analytical `/sql` surface now loads them, in sorted filename
