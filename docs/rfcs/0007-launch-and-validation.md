@@ -1,137 +1,127 @@
 # RFC-0007: Launch and validation
 
-- Status: Draft
+- Status: Draft (v2)
 - Author: Pete (cargopete)
-- Date: 2026-07-14
-- Depends on: RFC-0005 (installable release); RFC-0002 (the demo nest)
-- Blocks: nothing — this is the finish line of the current phase
+- Date: 2026-07-16 (v1: 2026-07-14)
+- Depends on: RFC-0005 (installable release; the rc doubles as the GraphOps pilot
+  artifact), RFC-0002 (demo nest)
+- Blocks: nothing — the finish line of the current phase
+- Revision note: v2 records that conversation #1 happened and exceeded its threshold
+  (GraphOps: an infrastructure operator proposed a hosted offering with revshare,
+  unprompted), adds the operator channel as a launch phase and a success signal,
+  resolves the demo-instance open question, and syncs numbers to shipped code.
 
 ## Abstract
 
-Take Nuthatch public deliberately: a readiness gate (strangers complete the quickstart
-unaided), a channel sequence that starts on home turf (Graph forum) before Show HN, and
-— the part four research reports kept deferring to reality — the five structured
-conversations with teams currently paying for or operating indexers. Defines success
-and failure thresholds in advance so the outcome is a decision, not a vibe.
+Unchanged in spirit: take Nuthatch public deliberately — readiness gate, home turf
+before Show HN, structured conversations, pre-registered thresholds. Changed in fact:
+validation has already begun and scored. The GraphOps conversation (2026-07-16) was
+the operator-profile conversation, and its outcome (partnership + revshare proposal)
+exceeds the pre-registered bar of "concrete adoption intent." v2 folds the operator
+channel into the launch plan without letting it substitute for the remaining
+validation: one operator's enthusiasm is a wonderful signal and a sample size of one.
 
-## Motivation
+## Phase 0 — Readiness gate (blocks everything below) — unchanged from v1
 
-The research phase's honest residual was always: demand for the self-hosted middle is
-evidenced but inferential, and only real users resolve it. Launch is therefore not a
-marketing event; it is the experiment. Running it deliberately — with pre-registered
-thresholds — protects against both premature abandonment and sunk-cost drift, the two
-documented failure modes of solo-maintainer infra OSS.
+Three strangers, unaided: install via curl, USDC quickstart to a live `/sql` query,
+Horizon nest via `init --from`. Gate: 3/3 on steps 1–2 within 15 minutes, ≥2/3 on
+step 3. Plus SECURITY.md, issue templates, Discussions, the scope/governance doc.
+One addition: the governance doc now also carries the partnership-neutrality
+paragraph (RFC-0006 v2 Rules 3–4) so launch-day "is this a GraphOps product?"
+questions have a linkable answer.
 
-## Phase 0 — Readiness gate (blocks everything below)
+## Phase 1 — Home turf (week 1) — unchanged from v1, one addition
 
-Three strangers (not friends-of-the-project; recruit one Rust dev, one dapp dev, one
-Graph-ecosystem person) each attempt, unaided, screen-recorded or self-reported:
+Graph forum + #indexers, framed as local observability for the ecosystem, Paulie
+credited and forewarned. Addition: **partnership disclosure timing is GraphOps's
+call.** If their platform announcement precedes launch, the home-turf post mentions
+the hosted option in one sentence; if not, the post stands alone and the partnership
+is announced when they announce. Do not front-run a partner's launch for our
+narrative.
 
-1. Install via the site's curl command on their own machine.
-2. Quickstart: USDC nest to a live `/sql` query.
-3. Horizon nest via `init --from`, one view query.
+## Phase 1.5 — NEW: the operator pilot (parallel, not a launch gate)
 
-Gate: 3/3 complete steps 1–2 within 15 minutes; ≥2/3 complete step 3. Every stumble
-becomes an issue; gate re-runs after fixes. Also before launch: `SECURITY.md`, issue
-templates, Discussions enabled (chosen over Discord for a solo maintainer — async,
-searchable, no presence obligation; revisit at >50 weekly actives), and the
-scope/governance doc published (the "what we will not build" shield, adapted from
-CLAUDE.md — linkable when launch-day feature requests arrive).
+The pilot agreed in principle: GraphOps runs Nuthatch (v0.1.0-rc.1 per RFC-0005) on
+their platform; Lodestar is the first tenant, migrating panels per the
+graph-network-nest plan (RFC to be numbered — the Lodestar-migration design exists
+and should be committed as its own RFC now that 0008 is the compliance pack).
+Boundaries, restated from RFC-0005 §6: they own gateway/auth/metering; we own the
+binary, guards, and /metrics. Pilot success = Lodestar's first migrated panel served
+via GraphOps-hosted Nuthatch for 14 consecutive days. The pilot is deliberately NOT a
+launch precondition — public launch proceeds on our criteria; the pilot proceeds on
+theirs; neither waits for the other.
 
-## Phase 1 — Home turf (week 1)
+## Phase 2 — Show HN + Rust community (week 2–3) — updated numbers
 
-**The Graph forum + #indexers community.** Post framing: a decade-long ecosystem
-member built a small tool; its flagship example indexes Horizon itself; here are
-measured numbers and a parity check against a community subgraph. Explicitly not
-framed as a Graph competitor — framed as local observability for the ecosystem
-(which it genuinely is; the network-serving question was settled out of scope long
-ago). Credit Paulie's subgraph prominently; ideally give him a heads-up first — a
-first community nest author is worth more than a launch-day surprise.
+Show HN title (draft, refresh at post time from the README):
+`Show HN: Nuthatch – a self-hosted blockchain indexer in one Rust binary (58 MB RAM
+for a 3-contract nest)` — or the single-contract 37 MB figure if the title reads
+better; both are measured. First comment gains the RFC-0004 progression (~289 →
+~5,837 ev/s on public RPC, ~20×, path-equivalence proven, methodology in-repo) and
+keeps the honest limits verbatim from the README (now: "Ethereum + Arbitrum + Base,
+events only, RPC polling — ExEx designed and stubbed, GraphQL not yet").
+r/rust angle unchanged (DBSP retractions, batched Arrow over WIT, DuckDB
+single-writer design — add the seal-direct path-equivalence test as the hook; r/rust
+loves a determinism proof). One channel per launch-day, unchanged.
 
-Why home turf first: highest-trust audience, most-informed criticism, and any
-embarrassing bug gets found by people who file good issues rather than dunk-tweet.
+## Phase 3 — The structured conversations (weeks 1–4) — revised roster
 
-## Phase 2 — Show HN + Rust community (week 2–3, after week-1 fixes)
+Conversation #1 is DONE and recorded: profile "infrastructure operator," outcome
+"partnership + revshare proposal, first target agreed" — logged in
+`docs/validation/` like the rest. Four remain, one profile revised:
 
-**Show HN** title (draft): `Show HN: Nuthatch – a self-hosted blockchain indexer in
-one 49 MB Rust binary (37 MB RAM)` — concrete numbers, no adjectives. First comment
-(prepared in advance, the custom): what it is in three sentences, architecture
-paragraph (redb + content-addressed Parquet + DuckDB + DBSP IVM + WASIp2 components),
-the measured-numbers table with methodology links, honest limits verbatim from the
-README ("Ethereum + Arbitrum only, events only, GraphQL not yet shipped"), and why
-AGPL. Post Tue–Thu, 14:00–16:00 UTC. The crypto-skepticism ritual will occur; the
-answer is the sovereignty/local-first framing and refusing to argue token economics
-(there is no token — the thread's best weapon).
+1. ~~Operator~~ **DONE — GraphOps, exceeded threshold.**
+2. A team currently paying Goldsky/Envio Cloud (a real invoice).
+3. A Ponder production user (the closest philosophical neighbor).
+4. A team building agents that consume chain data (the MCP surface's audience).
+5. REVISED: a stablecoin/fintech compliance operator (the RFC-0008 compliance pack's
+   intended audience — replaces the Alchemy-refugee profile, which the operator
+   conversation partially covered; Fathom-adjacent contacts make this reachable, and
+   it validates the newest RFC rather than re-validating the oldest thesis).
 
-**r/rust** (separate week): the engineering angle — DBSP retractions for reorgs,
-batched Arrow over WIT, the DuckDB single-writer design. r/ethdev and lobste.rs
-opportunistically. One channel per launch-day; the maintainer is one person and
-launch-day responsiveness is the actual product demo.
+Script unchanged (demo, then the three exact questions; verbatim answers, anonymized).
+One addition to the script for #5: show `nuthatch audit replay` — the compliance
+pack's "prove it" command is the demo for that audience even in its design-doc state.
 
-## Phase 3 — The five conversations (parallel, weeks 1–4)
+## Pre-registered thresholds (judged once at day 30) — v1 thresholds stand, one added
 
-Structured, 30 minutes each, five profiles:
+Success signals (any two → continue at pace) — unchanged four, plus:
+- NEW: the operator pilot serves a Lodestar panel for 14 consecutive days, or
+  Nuthatch appears in GraphOps's public data-service catalog — either counts as one
+  success signal (not two).
 
-1. A team currently paying Goldsky/Envio Cloud (a real invoice).
-2. A Ponder production user (the closest philosophical neighbor).
-3. An Alchemy-sunset refugee (migrated under duress in Dec 2025).
-4. A Graph indexer/ecosystem operator (Lodestar-adjacent contacts).
-5. A team building agents that consume chain data (the MCP surface's audience).
+Failure signals — unchanged, with one honest note: the GraphOps signal already banked
+means the "archive gracefully" branch now requires not just dead launch metrics but
+also the pilot failing — the bar for continuing was met early; the bar for *pace* is
+what day 30 judges.
 
-Script: 10 min demo (quickstart live, then Horizon nest), then three questions, asked
-exactly: *"What would have to be true for you to run this for something real?"* /
-*"What's missing that you'd consider disqualifying?"* / *"What here don't you
-believe?"* Record answers verbatim in `docs/validation/` (anonymized). No selling —
-the third question exists to surface the doubt people politely swallow.
+Explicitly not failure — unchanged (HN indifference, cynic threads, feature floods).
 
-## Pre-registered thresholds (written before launch, judged at day 30)
+## Post-launch operations (day 0–30) — unchanged from v1
 
-Success signals (any two → continue investing at current pace):
-- ≥3/5 conversations yield a concrete adoption intent or a named, addressable blocker.
-- ≥5 quickstart-completion reports from strangers (issues, Discussions, or posts —
-  no telemetry, so evidence is voluntary; count conservatively).
-- ≥1 external nest published or ≥1 non-trivial external PR/issue with reproduction.
-- ≥300 GitHub stars (the Ponder-calibrated niche signal, not a vanity target).
-
-Failure signals (both → downshift to nights-and-weekends maintenance; both plus dead
-conversations → archive gracefully with a written post-mortem, per report-4's
-threshold discipline):
-- <2 conversation successes AND no organic quickstart evidence by day 30.
-- Zero engagement from the Graph-forum home-turf post (the most favorable audience;
-  silence there is the strongest negative signal available).
-
-Explicitly not failure: HN indifference (timing lottery), crypto-cynic threads,
-feature-request floods (that's demand, filtered through the scope doc).
-
-## Post-launch operations (day 0–30)
-
-- Launch-day: respond to everything within hours; fix only breakage, no features.
-- Triage labels from day one: `bug`, `docs-gap` (a stranger's confusion is a docs bug),
-  `out-of-scope` (close kindly, link the scope doc), `nest-request` (redirect to
-  "nests are repos — here's the template").
-- Week-2 progress-log post: what launch surfaced, what changed — the honesty format,
-  continued in public.
-- Metrics reviewed weekly, thresholds judged once at day 30 — not daily (the
-  dashboard-refresh anxiety loop is a solo-maintainer burnout accelerant; the
-  research on this was clear).
+(Respond-fast/fix-only launch day; triage labels; week-2 progress-log post; weekly
+metrics, day-30 judgment, no dashboard-anxiety loop.)
 
 ## Risks
 
-- **Launch lands during a news cycle / gets buried**: the thresholds deliberately
-  don't depend on HN; home turf + conversations carry the validation weight.
-- **A security issue in week one**: SECURITY.md + the capability-sandbox design limits
-  blast radius; the WASM host boundary audit (RFC-0006) is the structural answer —
-  until then, the threat model doc states current assumptions plainly.
-- **Success**: the genuinely dangerous outcome for one maintainer. The scope doc, the
-  Discussions-not-Discord choice, and the RFC discipline are the pre-committed
-  defenses. If adoption outruns capacity, the move is raising the contribution bar
-  documentation, not the feature pace.
+v1 risks stand (news-cycle burial; week-one security issue; success-as-danger), plus:
+- **Partnership timeline entanglement**: mitigated structurally in Phase 1.5 — the
+  pilot and the launch are decoupled on purpose; neither is the other's gate.
+- **Narrative capture** ("the GraphOps indexer"): the governance-doc neutrality
+  paragraph, linked from launch posts, is the standing answer; the license is the
+  structural one.
+- **Validation complacency**: one great operator conversation is not five
+  conversations. The roster stays at five; the remaining four happen.
 
 ## Open questions
 
-1. Offer the Horizon nest as a hosted read-only demo instance (nuthatch-indexer.com/
-   demo) for launch day? Attractive (zero-install taste) but contradicts nothing —
-   it's our own box serving our own nest. Leaning yes if it costs <1 day.
-2. A launch blog post vs letting the README carry it: leaning README-only + forum
-   posts — the site's /manifesto already exists and a launch post would mostly
-   duplicate it.
+1. v1 Q1 (hosted read-only demo) — RESOLVED: yes, and the DoS concern from the
+   GraphOps conversation shapes it. Preferred: GraphOps hosts the demo behind their
+   gateway once the pilot runs (zero marginal work, showcases the partnership);
+   fallback: self-hosted on the Hetzner box with RFC-0005 §6 query guards at strict
+   settings + nginx rate limiting. Either way the demo instance runs the Horizon
+   nest, read-only, guards documented on the page.
+2. v1 Q2 (launch blog post vs README) — unchanged, leaning README + forum posts.
+3. NEW: should launch wait for Base support (RFC-0005 criteria #4)? RESOLVED: Base
+   shipped (v0.1.0) — "Ethereum, Arbitrum, Base" reads materially better than two
+   chains, and it was an afternoon. No longer a gate.

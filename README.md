@@ -100,6 +100,20 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-16 — RFC-0007 (launch & validation): the launch kit.** The artifacts that make going
+  public deliberate rather than a shout into the void. New `SECURITY.md` (scope: the `/sql`+MCP surface
+  and the WASM host boundary; private-advisory reporting; 0.x support policy), GitHub issue templates
+  (bug + feature, both routing scope/vuln reports correctly) with a `config.yml` that sends questions to
+  Discussions and vulns to the private advisory flow. New `docs/validation/` records the structured
+  adoption conversations against pre-registered day-30 thresholds — **conversation #1 (GraphOps, the
+  infrastructure operator) is logged as *exceeded*** (partnership + revshare proposal), verbatim answers
+  left as honest placeholders for transcription; four profiles remain pending. New `docs/launch/`
+  carries pre-written copy with the real measured numbers — a Show HN draft (~58 MB / ~37 MB RAM,
+  ~289 → ~5,837 ev/s ~20×, honest limits verbatim), the home-turf forum post (Horizon-nest parity as
+  the ask), and the r/rust determinism-proof angle. RFC-0007 rewritten to v2: records the operator
+  conversation, adds the operator pilot as a launch phase (decoupled from public launch), revises the
+  conversation roster, and resolves the demo-instance + Base-gate open questions. Docs only.
+
 - **2026-07-16 — RFC-0005 step 2: operator runtime surface (`/metrics`, SIGTERM, bind warning).**
   The §6 operator signals — the endpoint an operator alerts and bills against. New `GET /metrics`
   (hand-rolled Prometheus text, no framework): `nuthatch_tip_height` / `last_block` / `tip_lag_blocks`
