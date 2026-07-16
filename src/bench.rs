@@ -43,6 +43,7 @@ pub struct BenchReport {
     pub to_block: u64,
     pub blocks: u64,
     pub window: u64,
+    pub seal_direct: bool,
     pub runs: usize,
     /// Medians across runs.
     pub events: u64,
@@ -90,10 +91,27 @@ pub async fn backfill(args: BackfillBenchArgs) -> Result<()> {
         args.runs,
     );
 
+    println!(
+        "storage path: {}",
+        if args.seal_direct {
+            "seal-direct (decode → Parquet, no hot store)"
+        } else {
+            "hot store (decode → redb)"
+        }
+    );
+
     let mut runs = Vec::with_capacity(args.runs);
     for run in 1..=args.runs {
         let r = one_run(
-            &rpc_urls, &registry, &addresses, &topic0s, args.from, args.to, window, run,
+            &rpc_urls,
+            &registry,
+            &addresses,
+            &topic0s,
+            args.from,
+            args.to,
+            window,
+            args.seal_direct,
+            run,
         )
         .await?;
         println!(
@@ -112,6 +130,7 @@ pub async fn backfill(args: BackfillBenchArgs) -> Result<()> {
         to_block: args.to,
         blocks: args.to - args.from + 1,
         window,
+        seal_direct: args.seal_direct,
         runs: args.runs,
         events: median_u64(runs.iter().map(|r| r.events)),
         wall_clock_s: round2(median_f64(runs.iter().map(|r| r.wall_clock_s))),
@@ -139,39 +158,32 @@ async fn one_run(
     from: u64,
     to: u64,
     window: u64,
+    seal_direct: bool,
     run: usize,
 ) -> Result<Run> {
     let source = RpcClient::new(rpc_urls.to_vec())?;
-    // A throwaway store per run: we measure the real decode + redb-write path, but never touch the
-    // nest's own database.
-    let store_path =
-        std::env::temp_dir().join(format!("nuthatch-bench-{}-{run}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&store_path);
-    std::fs::create_dir_all(&store_path)?;
-    let store = Store::open(&store_path.join("bench.redb"))?;
+    // A throwaway work dir per run (redb and/or Parquet segments) — never the nest's own database.
+    let work = std::env::temp_dir().join(format!("nuthatch-bench-{}-{run}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work)?;
 
     let rss = RssSampler::start();
     let start = Instant::now();
-    let mut events = 0u64;
-    let mut next = from;
-    while next <= to {
-        let chunk_to = (next + window - 1).min(to);
-        let logs = source
-            .logs(addresses, topic0s, next, chunk_to)
-            .await
-            .with_context(|| format!("getLogs {next}..={chunk_to}"))?;
-        for log in &logs {
-            if let Ok(Some(row)) = registry.decode(log) {
-                let key = Store::entity_key(row.block_number, row.log_index);
-                store.put_entity(&key, &row.to_json().to_string())?;
-                events += 1;
-            }
-        }
-        next = chunk_to + 1;
-    }
+    let events = if seal_direct {
+        // Seal-direct: decode → Parquet, bypassing the hot store. Exactly the production path.
+        crate::indexer::backfill_direct(
+            &source, registry, &work, addresses, topic0s, from, to, window,
+        )
+        .await?
+    } else {
+        hot_store_backfill(
+            &source, registry, &work, addresses, topic0s, from, to, window,
+        )
+        .await?
+    };
     let wall_clock_s = start.elapsed().as_secs_f64();
     let peak_rss_mb = rss.stop();
-    let _ = std::fs::remove_dir_all(&store_path);
+    let _ = std::fs::remove_dir_all(&work);
 
     Ok(Run {
         events,
@@ -184,6 +196,47 @@ async fn one_run(
         peak_rss_mb,
         rpc_requests: source.request_count(),
     })
+}
+
+/// The baseline path: decode → redb hot store, with the same batched `block_timestamp` fetch the
+/// live `dev` loop does — so the only thing that differs from seal-direct is the storage write.
+#[allow(clippy::too_many_arguments)]
+async fn hot_store_backfill(
+    source: &RpcClient,
+    registry: &DecodeRegistry,
+    dir: &std::path::Path,
+    addresses: &[String],
+    topic0s: &[String],
+    from: u64,
+    to: u64,
+    window: u64,
+) -> Result<u64> {
+    let store = Store::open(&dir.join("bench.redb"))?;
+    let mut events = 0u64;
+    let mut next = from;
+    while next <= to {
+        let chunk_to = (next + window - 1).min(to);
+        let logs = source
+            .logs(addresses, topic0s, next, chunk_to)
+            .await
+            .with_context(|| format!("getLogs {next}..={chunk_to}"))?;
+        let mut rows: Vec<_> = logs
+            .iter()
+            .filter_map(|log| registry.decode(log).ok().flatten())
+            .collect();
+        let mut blocks: Vec<u64> = rows.iter().map(|r| r.block_number).collect();
+        blocks.sort_unstable();
+        blocks.dedup();
+        let ts = source.block_timestamps(&blocks).await.unwrap_or_default();
+        for r in &mut rows {
+            r.block_timestamp = ts.get(&r.block_number).copied().unwrap_or(0);
+            let key = Store::entity_key(r.block_number, r.log_index);
+            store.put_entity(&key, &r.to_json().to_string())?;
+            events += 1;
+        }
+        next = chunk_to + 1;
+    }
+    Ok(events)
 }
 
 /// Samples this process's resident set size on a background thread, tracking the peak.

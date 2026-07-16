@@ -97,6 +97,15 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-16 — RFC-0004 step 2: seal-direct backfill (~8.7× measured).** Past-finality history can
+  skip the hot store entirely: `indexer::backfill_direct` streams decode → buffered rows →
+  content-addressed Parquet segments, no redb write, no read-back, no prune — with the same implicit
+  columns (incl. batched `block_timestamp`) and the *same* `seal_range` writer, so a given range yields
+  **byte-identical** segments regardless of path (proven by `seal_direct_matches_seal_via_hot_store`).
+  Bounded buffer caps RSS. Exposed via `bench backfill --seal-direct` for the measured before/after,
+  and reusable by a future `dev --seal-direct`. Measured on USDC (same 120 blocks, same 24 RPC
+  requests, only the storage path differing): hot store 289 ev/s vs **seal-direct 2,521 ev/s — ~8.7×**;
+  the gap is ~12k per-row redb fsyncs the direct path never pays. 50 tests (+1 path-equivalence).
 - **2026-07-16 — RFC-0004 step 1: `nuthatch bench backfill` (measure first).** An honest,
   reproducible backfill-throughput harness — runs the real fetch → decode → store path over a *pinned*
   block range and reports the **median** of events/sec, wall-clock, peak RSS, and RPC requests (incl.

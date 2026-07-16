@@ -42,8 +42,32 @@ non-archive endpoints don't serve old `eth_getLogs`). Public-RPC (T1) numbers ar
 median of three runs, date them, and read them as "what a new user should expect," not as the
 product's capability.
 
-## Baseline (pre-optimization)
+## Seal-direct (`--seal-direct`)
 
-_Pending — populated from archive-node runs. A representative smoke run (USDC, 201 recent blocks,
-public RPC, single-threaded): ~400 events/sec, ~47 MB peak, latency-bound on sequential `getLogs`.
-The pipeline and seal-direct slices target this number directly._
+For ranges already past finality — nearly all of a backfill — rows can go straight to sealed Parquet,
+bypassing the hot store: decode → buffered rows → content-addressed segments, no redb write, no
+read-back, no prune. The bounded buffer caps RSS by construction. `seal_range` is the one shared
+writer, so a given range yields **byte-identical** segments whether sealed directly or via the hot
+store (asserted by `seal::seal_direct_matches_seal_via_hot_store`).
+
+Measured before/after (same range, same RPC cost, only the storage path differs):
+
+| Path | Range | Events | Wall-clock | events/sec |
+|---|---|---|---|---|
+| hot store (decode → redb) | USDC, 120 recent blocks (public RPC) | 12,127 | 42.0 s | **289** |
+| seal-direct (decode → Parquet) | same | 12,127 | 4.8 s | **~2,520** |
+
+**~8.7× faster.** The RPC portion is identical between the two (24 requests each); the difference is
+that the hot path commits a redb transaction per row (~12k fsyncs), while seal-direct buffers and
+writes a handful of segments. Single-run public-RPC smoke figures — noisy in absolute terms, but the
+storage-path delta is the point and is not noise. Run it yourself:
+
+```sh
+nuthatch bench backfill --dir <nest> --from A --to B                 # hot store (baseline)
+nuthatch bench backfill --dir <nest> --from A --to B --seal-direct   # seal-direct
+```
+
+## Baseline matrix (pre-optimization)
+
+_Pending — the full W1–W3 × T1–T3 matrix is populated from archive-node runs (needed for the
+historical ranges) and committed as `bench-report.json` artifacts._

@@ -123,6 +123,75 @@ pub async fn run(
     Ok(())
 }
 
+/// Batch size (rows) at which `backfill_direct` flushes a sealed segment — bounds RSS during a
+/// from-history backfill regardless of how long the range is.
+const SEAL_DIRECT_BATCH: usize = 20_000;
+
+/// Stream a *finalized* block range straight to sealed Parquet, bypassing the hot store entirely
+/// (RFC-0004 §1): decode → buffered rows → content-addressed segments. No redb write, no read-back,
+/// no prune — the churn a from-history backfill otherwise pays for every historical row. Rows carry
+/// the same implicit columns (incl. `block_timestamp`) as the hot path and are sealed via the *same*
+/// [`seal::seal_range`], so a given range yields byte-identical segments regardless of path (the
+/// determinism guarantee, asserted in seal's path-equivalence test). The bounded buffer caps RSS by
+/// construction. Only valid for ranges already past finality — there is no reorg risk to roll back.
+/// Returns the number of rows sealed.
+#[allow(clippy::too_many_arguments)]
+pub async fn backfill_direct(
+    source: &dyn Source,
+    registry: &DecodeRegistry,
+    dir: &std::path::Path,
+    addresses: &[String],
+    topic0s: &[String],
+    from: u64,
+    to: u64,
+    window: u64,
+) -> Result<u64> {
+    let mut buf: Vec<String> = Vec::new();
+    let mut batch_from = from;
+    let mut next = from;
+    let mut total = 0u64;
+    while next <= to {
+        let chunk_to = (next + window - 1).min(to);
+        let logs = source
+            .logs(addresses, topic0s, next, chunk_to)
+            .await
+            .with_context(|| format!("getLogs {next}..={chunk_to}"))?;
+        let mut rows: Vec<_> = logs
+            .iter()
+            .filter_map(|log| match registry.decode(log) {
+                Ok(Some(r)) => Some(r),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::debug!("decode skipped: {e:#}");
+                    None
+                }
+            })
+            .collect();
+        // Stamp block_timestamp (batched), identical to the hot path, so segments match byte-for-byte.
+        let mut blocks: Vec<u64> = rows.iter().map(|r| r.block_number).collect();
+        blocks.sort_unstable();
+        blocks.dedup();
+        let ts = source.block_timestamps(&blocks).await.unwrap_or_default();
+        for r in &mut rows {
+            r.block_timestamp = ts.get(&r.block_number).copied().unwrap_or(0);
+            buf.push(r.to_json().to_string());
+            total += 1;
+        }
+        next = chunk_to + 1;
+
+        // Flush a segment once the buffer fills or the range ends. `[batch_from, chunk_to]` covers
+        // every window accumulated since the last flush.
+        if buf.len() >= SEAL_DIRECT_BATCH || next > to {
+            if !buf.is_empty() {
+                seal::seal_range(dir, &buf, batch_from, chunk_to)?;
+                buf.clear();
+            }
+            batch_from = next;
+        }
+    }
+    Ok(total)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn index_loop(
     source: Arc<dyn Source>,

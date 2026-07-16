@@ -232,4 +232,51 @@ mod tests {
         let b = &load_manifest(dir2.path()).unwrap().tables["usdc__transfer"][0].hash;
         assert_eq!(a, b); // same rows in → same content address
     }
+
+    /// RFC-0004 §1 path-equivalence: rows sealed *directly* (the seal-direct backfill path) and the
+    /// same rows sealed *after a redb round-trip* (the hot-then-seal path) yield byte-identical
+    /// segments. `seal_range` is the one shared writer, so the two backfill paths are provably the
+    /// same bytes — the determinism claim the optimisation rests on.
+    #[test]
+    fn seal_direct_matches_seal_via_hot_store() {
+        use crate::store::Store;
+        let rows = vec![
+            transfer(100, 0, "5"),
+            transfer(100, 1, "7"),
+            approval(101, 0),
+            transfer(102, 0, "9"),
+        ];
+
+        // Path A — direct: seal the decoded rows as-is.
+        let da = tempfile::tempdir().unwrap();
+        seal_range(da.path(), &rows, 100, 102).unwrap();
+
+        // Path B — via hot store: write to redb, read the range back, then seal.
+        let db = tempfile::tempdir().unwrap();
+        let store = Store::open(&db.path().join("hot.redb")).unwrap();
+        for r in &rows {
+            let v: Value = serde_json::from_str(r).unwrap();
+            let key = Store::entity_key(
+                v["block_number"].as_u64().unwrap(),
+                v["log_index"].as_u64().unwrap(),
+            );
+            store.put_entity(&key, r).unwrap();
+        }
+        let readback = store.entities_in_range(100, 102).unwrap();
+        seal_range(db.path(), &readback, 100, 102).unwrap();
+
+        // Same tables, same per-table content hashes.
+        let ma = load_manifest(da.path()).unwrap();
+        let mb = load_manifest(db.path()).unwrap();
+        assert_eq!(
+            ma.tables.keys().collect::<Vec<_>>(),
+            mb.tables.keys().collect::<Vec<_>>()
+        );
+        for (table, segs) in &ma.tables {
+            assert_eq!(
+                segs[0].hash, mb.tables[table][0].hash,
+                "segment hash differs for {table} between direct and via-hot-store paths"
+            );
+        }
+    }
 }

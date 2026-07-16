@@ -70,6 +70,11 @@ pub struct BackfillBenchArgs {
     /// A label for the workload in the report (e.g. "W1: USDC 100k dense").
     #[arg(long)]
     pub label: Option<String>,
+
+    /// Measure the seal-direct path (decode → Parquet, bypassing the hot store) instead of the
+    /// default decode → redb hot-store path. Use to compare the two backfill storage paths.
+    #[arg(long)]
+    pub seal_direct: bool,
 }
 
 #[derive(Args)]
