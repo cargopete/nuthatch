@@ -8,7 +8,8 @@
 
 Self-hosted-first, AI-native blockchain indexer. Embedded mode runs as a single process with no
 external services — no Postgres, no Docker, no IPFS. See [`CLAUDE.md`](CLAUDE.md) for the standing
-design brief.
+design brief, [`GOVERNANCE.md`](GOVERNANCE.md) for sustainability + neutrality, and
+[`docs/operators.md`](docs/operators.md) for running it as a service.
 
 ## Status: embedded mode built end-to-end; scaled mode + reth ExEx outstanding
 
@@ -109,6 +110,16 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   metrics, lifecycle, 0.x stability contract). The `/sql` guards themselves (timeout + row cap +
   concurrency) already shipped. Verified live: `/metrics` served real values, bind warning fired on
   `0.0.0.0`, SIGTERM exited 0. 63 tests (+2).
+- **2026-07-16 — RFC-0006 (sustainability): grant drafts + governance.** Public, PR-reviewed grant
+  applications in `docs/grants/` — **NLnet/NGI** (`nlnet.md`, €38,400: semantic layer, IVM
+  generalization, GraphQL compat, security audit) and **EF ESP** (`ef-esp.md`, $50–90K: reth ExEx tip
+  mode, OP-stack multi-chain, benchmarks). New `GOVERNANCE.md` codifies the two-leg sustainability
+  model (grants + operator revenue-share), the **neutrality guarantee** (no exclusivity / private
+  forks / partner-only core features / roadmap veto — the AGPL makes capture structurally impossible),
+  the core-vs-operator dividing line (guards in core; auth/metering/tenancy in the operator's
+  gateway), the "won't do for funding or partnership" list, and the release-key-custody item. Adds a
+  `FUNDING.yml` Sponsors button. RFC-0006 rewritten to v2 (grants are now *one* of two legs, not "the"
+  revenue model; adds no-double-funding + disclosure rules). Docs only.
 - **2026-07-16 — v0.1.0 release.** First tagged release: multi-contract full-ABI decode across
   Ethereum + Arbitrum One + Base, finality-sealed Parquet + DuckDB SQL, DBSP i128 balance view, the
   ~20× seal-direct/pipelined backfill, and the operator surface (`/metrics`, `/sql` guards, graceful
