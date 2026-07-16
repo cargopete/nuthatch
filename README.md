@@ -28,7 +28,8 @@ remains is the scaled (Postgres / DataFusion) mode and wiring reth ExEx to a nod
 | Read-only analytical SQL (DuckDB) — one view per table over sealed segments | GraphQL compatibility layer |
 | `GET /tables` + `GET /table/{name}` (hot+cold merged) — the full data model | |
 | IVM balance view (DBSP) — **i128** base units, reorg = retraction | |
-| IVM restart-replay — the view rebuilds from stored facts on restart | |
+| IVM restart-replay — the views rebuild from stored facts on restart | |
+| Labels + direct counterparty-exposure view (DBSP) — content-addressed label snapshots, `/exposure/{addr}` | sanctions screening, threshold/velocity flags, alert webhooks (RFC-0008 C2–C6) |
 | WASM transform runtime (pure, sandboxed, batched Arrow) | |
 | MCP server (stdio, 8 tools, offline) + `schema.json` + `llms.txt` + `.claude/skills` scaffold | |
 | redb hot store, entity point-reads with cold (DuckDB) fallback | |
@@ -99,6 +100,26 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 ## Progress log
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
+
+- **2026-07-16 — RFC-0008 C1: labels + direct counterparty-exposure view.** The compliance pack's
+  foundation. New `nuthatch labels import <csv|json>` writes a **content-addressed** label snapshot
+  (`labels/<sha256>.json`) — list-as-data, the same discipline sanctions lists will use in C2: the hash
+  is a reproducible name for exactly that (address, label) set, import is append-only, and loading
+  merges every snapshot. Labels are queryable via `/sql` (a DuckDB `labels` view over the snapshots).
+  New `exposure.rs` maintains a **DBSP** view of *direct* counterparty exposure to the labeled set: for
+  a transfer `from → to`, if `to` is labeled the sender gains **outbound** exposure (count + summed
+  amount), if `from` is labeled the recipient gains **inbound** — served at `/exposure/{address}`.
+  Amounts are **i128** (same discipline as balances — a threshold view on i64 would be a liability),
+  and a reorg **retracts** through the circuit exactly like balances (golden test covers join +
+  retraction convergence + i128 + seed=replay equivalence). Restart-safe: `rebuild_exposure` folds cold
+  sealed segments to pre-summed `(key, amount, count)` in DuckDB (joined against the `labels` view) and
+  replays only the hot tail. Verified live on USDC: labeled the top recipient, a real sender showed
+  9 outbound transfers summed correctly; `exposure_entries` populated from cold+hot rebuild. 74 tests
+  (+5 labels, +4 exposure, +1 analytics cold-exposure fold). *Deliberate slice boundary: chain-derived
+  annotation facts (sanction hits) sealed to their own Parquet table land in C2, where they're produced;
+  C1's annotation kind is labels, durable as content-addressed snapshots.* RFC-0008 rewritten to v2
+  (P0 i128 marked shipped; C4 effectful-worlds decoupled from the grant milestone; operator-channel
+  dividing line added).
 
 - **2026-07-16 — RFC-0007 (launch & validation): the launch kit.** The artifacts that make going
   public deliberate rather than a shout into the void. New `SECURITY.md` (scope: the `/sql`+MCP surface

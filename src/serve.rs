@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::analytics;
+use crate::exposure::ExposureView;
 use crate::registry::TableSchema;
 use crate::store::Store;
 use crate::views::BalanceView;
@@ -42,6 +43,8 @@ pub struct AppState {
     pub chain: String,
     pub dir: PathBuf,
     pub balances: BalanceView,
+    /// Direct counterparty-exposure to the labeled set (RFC-0008 C1) — served at `/exposure/{addr}`.
+    pub exposure: ExposureView,
     /// The nest's table schemas (from the decode registry) — the source of truth for `/tables`.
     pub tables: Arc<Vec<TableSchema>>,
     /// Admission control for the analytical (DuckDB) surface: bounds how many `/sql` and cold
@@ -62,6 +65,7 @@ pub async fn run(listen: &str, state: AppState) -> Result<()> {
         .route("/sql", get(sql))
         .route("/balances", get(balances))
         .route("/balance/{address}", get(balance))
+        .route("/exposure/{address}", get(exposure))
         // Count every served request for `/metrics` (the operator's billing signal).
         .layer(axum::middleware::from_fn(count_request))
         .with_state(state);
@@ -146,8 +150,9 @@ async fn summary(State(s): State<AppState>) -> impl IntoResponse {
         "last_block": last_block,
         "sealed_through": s.store.get_meta("sealed_through").ok().flatten(),
         "holders": s.balances.holders(),
+        "exposure_entries": s.exposure.entries(),
         "tables": s.tables.len(),
-        "views": ["balances (IVM)"],
+        "views": ["balances (IVM)", "exposure (IVM)"],
         "endpoints": [
             "/health",
             "/tables",
@@ -157,6 +162,7 @@ async fn summary(State(s): State<AppState>) -> impl IntoResponse {
             "/sql?q=SELECT count(*) FROM \"<alias>__<event>\"",
             "/balances?limit=100",
             "/balance/{address}",
+            "/exposure/{address}",
         ],
     }))
 }
@@ -390,6 +396,27 @@ async fn balance(State(s): State<AppState>, Path(address): Path<String>) -> impl
     }
 }
 
+/// Direct counterparty-exposure for an address: how much it has transacted, directly, with the
+/// labeled set (RFC-0008 C1). Amounts are i128 base units, serialised as decimal strings (same reason
+/// as balances). A reorg retracts through the IVM view, so this is always the canonical-chain figure.
+async fn exposure(State(s): State<AppState>, Path(address): Path<String>) -> impl IntoResponse {
+    let address = address.to_ascii_lowercase();
+    let items: Vec<Value> = s
+        .exposure
+        .exposure(&address)
+        .into_iter()
+        .map(|r| {
+            json!({
+                "label": r.label,
+                "direction": r.direction,
+                "count": r.count.to_string(),
+                "amount": r.amount.to_string(),
+            })
+        })
+        .collect();
+    Json(json!({ "address": address, "count": items.len(), "exposure": items }))
+}
+
 /// Parse an entity id `{block:012}-{log_index:06}` back into its components.
 fn parse_id(id: &str) -> Option<(u64, u64)> {
     let (b, l) = id.split_once('-')?;
@@ -425,6 +452,7 @@ mod tests {
             chain: "ethereum".into(),
             dir: dir.to_path_buf(),
             balances: BalanceView::start().unwrap(),
+            exposure: ExposureView::start().unwrap(),
             tables: Arc::new(vec![]),
             sql_gate: Arc::new(Semaphore::new(permits)),
         }

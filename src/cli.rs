@@ -27,6 +27,40 @@ pub enum Command {
     Check(CheckArgs),
     /// Benchmark the indexing pipeline (measure first, optimise second — RFC-0004).
     Bench(BenchArgs),
+    /// Manage labeled address sets — the compliance annotation substrate (RFC-0008 C1).
+    Labels(LabelsArgs),
+}
+
+#[derive(Args)]
+pub struct LabelsArgs {
+    #[command(subcommand)]
+    pub what: LabelsWhat,
+}
+
+#[derive(Subcommand)]
+pub enum LabelsWhat {
+    /// Import a labeled address set (CSV `address,label` or JSON) as a content-addressed snapshot.
+    Import(LabelsImportArgs),
+    /// List the imported label snapshots and how many addresses each carries.
+    List(LabelsListArgs),
+}
+
+#[derive(Args)]
+pub struct LabelsImportArgs {
+    /// Path to the label file: CSV (`address,label` per line, optional header) or JSON (an array of
+    /// `{address,label}` objects, or an `{address: label}` map).
+    pub file: String,
+
+    /// Nest directory to import into (writes `labels/<hash>.json`).
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+}
+
+#[derive(Args)]
+pub struct LabelsListArgs {
+    /// Nest directory to read labels from.
+    #[arg(long, default_value = ".")]
+    pub dir: String,
 }
 
 #[derive(Args)]
