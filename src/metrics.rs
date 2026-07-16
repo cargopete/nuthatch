@@ -18,6 +18,7 @@ pub struct Metrics {
     rows_decoded: AtomicU64,
     rows_sealed: AtomicU64,
     reorgs: AtomicU64,
+    alert_outbox_depth: AtomicU64,
     // Serving — the surface an operator bills against.
     http_requests: AtomicU64,
     sql_queries: AtomicU64,
@@ -34,6 +35,7 @@ impl Metrics {
             rows_decoded: AtomicU64::new(0),
             rows_sealed: AtomicU64::new(0),
             reorgs: AtomicU64::new(0),
+            alert_outbox_depth: AtomicU64::new(0),
             http_requests: AtomicU64::new(0),
             sql_queries: AtomicU64::new(0),
             sql_rejections: AtomicU64::new(0),
@@ -58,6 +60,9 @@ impl Metrics {
     }
     pub fn inc_reorgs(&self) {
         self.reorgs.fetch_add(1, Relaxed);
+    }
+    pub fn set_alert_outbox(&self, v: u64) {
+        self.alert_outbox_depth.store(v, Relaxed);
     }
     pub fn inc_http(&self) {
         self.http_requests.fetch_add(1, Relaxed);
@@ -112,6 +117,11 @@ impl Metrics {
             "nuthatch_rss_bytes",
             "Resident set size of this process, in bytes.",
             rss,
+        ));
+        s.push_str(&gauge(
+            "nuthatch_alert_outbox_depth",
+            "Pending alert-webhook deliveries in the durable outbox.",
+            self.alert_outbox_depth.load(Relaxed),
         ));
         s.push_str(&counter(
             "nuthatch_rows_decoded_total",

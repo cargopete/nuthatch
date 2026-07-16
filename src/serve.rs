@@ -160,6 +160,7 @@ async fn summary(State(s): State<AppState>) -> impl IntoResponse {
         "holders": s.balances.holders(),
         "exposure_entries": s.exposure.entries(),
         "velocity_buckets": s.velocity.entries(),
+        "alert_outbox": s.store.outbox_len(),
         "tables": s.tables.len(),
         "views": ["balances (IVM)", "exposure (IVM)", "velocity (IVM)"],
         "endpoints": [

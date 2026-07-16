@@ -34,6 +34,21 @@ pub struct Config {
     /// Optional threshold & velocity flags (RFC-0008 C3). Absent → no flags, zero cost.
     #[serde(default, skip_serializing_if = "Flags::is_empty")]
     pub flags: Flags,
+    /// Optional alert webhook sinks (RFC-0008 C5). Each routes annotations of the named kinds to a
+    /// URL. Absent → no alerts. Delivery is at-least-once via a durable outbox; a stalled sink never
+    /// blocks indexing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alerts: Vec<Alert>,
+}
+
+/// One alert webhook sink: annotations whose kind is in `kinds` are POSTed to `url` (RFC-0008 C5).
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct Alert {
+    /// Annotation kinds to deliver, e.g. `["sanction_hit", "threshold_flag"]`.
+    pub kinds: Vec<String>,
+    /// The webhook endpoint. The operator configures it — it is the delivery allowlist (a sink only
+    /// ever POSTs to the URLs a nest declares here).
+    pub url: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -165,6 +180,7 @@ impl Config {
             }],
             screening: Screening::default(),
             flags: Flags::default(),
+            alerts: Vec::new(),
         })
     }
 
@@ -233,6 +249,7 @@ mod tests {
             ],
             screening: Screening::default(),
             flags: Flags::default(),
+            alerts: Vec::new(),
         };
         let raw = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&raw).unwrap();

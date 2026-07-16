@@ -6,6 +6,7 @@
 //! front-end; a reth-driven one is another, and both drive the pipeline through the `Source` trait.
 
 pub mod abi;
+pub mod alerts;
 pub mod analytics;
 pub mod bench;
 pub mod chains;

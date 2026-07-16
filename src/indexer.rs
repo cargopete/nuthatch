@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::alerts::{self, AlertRouter};
 use crate::chains::{self, Finality};
 use crate::chunker::{self, AdaptiveWindow};
 use crate::cli::DevArgs;
@@ -151,6 +152,16 @@ pub async fn run(
     // deployment); otherwise a cold start falls back to the `--backfill` tip offset.
     let start_block = config.contracts.iter().filter_map(|c| c.start_block).min();
 
+    // Optional alert webhook sinks (RFC-0008 C5). The delivery worker drains the durable outbox on
+    // its own task, decoupled from indexing — a slow/dead webhook never blocks the loop.
+    let router = Arc::new(alerts::AlertRouter::new(config.alerts.clone()));
+    let alert_worker = if router.is_empty() {
+        None
+    } else {
+        tracing::info!("{} alert sink(s) configured", config.alerts.len());
+        Some(tokio::spawn(alerts::run_delivery_worker(store.clone())))
+    };
+
     // Kick off the indexing loop in the background; serve the API on this task.
     let ingest = tokio::spawn(index_loop(
         source.clone(),
@@ -168,6 +179,7 @@ pub async fn run(
         velocity.clone(),
         threshold,
         velocity_cfg,
+        router.clone(),
         finality,
         window,
         seal_direct,
@@ -190,6 +202,9 @@ pub async fn run(
     serve::run(&listen, app_state).await?;
 
     ingest.abort();
+    if let Some(w) = alert_worker {
+        w.abort();
+    }
     Ok(())
 }
 
@@ -372,6 +387,7 @@ async fn index_loop(
     velocity: VelocityView,
     threshold: Option<i128>,
     velocity_cfg: Option<(i128, u64)>,
+    router: Arc<AlertRouter>,
     finality: Finality,
     window: u64,
     seal_direct: bool,
@@ -474,6 +490,25 @@ async fn index_loop(
                     if let Some((_, w)) = velocity_cfg {
                         velocity.apply(velocity_retraction_batch(&doomed, &registry, w));
                     }
+                    // Fire a `flag_retracted` alert for every rolled-back annotation a sink watches —
+                    // a consumer that acted on a flag learns the chain took it back (RFC-0008 C5).
+                    if !router.is_empty() {
+                        for j in &doomed {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(j) {
+                                if let Some(kind) = v.get("kind").and_then(|k| k.as_str()) {
+                                    if router.watches(kind) {
+                                        alerts::enqueue(
+                                            &store,
+                                            &router,
+                                            "flag_retracted",
+                                            kind,
+                                            &v,
+                                        )?;
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     let removed = store.rollback_to(ancestor)?;
                     store.set_meta(LAST_BLOCK_KEY, &ancestor.to_string())?;
@@ -560,6 +595,13 @@ async fn index_loop(
                                     t,
                                 ) {
                                     store.put_entity(&fkey, &ann.to_string())?;
+                                    alerts::enqueue(
+                                        &store,
+                                        &router,
+                                        "flag",
+                                        "threshold_flag",
+                                        &ann,
+                                    )?;
                                 }
                             }
                         }
@@ -591,6 +633,7 @@ async fn index_loop(
                     let hits = s.screen_window(&to_screen);
                     for (key, ann) in &hits {
                         store.put_entity(key, &ann.to_string())?;
+                        alerts::enqueue(&store, &router, "flag", "sanction_hit", ann)?;
                     }
                     if !hits.is_empty() {
                         tracing::warn!(

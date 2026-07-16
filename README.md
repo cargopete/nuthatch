@@ -32,7 +32,8 @@ remains is the scaled (Postgres / DataFusion) mode and wiring reth ExEx to a nod
 | Labels + direct counterparty-exposure view (DBSP) — content-addressed label snapshots, `/exposure/{addr}` | threshold/velocity flags, effectful worlds, alert webhooks (RFC-0008 C3–C6) |
 | Pure sanctions screening — content-addressed list snapshots × a zero-capability WASM component → sealed `sanction_hit` annotations, replayable `nuthatch screen` | signed pack manifest + `pack verify` / `audit replay` (RFC-0008 C6) |
 | Threshold & velocity flags — per-transfer `threshold_flag` annotations + a DBSP windowed velocity view (i128, reorg = retraction), served at `/flags` | alert webhooks (RFC-0008 C5) |
-| Effectful WASM stages — per-component capability grants (`kv` now, HTTP next), imports checked against the grant at load, annotations-only output | outbound-HTTP wiring + `alert-webhook` (RFC-0008 C5) |
+| Effectful WASM stages — per-component capability grants (`kv` now, HTTP next), imports checked against the grant at load, annotations-only output | wasi:http-sandboxed egress variant (optional) |
+| Alert webhooks — flag/hit annotations (and reorg `flag_retracted`) POSTed at-least-once via a durable outbox that never blocks the indexer | signed pack manifest + `pack verify` / `audit replay` (RFC-0008 C6) |
 | WASM transform runtime (pure, sandboxed, batched Arrow) | |
 | MCP server (stdio, 8 tools, offline) + `schema.json` + `llms.txt` + `.claude/skills` scaffold | |
 | redb hot store, entity point-reads with cold (DuckDB) fallback | |
@@ -103,6 +104,26 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 ## Progress log
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
+
+- **2026-07-16 — RFC-0008 C5: alert webhooks.** Flag/hit annotations delivered to operator-configured
+  HTTP endpoints, **at-least-once**, **without ever blocking the indexer**. New `[[alerts]]` config
+  (`kinds = [...]`, `url = ...`) routes annotation kinds to sinks. New `src/alerts.rs`: a **durable
+  outbox** in the hot store (redb — new `OUTBOX` table + `outbox_push/pending/remove/trim/len`;
+  survives restart, so at-least-once holds across a bounce), an enqueue that's one fast write
+  (decoupled from delivery), and a background **delivery worker** that drains the outbox via `reqwest`
+  and removes an entry only on a 2xx (a failure is retained for retry). **A stalled sink can't wedge
+  indexing**: the outbox is bounded (`outbox_trim`, 10k) and sheds its oldest entries loudly on
+  overflow; delivery runs on its own task. A reorg re-fires each rolled-back annotation as a
+  **`flag_retracted`** event, so a consumer that acted on a flag learns the chain took it back. Depth
+  exposed as `nuthatch_alert_outbox_depth` (`/metrics`) and `alert_outbox` (`/`). Delivery lives
+  host-side by design — the guarantees (durable, retraction-correct, non-blocking) are host state and
+  the endpoint is operator-configured, not a URL an untrusted component picks; the C4 grant model
+  remains available for a `wasi:http`-sandboxed enricher. **Gate met:** an e2e test drives a real local
+  webhook server — a raised annotation delivers a `flag`, a reorg delivers a `flag_retracted`,
+  delivered entries leave the outbox, and a dead endpoint retains the alert for retry. 93 tests green,
+  clippy clean. Verified live on USDC: a `threshold_flag` sink delivered 183 alerts to a local receiver
+  (event/kind/value intact), outbox draining as designed. 5 new tests (+router, +noop, +trim, +live
+  webhook flag/retraction, +failed-retry).
 
 - **2026-07-16 — RFC-0008 C4: effectful worlds (the capability-injection model).** The machinery that
   lets a WASM stage reach the outside world — but only as far as it is *granted*. Ported from liminal's

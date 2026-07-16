@@ -10,6 +10,11 @@ const ENTITIES: TableDefinition<&str, &str> = TableDefinition::new("entities");
 const META: TableDefinition<&str, &str> = TableDefinition::new("meta");
 /// Block-hash checkpoints (block -> canonical hash we indexed against), for reorg detection.
 const BLOCKS: TableDefinition<&str, &str> = TableDefinition::new("blocks");
+/// Durable alert-delivery outbox (RFC-0008 C5): monotonic seq -> pending-delivery JSON. Survives
+/// restart, so at-least-once delivery holds across a process bounce.
+const OUTBOX: TableDefinition<&str, &str> = TableDefinition::new("outbox");
+/// Meta key holding the next outbox sequence number.
+const OUTBOX_SEQ: &str = "outbox_next_seq";
 
 #[derive(Clone)]
 pub struct Store {
@@ -26,9 +31,98 @@ impl Store {
             wtx.open_table(ENTITIES)?;
             wtx.open_table(META)?;
             wtx.open_table(BLOCKS)?;
+            wtx.open_table(OUTBOX)?;
         }
         wtx.commit()?;
         Ok(Store { db: Arc::new(db) })
+    }
+
+    /// Push a pending alert delivery onto the durable outbox; returns its sequence number. A fast
+    /// single redb write — enqueuing never blocks indexing on a slow/dead webhook (RFC-0008 C5).
+    pub fn outbox_push(&self, payload: &str) -> Result<u64> {
+        let wtx = self.db.begin_write()?;
+        let seq;
+        {
+            let mut meta = wtx.open_table(META)?;
+            seq = meta
+                .get(OUTBOX_SEQ)?
+                .and_then(|v| v.value().parse::<u64>().ok())
+                .unwrap_or(0);
+            meta.insert(OUTBOX_SEQ, (seq + 1).to_string().as_str())?;
+            let mut ob = wtx.open_table(OUTBOX)?;
+            ob.insert(Self::outbox_key(seq).as_str(), payload)?;
+        }
+        wtx.commit()?;
+        Ok(seq)
+    }
+
+    fn outbox_key(seq: u64) -> String {
+        format!("{seq:020}")
+    }
+
+    /// The oldest `limit` pending deliveries, as `(seq, payload)`, in enqueue order.
+    pub fn outbox_pending(&self, limit: usize) -> Result<Vec<(u64, String)>> {
+        let rtx = self.db.begin_read()?;
+        let t = rtx.open_table(OUTBOX)?;
+        let mut out = Vec::with_capacity(limit.min(1024));
+        for row in t.iter()? {
+            let (k, v) = row?;
+            let seq: u64 = k.value().parse().context("corrupt outbox key")?;
+            out.push((seq, v.value().to_string()));
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Remove a delivered entry (call only after a successful POST — at-least-once semantics).
+    pub fn outbox_remove(&self, seq: u64) -> Result<()> {
+        let wtx = self.db.begin_write()?;
+        {
+            let mut t = wtx.open_table(OUTBOX)?;
+            t.remove(Self::outbox_key(seq).as_str())?;
+        }
+        wtx.commit()?;
+        Ok(())
+    }
+
+    /// Number of pending deliveries — the `/status` outbox gauge.
+    pub fn outbox_len(&self) -> u64 {
+        let count = || -> Result<u64> {
+            let rtx = self.db.begin_read()?;
+            let t = rtx.open_table(OUTBOX)?;
+            Ok(t.len()?)
+        };
+        count().unwrap_or(0)
+    }
+
+    /// Bound the outbox: if it exceeds `max`, drop the oldest entries down to `max`. Returns how many
+    /// were dropped. This is the "never block the indexer" backstop — a dead webhook can't grow the
+    /// outbox without limit; the oldest undelivered alerts are shed (loudly, by the caller).
+    pub fn outbox_trim(&self, max: u64) -> Result<u64> {
+        let len = self.outbox_len();
+        if len <= max {
+            return Ok(0);
+        }
+        let drop = len - max;
+        let wtx = self.db.begin_write()?;
+        let mut dropped = 0u64;
+        {
+            let mut t = wtx.open_table(OUTBOX)?;
+            let doomed: Vec<String> = t
+                .iter()?
+                .filter_map(|r| r.ok())
+                .take(drop as usize)
+                .map(|(k, _)| k.value().to_string())
+                .collect();
+            for k in doomed {
+                t.remove(k.as_str())?;
+                dropped += 1;
+            }
+        }
+        wtx.commit()?;
+        Ok(dropped)
     }
 
     /// Key entities as `{block:012}-{log_index:06}` so iteration is chain-ordered.

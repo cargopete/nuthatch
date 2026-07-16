@@ -82,6 +82,7 @@ pub async fn init(args: InitArgs) -> Result<()> {
         contracts,
         screening: crate::config::Screening::default(),
         flags: crate::config::Flags::default(),
+        alerts: Vec::new(),
     };
     config.save(&dir)?;
 
