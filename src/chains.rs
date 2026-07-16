@@ -65,10 +65,31 @@ const ARBITRUM_ONE: Chain = Chain {
     log_window: 2000,
 };
 
+const BASE: Chain = Chain {
+    name: "base",
+    chain_id: 8453,
+    rpc_urls: &[
+        // Keyless Base mainnet endpoints (2026-07). The official RPC first.
+        "https://mainnet.base.org",
+        "https://base-rpc.publicnode.com",
+        "https://base.drpc.org",
+        "https://base-pokt.nodies.app",
+    ],
+    // OP-stack L2: true finality is L1 confirmation. Base exposes the L1-aware `finalized` tag, so
+    // prefer it (same policy as Arbitrum); the fallback (~30 min at 2 s blocks) only bites if an
+    // endpoint doesn't serve the tag.
+    finality: Finality::FinalizedTag {
+        fallback_depth: 900,
+    },
+    // ~2 s blocks and busy — a moderate window that the adaptive chunker (RFC-0004 §2) tunes further.
+    log_window: 1000,
+};
+
 pub fn lookup(name: &str) -> Option<&'static Chain> {
     match name {
         "mainnet" | "ethereum" | "eth" => Some(&MAINNET),
         "arbitrum-one" | "arbitrum" | "arb" | "arb1" => Some(&ARBITRUM_ONE),
+        "base" | "base-mainnet" | "base-one" => Some(&BASE),
         _ => None,
     }
 }
@@ -102,6 +123,16 @@ mod tests {
         let c = lookup("mainnet").unwrap();
         assert_eq!(c.finality, Finality::Depth(64));
         assert_eq!(c.log_window, 20);
+    }
+
+    #[test]
+    fn base_is_registered_as_op_stack_l2() {
+        let c = lookup("base").expect("base in registry");
+        assert_eq!(c.chain_id, 8453);
+        // OP-stack L2 → same finalized-tag policy as Arbitrum.
+        assert!(matches!(c.finality, Finality::FinalizedTag { .. }));
+        assert!(!c.rpc_urls.is_empty());
+        assert_eq!(lookup("base-mainnet").unwrap().chain_id, 8453);
     }
 
     #[test]

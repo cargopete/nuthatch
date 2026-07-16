@@ -97,6 +97,14 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-16 — RFC-0005 step 1: Base chain registry entry.** Adds `base` (chain 8453, OP-stack) to
+  the registry — keyless Base RPCs, the same L1-aware `FinalizedTag` finality policy as Arbitrum, a
+  moderate `log_window` the adaptive chunker tunes. Completes the operator launch matrix the RFC-0005
+  (v2) release criteria call for (Ethereum + Arbitrum One + Base), an afternoon of registry work under
+  the RFC-0002 §1 design. Verified live: Base serves the `finalized` tag (latest vs finalized ~470
+  blocks apart), and `init 0x8335…2913 --chain base` resolved Base USDC via Sourcify and `dev` decoded
+  6,516 Base events. (RFC-0005 rewritten to v2: adds the GraphOps operator channel — OCI image,
+  `/metrics`, query guards, config-stability contract — as first-class v0.1.0 release criteria.)
 - **2026-07-16 — RFC-0004 step 4: `dev --seal-direct` (the 20× in production) + backfill-semantics
   fix.** The seal-direct + pipeline win now lives in `dev`, not just the bench. `nuthatch dev
   --seal-direct [--concurrency K]` runs a **phased** cold-start backfill: fast-seal the finalized
