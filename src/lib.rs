@@ -10,6 +10,7 @@ pub mod analytics;
 pub mod bench;
 pub mod chains;
 pub mod check;
+pub mod chunker;
 pub mod cli;
 pub mod config;
 pub mod indexer;

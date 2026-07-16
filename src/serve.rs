@@ -12,12 +12,28 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::analytics;
 use crate::registry::TableSchema;
 use crate::store::Store;
 use crate::views::BalanceView;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
+
+/// How many analytical (DuckDB) queries may run at once across `/sql` and cold `/table` reads. Each
+/// DuckDB query is already capped at 512 MB / 2 threads (see `analytics`), so this bounds the whole
+/// analytical surface's worst-case footprint — the real DoS multiplier is *concurrency*, not any one
+/// query. Kept small to stay well inside the embedded RAM budget; this is node self-protection, not
+/// per-caller rate-limiting (that needs identity and belongs in a gateway).
+pub const SQL_MAX_CONCURRENCY: usize = 2;
+/// Wall-clock deadline for a single analytical query; a runaway (e.g. cartesian) is interrupted.
+const SQL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cap on rows materialised from one analytical query — bounds the Rust-side result buffer, which
+/// lives outside DuckDB's own memory limit. Beyond this the result is truncated and flagged.
+const SQL_MAX_ROWS: usize = 50_000;
+/// Reject absurdly long query strings before they reach the planner.
+const SQL_MAX_QUERY_LEN: usize = 16 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -28,6 +44,10 @@ pub struct AppState {
     pub balances: BalanceView,
     /// The nest's table schemas (from the decode registry) — the source of truth for `/tables`.
     pub tables: Arc<Vec<TableSchema>>,
+    /// Admission control for the analytical (DuckDB) surface: bounds how many `/sql` and cold
+    /// `/table` queries run at once so a burst can't multiply DuckDB's per-query footprint past the
+    /// process budget. Constructed with [`SQL_MAX_CONCURRENCY`] permits.
+    pub sql_gate: Arc<Semaphore>,
 }
 
 pub async fn run(listen: &str, state: AppState) -> Result<()> {
@@ -114,24 +134,37 @@ async fn table(
         .filter(&in_range)
         .collect();
 
-    // Fill from cold (sealed segments) if the hot store didn't satisfy the limit.
+    // Fill from cold (sealed segments) if the hot store didn't satisfy the limit. This runs under
+    // the same analytical admission gate as `/sql`; if it's saturated we serve the hot rows we
+    // already have rather than pile more scan-heavy work on. Cold is an enrichment of the hot result,
+    // so best-effort (`try_acquire`) is the right degradation — a point-read-ish endpoint shouldn't
+    // 503 just because the analytical surface is busy.
     if items.len() < limit {
-        let need = limit - items.len();
-        let mut where_ = String::new();
-        if let Some(f) = q.from_block {
-            where_.push_str(&format!(" AND block_number >= {f}"));
-        }
-        if let Some(t) = q.to_block {
-            where_.push_str(&format!(" AND block_number <= {t}"));
-        }
-        let sql = format!(
-            "SELECT * FROM \"{name}\" WHERE 1=1{where_} ORDER BY block_number DESC, log_index DESC LIMIT {need}"
-        );
-        let dir = s.dir.clone();
-        if let Ok(Ok(rows)) =
-            tokio::task::spawn_blocking(move || analytics::query(&dir, &sql)).await
-        {
-            items.extend(rows);
+        if let Ok(permit) = Arc::clone(&s.sql_gate).try_acquire_owned() {
+            let need = limit - items.len();
+            let mut where_ = String::new();
+            if let Some(f) = q.from_block {
+                where_.push_str(&format!(" AND block_number >= {f}"));
+            }
+            if let Some(t) = q.to_block {
+                where_.push_str(&format!(" AND block_number <= {t}"));
+            }
+            let sql = format!(
+                "SELECT * FROM \"{name}\" WHERE 1=1{where_} ORDER BY block_number DESC, log_index DESC LIMIT {need}"
+            );
+            let dir = s.dir.clone();
+            let guard = analytics::QueryGuard {
+                timeout: SQL_TIMEOUT,
+                max_rows: need,
+            };
+            if let Ok(Ok(out)) = tokio::task::spawn_blocking(move || {
+                let _permit = permit; // held for the whole blocking query
+                analytics::query_guarded(&dir, &sql, guard)
+            })
+            .await
+            {
+                items.extend(out.rows);
+            }
         }
     }
 
@@ -202,11 +235,53 @@ struct SqlQuery {
 }
 
 /// Read-only analytical SQL over the sealed segments; one view per `{alias}__{event}` table.
+///
+/// Self-protecting, so a public `/sql` isn't a DoS vector: bounded concurrency (503 when the
+/// analytical surface is saturated — a growing backlog is itself the attack), a per-query wall-clock
+/// budget (a runaway is interrupted), a max query length, and a row cap (bounds the result buffer).
+/// What's deliberately *absent* is authn / per-caller quotas: those need caller identity a sovereign
+/// node doesn't have, so gating *who* may query and *how much* is a gateway's job, not the node's.
 async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl IntoResponse {
+    if q.q.len() > SQL_MAX_QUERY_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("query too long: {} bytes (max {SQL_MAX_QUERY_LEN})", q.q.len()) })),
+        )
+            .into_response();
+    }
+    // Fail fast when the analytical surface is saturated rather than queue: a backlog of pending
+    // DuckDB queries would itself exhaust memory/threads.
+    let permit = match Arc::clone(&s.sql_gate).try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "server busy: too many concurrent SQL queries" })),
+            )
+                .into_response()
+        }
+    };
     let dir = s.dir.clone();
-    let result = tokio::task::spawn_blocking(move || analytics::query(&dir, &q.q)).await;
+    let sql = q.q.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit; // held for the whole blocking query, released on return
+        analytics::query_guarded(
+            &dir,
+            &sql,
+            analytics::QueryGuard {
+                timeout: SQL_TIMEOUT,
+                max_rows: SQL_MAX_ROWS,
+            },
+        )
+    })
+    .await;
     match result {
-        Ok(Ok(rows)) => Json(json!({ "count": rows.len(), "rows": rows })).into_response(),
+        Ok(Ok(out)) => Json(json!({
+            "count": out.rows.len(),
+            "truncated": out.truncated,
+            "rows": out.rows,
+        }))
+        .into_response(),
         Ok(Err(e)) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": format!("{e:#}") })),
@@ -263,4 +338,70 @@ fn error(msg: String) -> axum::response::Response {
         Json(json!({ "error": msg })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal but real `AppState` — enough to drive the analytical handlers directly (no HTTP
+    /// harness). `permits` seeds the admission gate so a test can saturate it.
+    fn test_state(dir: &std::path::Path, permits: usize) -> AppState {
+        AppState {
+            store: Store::open(&dir.join("t.redb")).unwrap(),
+            address: "0x0".into(),
+            chain: "ethereum".into(),
+            dir: dir.to_path_buf(),
+            balances: BalanceView::start().unwrap(),
+            tables: Arc::new(vec![]),
+            sql_gate: Arc::new(Semaphore::new(permits)),
+        }
+    }
+
+    /// When the analytical gate is saturated, `/sql` fails fast with 503 rather than piling on.
+    #[tokio::test]
+    async fn sql_returns_503_when_gate_saturated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path(), 1);
+        // Hold the only permit — the gate is now saturated for the duration of the call.
+        let held = Arc::clone(&state.sql_gate).try_acquire_owned().unwrap();
+        let resp = sql(
+            State(state.clone()),
+            Query(SqlQuery {
+                q: "SELECT 1".into(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        drop(held);
+    }
+
+    /// An over-length query string is rejected (400) before it ever reaches the planner.
+    #[tokio::test]
+    async fn sql_rejects_overlong_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path(), SQL_MAX_CONCURRENCY);
+        let long = format!("SELECT {}", "1,".repeat(SQL_MAX_QUERY_LEN)); // well past the cap
+        let resp = sql(State(state), Query(SqlQuery { q: long }))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A well-formed query passes the gate and runs (200) — the guard doesn't block legitimate use.
+    #[tokio::test]
+    async fn sql_serves_a_normal_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path(), SQL_MAX_CONCURRENCY);
+        let resp = sql(
+            State(state),
+            Query(SqlQuery {
+                q: "SELECT 1 AS n".into(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }

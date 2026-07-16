@@ -10,14 +10,47 @@ use duckdb::types::ValueRef;
 use duckdb::Connection;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 /// Cap DuckDB's working memory so `/sql` can't breach the embedded footprint budget.
 const MEM_LIMIT: &str = "512MB";
 const MAX_THREADS: u32 = 2;
 
-/// Run a read-only query. A `transfers` view over all sealed segments is in scope. Only
-/// SELECT/WITH statements are accepted — this is a query surface, not a mutation surface.
+/// A resource guard for the untrusted `/sql` surface: a hard wall-clock deadline (enforced by
+/// interrupting the running DuckDB query) and a cap on materialised rows. Trusted internal callers
+/// (`net_balances`, `get_row`) run *unguarded* — their SQL is registry-built, never user text, and
+/// they must run to completion. Access control (who may query, per-caller quotas) is deliberately
+/// *not* here: that needs caller identity a sovereign single-tenant node doesn't have — it's a
+/// gateway's job. This guard is only about the node protecting itself from any single query.
+#[derive(Clone, Copy)]
+pub struct QueryGuard {
+    pub timeout: Duration,
+    pub max_rows: usize,
+}
+
+/// The result of a query: the rows, plus whether a guard's row cap truncated them.
+#[derive(Debug)]
+pub struct QueryOutput {
+    pub rows: Vec<Value>,
+    pub truncated: bool,
+}
+
+/// Run a read-only query to completion. Only SELECT/WITH statements are accepted — this is a query
+/// surface, not a mutation surface. Unguarded: for trusted, registry-built SQL that must finish.
 pub fn query(dir: &Path, sql: &str) -> Result<Vec<Value>> {
+    Ok(run(dir, sql, None)?.rows)
+}
+
+/// Run a read-only query under a resource guard — the entry point for the public `/sql` surface. A
+/// query that outlives `guard.timeout` is interrupted and surfaced as a timeout; a result larger
+/// than `guard.max_rows` is truncated and flagged. See [`QueryGuard`].
+pub fn query_guarded(dir: &Path, sql: &str, guard: QueryGuard) -> Result<QueryOutput> {
+    run(dir, sql, Some(guard))
+}
+
+fn run(dir: &Path, sql: &str, guard: Option<QueryGuard>) -> Result<QueryOutput> {
     // Check the first *statement keyword*, past any leading whitespace and SQL comments — a query
     // that opens with `-- note` or `/* … */` is still a SELECT. DuckDB gets the original text.
     let head = strip_leading_sql_comments(sql).to_ascii_lowercase();
@@ -36,6 +69,64 @@ pub fn query(dir: &Path, sql: &str) -> Result<Vec<Value>> {
     // this — they only touch the raw per-event tables.
     define_nest_views(&conn, dir);
 
+    // Hard wall-clock deadline for the untrusted surface: a watchdog thread interrupts the in-flight
+    // query once it outlives the guard's timeout (a cartesian blow-up can't be stopped by the memory
+    // cap alone). `interrupt()` makes the running query fail; we translate that into a clear timeout
+    // error below. On normal completion we signal the watchdog so it never fires. Unguarded (trusted)
+    // queries skip all of this and run to completion.
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let watchdog = guard.map(|g| {
+        let handle = conn.interrupt_handle();
+        let flag = interrupted.clone();
+        let (tx, rx) = mpsc::channel::<()>();
+        let join = std::thread::spawn(move || {
+            // Only a genuine timeout interrupts; a value (normal completion) or a dropped sender
+            // (panic) leaves the query alone.
+            if let Err(mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(g.timeout) {
+                flag.store(true, Ordering::SeqCst);
+                handle.interrupt();
+            }
+        });
+        (tx, join)
+    });
+
+    let cap = guard.map(|g| g.max_rows);
+    let outcome = collect(&conn, sql, cap);
+
+    // Stop the watchdog before interpreting the result: a value arriving before the deadline makes
+    // `recv_timeout` return `Ok`, so it won't interrupt; then join so it can't fire late.
+    if let Some((tx, join)) = watchdog {
+        let _ = tx.send(());
+        let _ = join.join();
+    }
+
+    let (mut rows, over_cap) = match outcome {
+        Ok(v) => v,
+        Err(e) => {
+            if interrupted.load(Ordering::SeqCst) {
+                let secs = guard.map(|g| g.timeout.as_secs()).unwrap_or(0);
+                bail!("query exceeded the {secs}s time budget on the read-only SQL surface");
+            }
+            return Err(e);
+        }
+    };
+
+    let truncated = match cap {
+        Some(max) if over_cap => {
+            rows.truncate(max);
+            true
+        }
+        _ => false,
+    };
+    Ok(QueryOutput { rows, truncated })
+}
+
+/// Prepare, execute and materialise the result. With `cap = Some(n)` it stops after `n + 1` rows so
+/// the caller can report truncation precisely (the returned bool is true when that extra row existed,
+/// i.e. more than `n` rows were available); the caller then truncates back to `n`. `cap = None`
+/// materialises every row. Row materialisation is Rust-side and escapes DuckDB's own memory limit,
+/// so the cap is what actually bounds a `SELECT *` result buffer.
+fn collect(conn: &Connection, sql: &str, cap: Option<usize>) -> Result<(Vec<Value>, bool)> {
     let mut stmt = conn.prepare(sql).context("failed to prepare query")?;
     let mut rows = stmt.query([]).context("query failed")?;
     // Column metadata is only materialised once the statement has executed — read it off the
@@ -45,6 +136,7 @@ pub fn query(dir: &Path, sql: &str) -> Result<Vec<Value>> {
         .map(|s| s.column_names().iter().map(|c| c.to_string()).collect())
         .unwrap_or_default();
 
+    let hard = cap.map(|c| c + 1);
     let mut out = Vec::new();
     while let Some(row) = rows.next().context("row read failed")? {
         let mut obj = Map::new();
@@ -52,8 +144,11 @@ pub fn query(dir: &Path, sql: &str) -> Result<Vec<Value>> {
             obj.insert(name.clone(), value_to_json(row.get_ref(i)?));
         }
         out.push(Value::Object(obj));
+        if hard.is_some_and(|h| out.len() >= h) {
+            return Ok((out, true));
+        }
     }
-    Ok(out)
+    Ok((out, false))
 }
 
 /// Skip leading whitespace and SQL comments (`-- line` and `/* block */`) so the read-only guard
@@ -315,6 +410,54 @@ mod tests {
     fn rejects_non_select() {
         let dir = tempfile::tempdir().unwrap();
         assert!(query(dir.path(), "DROP TABLE x").is_err());
+    }
+
+    /// The `/sql` row cap bounds the Rust-side result buffer and flags truncation precisely.
+    #[test]
+    fn guarded_query_caps_rows_and_flags_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let entities = vec![
+            r#"{"table":"t__transfer","from":"0xa","to":"0xb","value":"1","block_number":1,"tx_hash":"0xt","log_index":0}"#.to_string(),
+            r#"{"table":"t__transfer","from":"0xa","to":"0xc","value":"2","block_number":1,"tx_hash":"0xt","log_index":1}"#.to_string(),
+            r#"{"table":"t__transfer","from":"0xa","to":"0xd","value":"3","block_number":1,"tx_hash":"0xt","log_index":2}"#.to_string(),
+        ];
+        crate::seal::seal_range(dir.path(), &entities, 1, 1).unwrap();
+
+        // Cap below the row count: truncated to max_rows and flagged.
+        let guard = QueryGuard {
+            timeout: Duration::from_secs(30),
+            max_rows: 2,
+        };
+        let out = query_guarded(dir.path(), r#"SELECT * FROM "t__transfer""#, guard).unwrap();
+        assert_eq!(out.rows.len(), 2, "capped at max_rows");
+        assert!(out.truncated, "flagged when more rows existed");
+
+        // Cap at the exact row count: everything returned, not flagged (the +1 sentinel finds no more).
+        let guard = QueryGuard {
+            timeout: Duration::from_secs(30),
+            max_rows: 3,
+        };
+        let out = query_guarded(dir.path(), r#"SELECT * FROM "t__transfer""#, guard).unwrap();
+        assert_eq!(out.rows.len(), 3);
+        assert!(!out.truncated);
+    }
+
+    /// A runaway query is interrupted by the watchdog and surfaced as a timeout, not left to hang.
+    #[test]
+    fn guarded_query_times_out_on_a_runaway() {
+        let dir = tempfile::tempdir().unwrap();
+        // A recursive CTE that would iterate ~a billion times: it cannot finish inside the budget, so
+        // the watchdog interrupts it. Needs no sealed data — it never touches a table.
+        let runaway = "WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 1000000000) SELECT count(*) FROM t";
+        let guard = QueryGuard {
+            timeout: Duration::from_millis(250),
+            max_rows: 1000,
+        };
+        let err = query_guarded(dir.path(), runaway, guard).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("time budget"),
+            "expected a timeout error, got: {err:#}"
+        );
     }
 
     #[test]

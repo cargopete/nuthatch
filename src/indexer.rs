@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::chains::{self, Finality};
+use crate::chunker::{self, AdaptiveWindow};
 use crate::cli::DevArgs;
 use crate::config::{Config, DB_FILE};
 use crate::registry::DecodeRegistry;
@@ -132,6 +133,7 @@ pub async fn run(
         dir: dir.clone(),
         balances,
         tables: Arc::new(registry.schema()),
+        sql_gate: Arc::new(tokio::sync::Semaphore::new(serve::SQL_MAX_CONCURRENCY)),
     };
     serve::run(&listen, app_state).await?;
 
@@ -166,12 +168,24 @@ pub async fn backfill_direct(
     let mut batch_from = from;
     let mut next = from;
     let mut total = 0u64;
+    // Adaptively size the getLogs range around the target response budget (RFC-0004 §2), starting
+    // from the chain's default window — so dense and sparse ranges self-tune and provider result
+    // caps are handled by shrink-and-retry rather than a hard failure.
+    let mut chunker = AdaptiveWindow::for_window(window);
     while next <= to {
-        let chunk_to = (next + window - 1).min(to);
-        let logs = source
-            .logs(addresses, topic0s, next, chunk_to)
-            .await
-            .with_context(|| format!("getLogs {next}..={chunk_to}"))?;
+        let chunk_to = (next + chunker.window() - 1).min(to);
+        let logs = match source.logs(addresses, topic0s, next, chunk_to).await {
+            Ok(logs) => {
+                chunker.observed(logs.len() as u64);
+                logs
+            }
+            Err(e) if chunker::is_result_too_large(&e) => {
+                chunker.too_large();
+                tracing::debug!("range {next}..={chunk_to} too large; shrinking and retrying");
+                continue; // retry the same `next` with a smaller window
+            }
+            Err(e) => return Err(e).with_context(|| format!("getLogs {next}..={chunk_to}")),
+        };
         let mut rows: Vec<_> = logs
             .iter()
             .filter_map(|log| match registry.decode(log) {
@@ -363,6 +377,8 @@ async fn index_loop(
         }
     };
 
+    // Adaptive getLogs sizing (RFC-0004 §2), seeded from the chain's default window.
+    let mut chunker = AdaptiveWindow::for_window(window);
     loop {
         let tip = match source.tip().await {
             Ok(t) => t,
@@ -405,9 +421,10 @@ async fn index_loop(
             continue;
         }
 
-        let to = (next + window - 1).min(tip);
+        let to = (next + chunker.window() - 1).min(tip);
         match source.logs(&addresses, &topic0s, next, to).await {
             Ok(logs) => {
+                chunker.observed(logs.len() as u64);
                 // Decode first so we know which blocks actually produced rows, then fetch just those
                 // blocks' timestamps in one batch (cheap even for a dense window) and stamp each row.
                 let mut rows: Vec<_> = logs
@@ -474,6 +491,11 @@ async fn index_loop(
                 if let Err(e) = maybe_seal(&dir, &store, finalized_through) {
                     tracing::warn!("sealing failed: {e:#}");
                 }
+            }
+            Err(e) if chunker::is_result_too_large(&e) => {
+                // Provider capped the response — shrink and retry the same range immediately.
+                chunker.too_large();
+                tracing::debug!("range {next}..={to} too large; shrinking and retrying");
             }
             Err(e) => {
                 tracing::warn!("get_logs {next}..={to} failed: {e:#}; retrying");
