@@ -26,7 +26,9 @@ wasmtime::component::bindgen!({
     world: "effectful-kv",
 });
 
-use nuthatch::transform::kv;
+// `self::` disambiguates the bindgen-generated `nuthatch` module from the crate named `nuthatch`
+// (the two collide only in the doctest harness, where the crate is an `--extern nuthatch`).
+use self::nuthatch::transform::kv;
 
 /// The capabilities an effectful component may be granted. Absent capability → the component may not
 /// import it. `http_hosts` is the outbound-HTTP allowlist wired in C5; declared here so the grant
