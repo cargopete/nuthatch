@@ -1,156 +1,166 @@
-# RFC-0006: Grant funding — NLnet/NGI and Ethereum Foundation ESP
+# RFC-0006: Sustainability — grants (NLnet/NGI, EF ESP) alongside operator revshare
 
-- Status: Draft
+- Status: Draft (v2)
 - Author: Pete (cargopete)
-- Date: 2026-07-14
-- Depends on: RFC-0002 (working demo), RFC-0003–0005 (fundable roadmap milestones)
-- Blocks: sustained development time (this is the project's revenue model)
+- Date: 2026-07-16 (v1: 2026-07-14)
+- Depends on: RFC-0002 (working demo — satisfied), RFC-0005 (roadmap milestones)
+- Blocks: sustained development time
+- Revision note: v2 retitles the RFC. Grants are no longer "the project's revenue
+  model" (v1) but one of two sustainability legs — the second is the GraphOps
+  operator-revshare partnership (conversation of 2026-07-16). v2 adds disclosure
+  rules, a no-double-funding rule, milestone substitution, and a neutrality clause.
 
 ## Abstract
 
-Nuthatch is a public good with no monetization plan by design; grants are the
-sustainability model. This RFC specifies the two primary applications (NLnet/NGI and
-Ethereum Foundation ESP), the framing that fits each funder, a milestone-based budget
-derived from RFCs 0001–0005 and the deferred roadmap, and the supporting materials to
-prepare. It also codifies what we will not do for funding (scope integrity).
+Nuthatch remains a free, AGPL public good with no direct monetization. Sustainability
+now has two independent legs: (1) grants funding the commons-flavored roadmap
+(NLnet/NGI, EF ESP — this RFC's original subject), and (2) revenue share from
+operators who run Nuthatch as a hosted service — concretely, GraphOps, which intends
+to offer Nuthatch on its data-service platform and share revenue to fund core
+development. The legs are deliberately independent: either alone sustains
+nights-and-weekends+; together they approach funded full-time work. This RFC keeps the
+grant applications on track, adds the rules that keep the two legs honest with each
+other, and codifies that no partnership changes the project's neutrality.
 
 ## Motivation
 
-Reports 3–4 of the research phase established: the self-hosted indexer niche is real
-but non-monetizable; the sustainable model is grants + sponsorship (TrueBlocks
-precedent: EF grants in 2018/2022/2024, the 2018 infrastructure grant reported at
-~$120K; NLnet awards €5–50K per project with a famously light application). The demo
-now exists with measured numbers — the strongest position a grant applicant can be in.
-The constraint is calendar: grant cycles are slow, so applications go out in parallel
-with RFCs 0003–0005, not after.
+v1's premise ("the self-hosted indexer niche is real but non-monetizable; grants are
+the sustainability model") was half-superseded within 48 hours of the demo existing:
+an infrastructure operator with 8,000 physical cores proposed hosting Nuthatch with
+revshare, unprompted. The research-phase pattern this matches is Plausible/Caddy —
+sovereignty tools funded by *someone else's* managed offering — except with the
+operator as a partner rather than the maintainer running the cloud. Grants remain
+worth pursuing: revshare is unproven revenue until the platform launches and bills,
+grants fund exactly the commons-flavored milestones operators won't prioritize, and
+funder diversity is itself a bus-factor mitigation.
+
+## The two legs and the rules between them
+
+- **Leg 1 — grants** fund commons infrastructure: verifiability, the semantic layer,
+  IVM generalization, security audit, docs. Public-benefit framing, milestone-based.
+- **Leg 2 — operator revshare (GraphOps)** funds availability of the maintainer and
+  operator-adjacent work (release engineering, guards, fleet ergonomics — RFC-0005
+  §6), proportional to hosted-service revenue. Terms TBD on the upcoming call; the
+  structural asks from our side: revshare on Nuthatch-derived revenue, roadmap
+  *input* not veto, no exclusivity, no relicensing, and public disclosure of the
+  relationship's existence (amounts private is fine).
+
+Rules:
+1. **No double funding.** A milestone funded by a grant is not simultaneously billed
+   to or prioritized under revshare, and vice versa. Concretely: v1's M1 (effectful
+   transform worlds) is now likely to be built earlier under RFC-0008 (compliance
+   pack) demand — if it ships before grant submission, it is REMOVED from the NLnet
+   budget and substituted (see Budget).
+2. **Milestones must be un-started at submission.** The progress log is public;
+   funders can and will check. Anything shipped moves from "budget" to "evidence."
+3. **No exclusivity, ever.** Any operator may host Nuthatch under AGPL; GraphOps's
+   edge is partnership, priority support of *their* integration questions, and being
+   first — not a gate on others. This sentence is quotable to any future partner.
+4. **Disclosure.** Both grant applications disclose the operator partnership in one
+   plain sentence. NLnet and ESP both routinely fund projects with commercial
+   ecosystems; concealment, not coexistence, is what damages applications.
 
 ## Funder 1: NLnet / NGI
 
-### Which call (verify at submission — programs shifted in 2026)
+### Which call — unchanged from v1
+(Verify the open call at submission; NGI Assure lineage first; application is
+call-agnostic; if nothing opens before September, file next cycle.)
 
-Action item zero: check nlnet.nl/propose for the currently-open call the week of
-submission. Research flagged that NGI Zero Commons Fund's final call closed June 1 2026
-and the August 1 deadline belongs to unrelated programs (Taler/Fediversity). Candidate
-homes, in order: **NGI Assure lineage** (explicitly lists distributed ledgers and
-verifiable/trustworthy infrastructure as in-scope building blocks), any successor
-Commons call, or NLnet's general themed calls. If nothing suitable is open before
-September, submit to the next opening cycle — the application below is call-agnostic.
+### Framing — unchanged from v1, plus one sentence
+The data-sovereignty pitch stands verbatim. Add to the "what exists already" section:
+measured numbers now include the RFC-0004 progression (~289 → ~5,837 ev/s, ~20×
+stacked, methodology in-repo) and the operator partnership as adoption evidence,
+disclosed per Rule 4: "An independent infrastructure operator (GraphOps) is preparing
+a hosted offering of Nuthatch under AGPL and shares revenue with the maintainer; this
+application funds the commons-facing roadmap that hosting revenue would not
+prioritize."
 
-### Framing (this is the part that wins or loses it)
-
-Lead with **data sovereignty and verifiable infrastructure**, not blockchain:
-
-> Nuthatch lets anyone operate their own index of public-ledger data on a €5 computer —
-> replacing trusted third-party data APIs with a small, auditable, deterministic tool.
-> Every derived result is reproducible: transformations run in capability-isolated
-> WebAssembly components whose purity is verifiable from their imports alone, and all
-> historical data is content-addressed. No telemetry, no accounts, no gated APIs.
-
-NLnet's reviewers care about: open standards (WASI component model, WIT, MCP, Arrow/
-Parquet — genuinely standards-forward, say so), user autonomy, small auditable
-software, and EU dimension (Bulgarian company, EU maintainer). The AI angle is framed
-as *local-first agent access to one's own data* (offline MCP, Ollama), never as
-AI hype.
-
-### Budget (€38,400 requested; NLnet range €5–50K)
-
-Milestone-based, mapped to public RFCs (reviewers can see the plan is real):
+### Budget (€38,400 requested; NLnet range €5–50K) — revised per Rule 1
 
 | Milestone | Deliverable | Est. effort | € |
 |---|---|---|---|
-| M1 | Effectful transform worlds (capability-granted components, annotations-only) + signed pipeline manifests | 6 wk | 9,600 |
-| M2 | Governed semantic layer + reliable NL/agent queries over it | 8 wk | 12,800 |
-| M3 | IVM generalization: declarative views compiled to DBSP, restart replay, hot/cold view freshness | 6 wk | 9,600 |
-| M4 | Security review remediation + hardening release + docs (a11y of docs, threat model) | 4 wk | 6,400 |
+| M1 | Governed semantic layer + reliable NL/agent queries over it | 8 wk | 12,800 |
+| M2 | IVM generalization: declarative views compiled to DBSP, hot/cold view freshness | 6 wk | 9,600 |
+| M3 | GraphQL compatibility layer + subgraph-migration path (the open-standards continuity story) | 6 wk | 9,600 |
+| M4 | Security review remediation (WASM host boundary, via NLnet's ROS) + threat model + hardening release + docs | 4 wk | 6,400 |
 
-Rate: €40/h × 40h/wk (NLnet-typical modest rates read well; do not pad). NLnet also
-funds third-party security audits via their partner (Radically Open Security) — request
-it explicitly for the WASM host boundary; it costs the fund, not the milestone budget.
+Changes from v1: effectful-worlds milestone removed (Rule 1 — expected to ship under
+RFC-0008 first); GraphQL-compat substituted (genuinely commons-flavored: it lets
+existing subgraph consumers move to self-hosted infrastructure without rewrites).
+Rate unchanged (€40/h). ROS audit still requested explicitly. **Re-verify against the
+progress log the week of submission and re-apply Rules 1–2** — at the current shipping
+pace this table has a short shelf life, which is a good problem.
 
-### Mechanics
-
-1–2 page application: abstract (100 words), the problem (trusted third-party data
-infrastructure), the solution + what exists already (link repo, measured numbers,
-progress log — the honesty format is itself evidence), budget table, comparison with
-prior art (Graph/Goldsky/Ponder — reuse the site's honest table), and "how does this
-benefit the commons" (AGPL, nests as shareable public definitions, indexes The Graph's
-own public network as the flagship example).
+### Mechanics — unchanged from v1.
 
 ## Funder 2: Ethereum Foundation ESP
 
-### Framing
+### Framing — unchanged from v1, strengthened by two facts
+The TrueBlocks-lane pitch stands. Add: (a) the operator partnership as ecosystem
+evidence — an Ethereum-infrastructure operator adopting the tool for its platform is
+the adoption signal ESP reviewers weight most; disclosed per Rule 4; (b) RFC-0003's
+blockers are cleared (toolchain 1.95 needle threaded, reth v2.4 resolves alongside the
+core), so the ExEx milestone is de-risked engineering, not speculation.
 
-For ESP, blockchain is the point — frame as **public-goods Ethereum data
-infrastructure**: the TrueBlocks lane (local-first indexing as a public good; direct
-precedent, cite it), plus what's new since TrueBlocks: reth ExEx integration
-(strengthens the reth ecosystem — EF-adjacent), deterministic re-execution as
-practical verifiability, and the L2 story (Horizon nest on Arbitrum). Emphasize: no
-token, no company capture, AGPL, one maintainer with a decade of ecosystem
-contributions (Matchstick, Graphcast — name them; ESP reviewers know them).
+### Ask — unchanged from v1 ($50–90K / 12 months; milestone table reuses NLnet's
+revised set plus ExEx + OP-stack multi-chain; co-funding disclosed with distinct
+milestone ownership).
 
-Ask: project grant, $50–90K / 12 months, milestone structure reusing the NLnet table
-plus RFC-0003 (ExEx, already self-funded — shows momentum) and multi-chain (OP-stack
-ExEx). Note in the application that NLnet has been approached for the
-sovereignty-flavored milestones; co-funding with distinct milestone ownership is
-normal and reviewers prefer it disclosed.
+### Mechanics — unchanged from v1.
 
-### Mechanics
+## Secondary / later channels — unchanged from v1
+(The Graph ecosystem grants: still do not apply this cycle — and note the optics have
+improved, not worsened: GraphOps is a core Graph-ecosystem operator, so Nuthatch is
+demonstrably complementary infrastructure inside the ecosystem. Revisit if community
+members propose it. Gitcoin/RetroPGF after launch. GitHub Sponsors: enable now.)
 
-ESP inquiry form first (short), full proposal on invitation. Materials: the repo, the
-benchmark page (RFC-0004), the parity check vs the community subgraph (external
-correctness evidence — rare in grant applications, lead with it), and a 10-minute
-demo video (record the quickstart + Horizon nest, unedited single take — the
-two-minute claim, proven on camera).
+## What we will not do for funding OR partnership (scope integrity, extended)
 
-## Secondary / later channels (tracked, not pursued now)
-
-- **The Graph ecosystem grants**: genuinely awkward (Nuthatch competes with the
-  network's serving layer) but not absurd (the flagship nest indexes Horizon itself;
-  Graph tooling grants funded Matchstick). Decision: do not apply in this cycle;
-  revisit if community members propose it — better initiated by them than by us.
-- **Gitcoin/Octant/RetroPGF rounds**: enable once launched (RFC-0007); retroactive
-  funding rewards existing impact, so it sequences after adoption.
-- **GitHub Sponsors**: enable now (zero cost, catches goodwill from launch).
-
-## What we will not do for funding (scope integrity)
-
-No token, no "decentralized network" milestone, no enterprise-feature commitments, no
-telemetry-for-metrics, no relicensing. If a funder requires any of these, decline.
-CLAUDE.md's out-of-scope list is contractual as far as grant milestones are concerned.
+v1 list stands: no token, no decentralized-network milestone, no
+enterprise-feature commitments in core, no telemetry, no relicensing. Extended for
+Leg 2: no exclusivity, no private forks, no partner-only features in the AGPL core,
+no roadmap veto, and the RFC-0005 §6 dividing line (auth/metering/tenancy = operator
+layer) is contractual. If any funder or partner requires items on this list, decline
+that term.
 
 ## Implementation plan
 
-1. This week: verify open NLnet call; enable GitHub Sponsors; start the demo video
-   after RFC-0002 parity passes.
-2. Draft both applications in the repo (`docs/grants/`) — public drafts, consistent
-   with the transparency posture; PR-review them like code.
-3. Submit NLnet as soon as an appropriate call is open; submit ESP inquiry the same
-   week (they are independent).
-4. Track responses; NLnet typically responds in ~2 months with clarifying questions —
-   answer within 48h (responsiveness is scored, informally).
-5. If both decline: continue nights-and-weekends per the report-4 threshold ("do not
-   attempt to monetize"), reapply next cycle with more adoption evidence.
+1. This week: the GraphOps call — bring the two-leg structure and Rules 1–4 as the
+   proposed shape; agree the pilot (RFC-0005 rc + Lodestar as first tenant) and the
+   revshare mechanics in principle. Enable GitHub Sponsors (still not done — zero
+   cost).
+2. Grant drafts in `docs/grants/` (public, PR-reviewed) — unchanged; demo video after
+   the Horizon parity fixtures land (now the RFC-0005 criteria-#2 item).
+3. Submit NLnet when a call opens; ESP inquiry same week — unchanged, urgency
+   honestly softened: with Leg 2 in motion, a missed cycle is a delay, not a threat.
+4. Track responses, 48h answers — unchanged.
+5. Failure branch revised: if both grants decline AND revshare hasn't materialized in
+   two quarters, v1's nights-and-weekends threshold applies. If either leg lands,
+   continue at pace.
 
 ## Acceptance
 
-- Both applications submitted with the demo video, benchmark page, and parity evidence
-  attached.
-- Budget milestones map 1:1 to public RFCs/issues (a reviewer can audit the plan).
-- Sponsors enabled; grant drafts public in-repo.
+v1 items (applications submitted with video + benchmarks + parity evidence; milestones
+map 1:1 to public RFCs; Sponsors enabled; drafts public) plus: Rules 1–4 reflected in
+the submitted texts; the GraphOps terms, once agreed, summarized in one public
+paragraph (existence + shape, not amounts) in the repo's governance/scope doc.
 
 ## Risks
 
-- **Calendar slip on calls**: mitigated by call-agnostic drafts ready to file.
-- **Perceived competition with The Graph** in ESP review: preempt in the application —
-  Nuthatch indexes Ethereum and L2 data locally; it complements network-scale serving
-  rather than replacing it, and the flagship nest serves The Graph's own ecosystem
-  observability.
-- **Milestone overcommitment**: every milestone is an existing RFC or a deferred item
-  from the progress log — nothing invented for the application. Keep it that way.
+v1 risks stand (calendar slip; Graph-competition optics — now mitigated per above;
+milestone overcommitment — now governed by Rules 1–2), plus:
+- **Revshare never materializes** (platform delays, priorities shift): Leg 1 exists
+  precisely for this; nothing in the grant plan depends on Leg 2.
+- **Perceived capture** ("GraphOps's indexer"): Rules 3–4 and the public neutrality
+  sentence are the answer; the AGPL license makes capture structurally impossible
+  anyway — worth saying in the FAQ once the partnership is public.
 
 ## Open questions
 
-1. Fiscal sponsorship vs direct: NLnet pays individuals/companies directly (fine); ESP
-   also fine with an EU Ltd. No action unless a funder requests otherwise.
-2. Should the security audit (NLnet's ROS) gate the 1.0 designation? Leaning yes —
-   "audited WASM host boundary" is a 1.0-worthy claim.
+1. v1 Q1 (fiscal routing) now includes: revshare to Nixum Ltd — confirm VAT treatment
+   (B2B reverse charge if GraphOps entity is EU, else out of scope) with the
+   accountant before the first invoice.
+2. v1 Q2 stands (ROS audit gating the 1.0 designation — still leaning yes).
+3. Should the governance doc name a successor/escrow arrangement for the minisign and
+   signing keys now that an operator depends on releases? Small, worth doing at
+   v0.1.0.
