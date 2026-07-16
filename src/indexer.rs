@@ -9,6 +9,8 @@ use crate::chains::{self, Finality};
 use crate::chunker::{self, AdaptiveWindow};
 use crate::cli::DevArgs;
 use crate::config::{Config, DB_FILE};
+use crate::exposure::{self, ExposureView};
+use crate::labels::{self, LabelSet};
 use crate::metrics::METRICS;
 use crate::registry::DecodeRegistry;
 use crate::rpc::RpcClient;
@@ -67,12 +69,25 @@ pub async fn run(
     // contract in the nest into per-table rows.
     let registry = Arc::new(DecodeRegistry::from_nest(&dir, &config)?);
     let balances = BalanceView::start()?;
+    let exposure = ExposureView::start()?;
+    // Labels (RFC-0008 C1) are the annotation substrate the exposure view joins against. Loaded once
+    // at startup from the content-addressed snapshots under `labels/`; empty when none were imported.
+    let labels = Arc::new(labels::load(&dir));
+    if !labels.is_empty() {
+        tracing::info!(
+            "loaded {} labeled address(es) for exposure tracking",
+            labels.len()
+        );
+    }
 
-    // Warm restart: the balance view is derived, not persisted, so rebuild it from stored facts
-    // before serving or ingesting. On a cold start there is nothing stored and this is a no-op.
+    // Warm restart: the derived views (balances, exposure) aren't persisted, so rebuild them from
+    // stored facts before serving or ingesting. On a cold start there is nothing stored → no-op.
     if store.get_meta(LAST_BLOCK_KEY)?.is_some() {
         if let Err(e) = rebuild_balances(&dir, &store, &registry, &balances) {
             tracing::warn!("balance view rebuild failed (will re-derive as it indexes): {e:#}");
+        }
+        if let Err(e) = rebuild_exposure(&dir, &store, &registry, &labels, &exposure) {
+            tracing::warn!("exposure view rebuild failed (will re-derive as it indexes): {e:#}");
         }
     }
 
@@ -121,6 +136,8 @@ pub async fn run(
         start_block,
         dir.clone(),
         balances.clone(),
+        exposure.clone(),
+        labels.clone(),
         finality,
         window,
         seal_direct,
@@ -133,6 +150,7 @@ pub async fn run(
         chain: config.nest.chain.clone(),
         dir: dir.clone(),
         balances,
+        exposure,
         tables: Arc::new(registry.schema()),
         sql_gate: Arc::new(tokio::sync::Semaphore::new(serve::SQL_MAX_CONCURRENCY)),
     };
@@ -315,6 +333,8 @@ async fn index_loop(
     start_block: Option<u64>,
     dir: PathBuf,
     balances: BalanceView,
+    exposure: ExposureView,
+    labels: Arc<LabelSet>,
     finality: Finality,
     window: u64,
     seal_direct: bool,
@@ -356,6 +376,9 @@ async fn index_loop(
             );
             if let Err(e) = rebuild_balances(&dir, &store, &registry, &balances) {
                 tracing::warn!("balance rebuild after seal-direct failed: {e:#}");
+            }
+            if let Err(e) = rebuild_exposure(&dir, &store, &registry, &labels, &exposure) {
+                tracing::warn!("exposure rebuild after seal-direct failed: {e:#}");
             }
         }
     }
@@ -405,6 +428,7 @@ async fn index_loop(
                         .unwrap_or(ancestor);
                     let doomed = store.entities_in_range(ancestor + 1, last_indexed)?;
                     balances.apply(retraction_batch(&doomed));
+                    exposure.apply(exposure_retraction_batch(&doomed, &registry, &labels));
 
                     let removed = store.rollback_to(ancestor)?;
                     store.set_meta(LAST_BLOCK_KEY, &ancestor.to_string())?;
@@ -455,13 +479,17 @@ async fn index_loop(
 
                 let mut stored = 0usize;
                 let mut deltas = Vec::new();
+                let mut exp_deltas = Vec::new();
                 for row in &mut rows {
                     row.block_timestamp = timestamps.get(&row.block_number).copied().unwrap_or(0);
                     let key = Store::entity_key(row.block_number, row.log_index);
-                    // Feed the IVM balance view for transfer rows (extracted before storing).
+                    // Feed the IVM balance + exposure views for transfer rows (extracted before storing).
                     if let Some((from, to_addr, value, _hex)) = row.erc20_transfer_fields() {
                         if let Some(v) = value.as_deref().and_then(|s| s.parse::<i128>().ok()) {
                             deltas.extend(views::transfer_deltas(&from, &to_addr, v, 1));
+                            // Direct exposure to the labeled set (empty when neither side is labeled).
+                            exp_deltas
+                                .extend(exposure::exposure_deltas(&from, &to_addr, v, 1, &labels));
                         }
                     }
                     // Every row is stored uniformly as typed JSON with a `table` field; per-table
@@ -470,6 +498,7 @@ async fn index_loop(
                     stored += 1;
                 }
                 balances.apply(deltas);
+                exposure.apply(exp_deltas);
                 // Checkpoint the window boundary's canonical hash for future reorg detection.
                 if let Ok(Some(hash)) = source.block_hash(to).await {
                     store.set_block_hash(to, &hash)?;
@@ -638,6 +667,51 @@ fn retraction_batch(entity_json: &[String]) -> views::WeightedBatch {
     batch
 }
 
+/// Build a weight −1 exposure retraction batch from rolled-back transfer rows (reorg). Reads each
+/// table's (from, to, value) column names from the registry — they vary by token (USDC from/to/value,
+/// WETH src/dst/wad) — then re-derives the same exposure deltas the live path fed, with weight −1, so
+/// a reorged flag/exposure retracts exactly like a balance.
+fn exposure_retraction_batch(
+    entity_json: &[String],
+    registry: &DecodeRegistry,
+    labels: &LabelSet,
+) -> exposure::ExposureBatch {
+    // table → (from_col, to_col, value_col) for every transfer-shaped table.
+    let cols: std::collections::HashMap<String, (String, String, String)> = registry
+        .tables()
+        .iter()
+        .filter_map(|d| {
+            d.transfer_columns().map(|(f, t, v)| {
+                (
+                    d.table.clone(),
+                    (f.to_string(), t.to_string(), v.to_string()),
+                )
+            })
+        })
+        .collect();
+
+    let mut batch = Vec::new();
+    for j in entity_json {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(j) else {
+            continue;
+        };
+        let Some(table) = v.get("table").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        let Some((from_col, to_col, val_col)) = cols.get(table) else {
+            continue; // not a transfer table
+        };
+        if let (Some(from), Some(to), Some(val)) = (
+            v[from_col].as_str(),
+            v[to_col].as_str(),
+            v[val_col].as_str().and_then(|s| s.parse::<i128>().ok()),
+        ) {
+            batch.extend(exposure::exposure_deltas(from, to, val, -1, labels));
+        }
+    }
+    batch
+}
+
 /// Rebuild the in-memory IVM balance view from stored facts on a warm restart. The view is derived
 /// state, not durable state — so rather than persist it (and risk drift from the canonical store),
 /// we reconstruct it from the facts that *are* durable, using the same circuit that maintains it
@@ -708,6 +782,82 @@ fn rebuild_balances(
     tracing::info!(
         "rebuilt balance view: {} holders ({cold_addrs} cold-seeded net(s) + {hot} hot transfer(s) replayed)",
         balances.holders()
+    );
+    Ok(())
+}
+
+/// Rebuild the derived exposure view on a warm restart (RFC-0008 C1), mirroring `rebuild_balances`:
+/// cold (sealed) segments are folded to pre-summed (key, amount, count) aggregates directly in DuckDB
+/// (joined against the `labels` view) and seeded; only the un-sealed hot tail is replayed transfer by
+/// transfer. Hot and cold are disjoint (sealed rows are pruned), so nothing is double-counted. With no
+/// labels imported this is a no-op — there is nothing to be exposed *to*.
+fn rebuild_exposure(
+    dir: &std::path::Path,
+    store: &Store,
+    registry: &DecodeRegistry,
+    labels: &LabelSet,
+    exposure: &ExposureView,
+) -> Result<()> {
+    if labels.is_empty() {
+        return Ok(());
+    }
+    let transfer_tables: Vec<(String, String, String, String)> = registry
+        .tables()
+        .iter()
+        .filter_map(|d| {
+            d.transfer_columns()
+                .map(|(f, t, v)| (d.table.clone(), f.to_string(), t.to_string(), v.to_string()))
+        })
+        .collect();
+    if transfer_tables.is_empty() {
+        return Ok(());
+    }
+
+    let mut batch: exposure::ExposureBatch = Vec::new();
+
+    // Cold seed: pre-summed exposure per (address, label, direction), folded in DuckDB.
+    let mut cold = 0usize;
+    for (table, from_col, to_col, val_col) in &transfer_tables {
+        match crate::analytics::cold_exposure(dir, table, from_col, to_col, val_col) {
+            Ok(rows) => {
+                cold += rows.len();
+                for (key, amount, count) in rows {
+                    batch.push(exposure::seed_item(key, amount, count));
+                }
+            }
+            Err(e) => tracing::debug!("no cold exposure seed for {table}: {e:#}"),
+        }
+    }
+
+    // Hot replay: the un-sealed tip transfers, re-derived through the same delta path.
+    let mut hot = 0usize;
+    for (table, from_col, to_col, val_col) in &transfer_tables {
+        for raw in store.recent_by_table(table, usize::MAX).unwrap_or_default() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
+            if let (Some(from), Some(to), Some(val)) = (
+                v[from_col].as_str(),
+                v[to_col].as_str(),
+                v[val_col].as_str().and_then(|s| s.parse::<i128>().ok()),
+            ) {
+                let d = exposure::exposure_deltas(from, to, val, 1, labels);
+                if !d.is_empty() {
+                    hot += 1;
+                    batch.extend(d);
+                }
+            }
+        }
+    }
+
+    if batch.is_empty() {
+        return Ok(());
+    }
+    exposure.apply(batch);
+    exposure.flush();
+    tracing::info!(
+        "rebuilt exposure view: {} entries ({cold} cold-seeded + {hot} hot transfer(s) replayed)",
+        exposure.entries()
     );
     Ok(())
 }

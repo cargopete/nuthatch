@@ -68,6 +68,9 @@ fn run(dir: &Path, sql: &str, guard: Option<QueryGuard>) -> Result<QueryOutput> 
     // analytical `/sql` surface sees them. Point-reads (`net_balances`, `get_row`) deliberately skip
     // this — they only touch the raw per-event tables.
     define_nest_views(&conn, dir);
+    // The compliance substrate: expose imported label snapshots as a `labels` view so `/sql` (and the
+    // internal `cold_exposure` fold) can join against them. Best-effort — no snapshots, no view.
+    define_labels_view(&conn, dir);
 
     // Hard wall-clock deadline for the untrusted surface: a watchdog thread interrupts the in-flight
     // query once it outlives the guard's timeout (a cartesian blow-up can't be stopped by the memory
@@ -203,6 +206,77 @@ pub fn net_balances(
         }
     }
     Ok(out)
+}
+
+/// Cold exposure fold (RFC-0008 C1): direct counterparty exposure to the labeled set for one sealed
+/// transfer table, computed in DuckDB by joining the segments against the `labels` view. Mirrors
+/// `net_balances` — it lets a restart re-seed the exposure view from immutable segments instead of
+/// replaying every sealed transfer. Returns `(encoded_key, amount, count)` where the key is
+/// `address\u{1f}label\u{1f}direction`, matching `exposure::seed_item`. `table`/column names are
+/// registry-derived (never user text); addresses are lower-cased to match the label snapshots.
+pub fn cold_exposure(
+    dir: &Path,
+    table: &str,
+    from_col: &str,
+    to_col: &str,
+    value_col: &str,
+) -> Result<Vec<(String, i128, i128)>> {
+    // Outbound: the sender has exposure to the labels of a labeled recipient. Inbound: the recipient
+    // has exposure from the labels of a labeled sender. COUNT/SUM per (address, label, direction).
+    let sql = format!(
+        "SELECT addr, label, dir, SUM(d)::VARCHAR AS amount, COUNT(*) AS cnt FROM (\
+           SELECT lower(t.\"{from_col}\") AS addr, l.label AS label, 'out' AS dir, \
+                  TRY_CAST(t.\"{value_col}\" AS HUGEINT) AS d \
+           FROM \"{table}\" t JOIN labels l ON lower(t.\"{to_col}\") = l.address \
+           UNION ALL \
+           SELECT lower(t.\"{to_col}\") AS addr, l.label, 'in', \
+                  TRY_CAST(t.\"{value_col}\" AS HUGEINT) AS d \
+           FROM \"{table}\" t JOIN labels l ON lower(t.\"{from_col}\") = l.address\
+         ) GROUP BY addr, label, dir"
+    );
+    let mut out = Vec::new();
+    for r in query(dir, &sql)? {
+        let (Some(addr), Some(label), Some(dir_s), Some(cnt)) = (
+            r["addr"].as_str(),
+            r["label"].as_str(),
+            r["dir"].as_str(),
+            r["cnt"].as_i64(),
+        ) else {
+            continue;
+        };
+        let amount = r["amount"]
+            .as_str()
+            .and_then(|s| s.parse::<i128>().ok())
+            .unwrap_or(0);
+        let key = format!("{addr}\u{1f}{label}\u{1f}{dir_s}");
+        out.push((key, amount, cnt as i128));
+    }
+    Ok(out)
+}
+
+/// Define a read-only `labels` view over the content-addressed snapshots in `dir/labels/*.json`
+/// (each a flat JSON array of `{address, label}`). No snapshots → no view, so joins against it are
+/// only attempted when labels exist. Addresses are lower-cased for a clean join with decoded hex.
+fn define_labels_view(conn: &Connection, dir: &Path) {
+    let labels_dir = dir.join(crate::labels::LABELS_DIR);
+    let has_snapshot = std::fs::read_dir(&labels_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .any(|e| e.path().extension().is_some_and(|x| x == "json"))
+        })
+        .unwrap_or(false);
+    if !has_snapshot {
+        return;
+    }
+    let glob = labels_dir.join("*.json");
+    let ddl = format!(
+        "CREATE VIEW labels AS SELECT lower(address) AS address, label \
+         FROM read_json('{}', format='array', columns={{address: 'VARCHAR', label: 'VARCHAR'}})",
+        glob.display()
+    );
+    if let Err(e) = conn.execute_batch(&ddl) {
+        tracing::debug!("labels view skipped: {e}");
+    }
 }
 
 /// Point-read fallback: fetch a single sealed transfer by (block, log_index). Used when the hot
@@ -506,6 +580,54 @@ mod tests {
         assert_eq!(map["0xa"], big - 30); // received big, sent 30
         assert_eq!(map["0xb"], 30);
         assert!(!map.contains_key("nobody"));
+    }
+
+    /// RFC-0008 C1: labels imported as a content-addressed snapshot are visible to `/sql` as a
+    /// `labels` view, and `cold_exposure` folds sealed transfers × labels into pre-summed exposure
+    /// (the restart re-seed path). Uses an amount > i64::MAX to prove the i128 discipline carries.
+    #[test]
+    fn labels_view_and_cold_exposure_fold() {
+        let dir = tempfile::tempdir().unwrap();
+        // Label 0xmixer. Two transfers: 0xa → mixer (big), mixer → 0xb (30). 0xa→0xc is unlabeled.
+        let mixer = "0x1111111111111111111111111111111111111111";
+        let a = "0x00000000000000000000000000000000000000aa";
+        let b = "0x00000000000000000000000000000000000000bb";
+        let c = "0x00000000000000000000000000000000000000cc";
+        let label_file = dir.path().join("l.csv");
+        std::fs::write(&label_file, format!("{mixer},mixer\n")).unwrap();
+        crate::labels::import(dir.path(), &label_file).unwrap();
+
+        let big = "100000000000000000000"; // > i64::MAX
+        let entities = vec![
+            format!(
+                r#"{{"table":"t__transfer","from":"{a}","to":"{mixer}","value":"{big}","block_number":1,"tx_hash":"0xt","log_index":0}}"#
+            ),
+            format!(
+                r#"{{"table":"t__transfer","from":"{mixer}","to":"{b}","value":"30","block_number":1,"tx_hash":"0xt","log_index":1}}"#
+            ),
+            format!(
+                r#"{{"table":"t__transfer","from":"{a}","to":"{c}","value":"5","block_number":1,"tx_hash":"0xt","log_index":2}}"#
+            ),
+        ];
+        crate::seal::seal_range(dir.path(), &entities, 1, 1).unwrap();
+
+        // The labels view is queryable via the normal SQL surface.
+        let l = query(dir.path(), "SELECT count(*) AS n FROM labels").unwrap();
+        assert_eq!(l[0]["n"], Value::from(1u64));
+
+        let exp: std::collections::HashMap<String, (i128, i128)> =
+            cold_exposure(dir.path(), "t__transfer", "from", "to", "value")
+                .unwrap()
+                .into_iter()
+                .map(|(k, amt, cnt)| (k, (amt, cnt)))
+                .collect();
+        let big: i128 = big.parse().unwrap();
+        // 0xa sent `big` to the labeled mixer → outbound exposure (count 1, amount big).
+        assert_eq!(exp[&format!("{a}\u{1f}mixer\u{1f}out")], (big, 1));
+        // 0xb received 30 from the labeled mixer → inbound exposure.
+        assert_eq!(exp[&format!("{b}\u{1f}mixer\u{1f}in")], (30, 1));
+        // 0xc's transfer never touched a labeled address → no exposure entry.
+        assert!(!exp.contains_key(&format!("{c}\u{1f}mixer\u{1f}in")));
     }
 
     /// RFC-0001 §2: a uint256 column gets a derived `_dec` DECIMAL(38) view column (value when it

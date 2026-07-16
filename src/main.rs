@@ -8,7 +8,7 @@
 //! redb-only storage (no DuckDB/Parquet yet), no IVM, no MCP. Those are the next layers to grow
 //! onto this spine — see docs/ROADMAP as it lands. What matters here is that it's *alive*.
 
-use nuthatch::{bench, check, cli, config, indexer, mcp, project, store, transform};
+use nuthatch::{bench, check, cli, config, indexer, labels, mcp, project, store, transform};
 
 use anyhow::Result;
 use clap::Parser;
@@ -32,6 +32,34 @@ async fn main() -> Result<()> {
         cli::Command::Bench(args) => match args.what {
             cli::BenchWhat::Backfill(a) => bench::backfill(a).await,
         },
+        cli::Command::Labels(args) => run_labels(args),
+    }
+}
+
+/// `nuthatch labels …` — manage the compliance annotation substrate (RFC-0008 C1).
+fn run_labels(args: cli::LabelsArgs) -> Result<()> {
+    use std::path::{Path, PathBuf};
+    match args.what {
+        cli::LabelsWhat::Import(a) => {
+            let dir = PathBuf::from(&a.dir);
+            let (hash, count) = labels::import(&dir, Path::new(&a.file))?;
+            println!(
+                "✓ imported {count} labeled address(es) → labels/{}.json",
+                &hash[..16]
+            );
+            println!("  (content-addressed: re-importing the same set is idempotent)");
+            Ok(())
+        }
+        cli::LabelsWhat::List(a) => {
+            let dir = PathBuf::from(&a.dir);
+            let set = labels::load(&dir);
+            println!(
+                "{} labeled address(es) loaded from {}/labels/",
+                set.len(),
+                a.dir
+            );
+            Ok(())
+        }
     }
 }
 
