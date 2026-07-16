@@ -38,6 +38,8 @@ dbsp = "0.320"
 wasmtime = { version = "44", features = ["component-model"] }
 wasmtime-wasi = "44"
 sha2 = "0.10"
+ed25519-dalek = "2"
+getrandom = "0.2"
 axum = "0.8"
 anyhow = "1"
 tracing = "0.1"

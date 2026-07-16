@@ -34,6 +34,93 @@ pub enum Command {
     /// Screen sealed transfers against a list snapshot, recording `sanction_hit` annotations
     /// (RFC-0008 C2). Replayable: same list hash + range + component → identical hits.
     Screen(ScreenArgs),
+    /// Build, sign, and verify the signed compliance-pack manifest (RFC-0008 C6).
+    Pack(PackArgs),
+    /// Audit the compliance annotations: `replay` re-proves them, `report` summarises them (C6).
+    Audit(AuditArgs),
+}
+
+#[derive(Args)]
+pub struct PackArgs {
+    #[command(subcommand)]
+    pub what: PackWhat,
+}
+
+#[derive(Subcommand)]
+pub enum PackWhat {
+    /// Generate an ed25519 signing keypair into a local JSON file.
+    Keygen(PackKeygenArgs),
+    /// Assemble `compliance-pack.toml` from the nest's config + artifact hashes (optionally signed).
+    Build(PackBuildArgs),
+    /// Verify a pack: signature, artifact hashes, and grant conformance.
+    Verify(PackVerifyArgs),
+}
+
+#[derive(Args)]
+pub struct PackKeygenArgs {
+    /// Where to write the keypair JSON.
+    #[arg(long, default_value = "nuthatch-key.json")]
+    pub out: String,
+}
+
+#[derive(Args)]
+pub struct PackBuildArgs {
+    /// Nest directory.
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+    /// Sign the manifest with this keypair file (from `pack keygen`). Omit to write it unsigned.
+    #[arg(long)]
+    pub key: Option<String>,
+}
+
+#[derive(Args)]
+pub struct PackVerifyArgs {
+    /// Nest directory (must contain a `compliance-pack.toml`).
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+}
+
+#[derive(Args)]
+pub struct AuditArgs {
+    #[command(subcommand)]
+    pub what: AuditWhat,
+}
+
+#[derive(Subcommand)]
+pub enum AuditWhat {
+    /// Re-run screening over the sealed segments and confirm the stored hits reproduce exactly.
+    Replay(AuditReplayArgs),
+    /// Summarise the hits and flags in a block range (markdown or `--json`).
+    Report(AuditReportArgs),
+}
+
+#[derive(Args)]
+pub struct AuditReplayArgs {
+    /// Nest directory.
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+    /// First block of the range (inclusive).
+    #[arg(long)]
+    pub from: u64,
+    /// Last block of the range (inclusive).
+    #[arg(long)]
+    pub to: u64,
+}
+
+#[derive(Args)]
+pub struct AuditReportArgs {
+    /// Nest directory.
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+    /// First block of the range (inclusive).
+    #[arg(long)]
+    pub from: u64,
+    /// Last block of the range (inclusive).
+    #[arg(long)]
+    pub to: u64,
+    /// Emit JSON instead of markdown.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args)]

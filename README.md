@@ -33,7 +33,8 @@ remains is the scaled (Postgres / DataFusion) mode and wiring reth ExEx to a nod
 | Pure sanctions screening — content-addressed list snapshots × a zero-capability WASM component → sealed `sanction_hit` annotations, replayable `nuthatch screen` | signed pack manifest + `pack verify` / `audit replay` (RFC-0008 C6) |
 | Threshold & velocity flags — per-transfer `threshold_flag` annotations + a DBSP windowed velocity view (i128, reorg = retraction), served at `/flags` | alert webhooks (RFC-0008 C5) |
 | Effectful WASM stages — per-component capability grants (`kv` now, HTTP next), imports checked against the grant at load, annotations-only output | wasi:http-sandboxed egress variant (optional) |
-| Alert webhooks — flag/hit annotations (and reorg `flag_retracted`) POSTed at-least-once via a durable outbox that never blocks the indexer | signed pack manifest + `pack verify` / `audit replay` (RFC-0008 C6) |
+| Alert webhooks — flag/hit annotations (and reorg `flag_retracted`) POSTed at-least-once via a durable outbox that never blocks the indexer | |
+| Signed compliance-pack manifest (`pack build`/`verify`, ed25519) + `audit replay`/`report` (re-prove sealed annotations) + MCP `flags`/`exposure`/`screen_status` | **RFC-0008 complete — all 8 RFCs shipped** |
 | WASM transform runtime (pure, sandboxed, batched Arrow) | |
 | MCP server (stdio, 8 tools, offline) + `schema.json` + `llms.txt` + `.claude/skills` scaffold | |
 | redb hot store, entity point-reads with cold (DuckDB) fallback | |
@@ -104,6 +105,27 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 ## Progress log
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
+
+- **2026-07-16 — RFC-0008 C6: compliance pack manifest + audit surface (RFC-0008 COMPLETE).** The
+  finale — the "prove it" layer. New `src/pack.rs`: a signed, content-addressed **`compliance-pack.toml`**
+  (`pack build`) declaring the nest's compliance configuration by artifact hash — the decode-registry
+  hash, screening list snapshots (hash + count), the screen component's content hash + its (empty)
+  grants, flag config, and alert routing. **ed25519** signing (`pack keygen`; key in a local JSON file,
+  no key service); **`pack verify`** checks the signature over the canonical body, re-hashes the
+  referenced artifacts, and confirms grant conformance — so a customer can confirm *which* pack produced
+  their alerts without trusting the source. New `src/audit.rs`: **`audit replay --from --to`** re-runs
+  the pure screening over the sealed segments and diffs against the stored `sanction_hit` annotations —
+  PASS means they reproduce exactly from (list snapshot, block range, component); **`audit report`**
+  summarises hits/flags with list-snapshot hashes + block bounds (markdown or `--json`). MCP gains
+  **`flags`**, **`exposure`**, **`screen_status`** tools (now 11) + a compliance section in the schema
+  hint, so an agent can answer "was address X flagged, and against which list version?". **Gate met:**
+  a full-pipeline integration test (seal → screen → `audit replay` reproduces exactly → `audit report`
+  summarises) + a sign/build/verify roundtrip incl. tamper + missing-artifact detection; 96 tests
+  green, clippy clean. Verified live on a clean USDC nest: `pack build --key` → `pack verify` PASS
+  (signed, artifacts match); `audit replay` reproduced **156/156** sealed sanction_hits exactly; `audit
+  report` summarised them. Adds `ed25519-dalek` + `getrandom`. **RFC-0008 is complete — labels+exposure,
+  sanctions screening, threshold+velocity flags, effectful worlds, alert webhooks, and the signed
+  audit pack — and with it all eight RFCs (0001–0008) have shipped.**
 
 - **2026-07-16 — RFC-0008 C5: alert webhooks.** Flag/hit annotations delivered to operator-configured
   HTTP endpoints, **at-least-once**, **without ever blocking the indexer**. New `[[alerts]]` config

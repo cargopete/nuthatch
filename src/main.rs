@@ -9,7 +9,8 @@
 //! onto this spine — see docs/ROADMAP as it lands. What matters here is that it's *alive*.
 
 use nuthatch::{
-    bench, check, cli, config, indexer, labels, lists, mcp, project, screen, store, transform,
+    audit, bench, check, cli, config, indexer, labels, lists, mcp, pack, project, screen, store,
+    transform,
 };
 
 use anyhow::Result;
@@ -37,7 +38,19 @@ async fn main() -> Result<()> {
         cli::Command::Labels(args) => run_labels(args),
         cli::Command::Lists(args) => run_lists(args).await,
         cli::Command::Screen(args) => screen::backfill(args),
+        cli::Command::Pack(args) => pack::run(args, &now_stamp()),
+        cli::Command::Audit(args) => audit::run(args),
     }
+}
+
+/// A coarse wall-clock stamp for the `created` field of a manifest (provenance, not a correctness path).
+fn now_stamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("unix:{secs}")
 }
 
 /// `nuthatch lists …` — manage sanctions/watch lists as content-addressed snapshots (RFC-0008 C2).

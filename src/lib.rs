@@ -8,6 +8,7 @@
 pub mod abi;
 pub mod alerts;
 pub mod analytics;
+pub mod audit;
 pub mod bench;
 pub mod chains;
 pub mod check;
@@ -22,6 +23,7 @@ pub mod labels;
 pub mod lists;
 pub mod mcp;
 pub mod metrics;
+pub mod pack;
 pub mod project;
 pub mod registry;
 pub mod rpc;
