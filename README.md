@@ -106,6 +106,16 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-16 — RFCs 0009–0011 filed (design docs, not yet built).** Three forward-looking RFCs
+  committed to `docs/rfcs/`: **0009 factory & dynamic contract discovery** (v2 — Uniswap-class runtime
+  child contracts, discovery composed with the shipped pipelined backfill via a `filter_version` rule,
+  ExEx-mode simplification, factory path-equivalence test); **0010 admin UI & webhooks** (v2 — a
+  local-only embedded UI + a single host-side delivery engine that RFC-0008 C5's alert sink now
+  *reconciles into* as one of two producers, poll-based until streaming ships, `--seal-direct` backfill
+  suppression via `since`); **0011 graph-network nest & the Lodestar migration** (the GraphOps-pilot
+  target — extend the Horizon nest to the full Graph contract suite on Arbitrum, migrate Lodestar
+  panel-by-panel behind `nuthatch check` parity gates, cross-operator segment-hash determinism as the
+  ops correctness signal; forces a small RFC-0001 per-contract `events` allowlist amendment). Docs only.
 - **2026-07-16 — RFC-0008 C6: compliance pack manifest + audit surface (RFC-0008 COMPLETE).** The
   finale — the "prove it" layer. New `src/pack.rs`: a signed, content-addressed **`compliance-pack.toml`**
   (`pack build`) declaring the nest's compliance configuration by artifact hash — the decode-registry
