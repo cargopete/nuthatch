@@ -54,6 +54,7 @@ pub async fn run(listen: &str, state: AppState) -> Result<()> {
     let app = Router::new()
         .route("/", get(summary))
         .route("/health", get(|| async { "ok" }))
+        .route("/metrics", get(metrics_handler))
         .route("/tables", get(tables))
         .route("/table/{name}", get(table))
         .route("/entities", get(entities))
@@ -61,14 +62,77 @@ pub async fn run(listen: &str, state: AppState) -> Result<()> {
         .route("/sql", get(sql))
         .route("/balances", get(balances))
         .route("/balance/{address}", get(balance))
+        // Count every served request for `/metrics` (the operator's billing signal).
+        .layer(axum::middleware::from_fn(count_request))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("cannot bind {listen}"))?;
-    tracing::info!("API live on http://{listen}  (try GET /  and  /entities)");
-    axum::serve(listener, app).await.context("server error")?;
+    tracing::info!("API live on http://{listen}  (try GET /  and  /metrics)");
+    // A loud one-liner when bound off-localhost: the guards bound *how much*, but *who* is the
+    // operator's gateway's job — never expose this straight to the internet without one.
+    if !is_localhost(listen) {
+        tracing::warn!(
+            "listening on {listen} (not localhost): the /sql surface is guarded (timeout + row cap \
+             + {SQL_MAX_CONCURRENCY} concurrent) but has NO authentication — put a gateway in front \
+             before exposing it publicly. See docs/operators.md."
+        );
+    }
+    // Graceful shutdown on SIGTERM/SIGINT: axum drains in-flight requests, then `run` returns so the
+    // caller can abort the ingest task (its progress is checkpointed, so a restart resumes cleanly).
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("server error")?;
+    tracing::info!("shutdown signal received; API stopped");
     Ok(())
+}
+
+/// Whether `listen` binds only the loopback interface.
+fn is_localhost(listen: &str) -> bool {
+    let host = listen.rsplit_once(':').map(|(h, _)| h).unwrap_or(listen);
+    matches!(host, "127.0.0.1" | "::1" | "localhost" | "[::1]")
+}
+
+/// Resolves when the process is asked to stop — SIGTERM (systemd/Docker) or Ctrl-C.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            s.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = term => {}
+    }
+}
+
+/// Middleware: bump the request counter, then pass through.
+async fn count_request(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    crate::metrics::METRICS.inc_http();
+    next.run(req).await
+}
+
+/// `GET /metrics` — Prometheus text exposition (RFC-0005 §6).
+async fn metrics_handler() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        crate::metrics::METRICS.render(),
+    )
 }
 
 async fn summary(State(s): State<AppState>) -> impl IntoResponse {
@@ -242,7 +306,9 @@ struct SqlQuery {
 /// What's deliberately *absent* is authn / per-caller quotas: those need caller identity a sovereign
 /// node doesn't have, so gating *who* may query and *how much* is a gateway's job, not the node's.
 async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl IntoResponse {
+    use crate::metrics::METRICS;
     if q.q.len() > SQL_MAX_QUERY_LEN {
+        METRICS.inc_sql_rejected();
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": format!("query too long: {} bytes (max {SQL_MAX_QUERY_LEN})", q.q.len()) })),
@@ -254,13 +320,15 @@ async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl IntoR
     let permit = match Arc::clone(&s.sql_gate).try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
+            METRICS.inc_sql_rejected();
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "server busy: too many concurrent SQL queries" })),
             )
-                .into_response()
+                .into_response();
         }
     };
+    METRICS.inc_sql();
     let dir = s.dir.clone();
     let sql = q.q.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -282,11 +350,15 @@ async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl IntoR
             "rows": out.rows,
         }))
         .into_response(),
-        Ok(Err(e)) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("{e:#}") })),
-        )
-            .into_response(),
+        Ok(Err(e)) => {
+            // A guard rejection (timeout / interrupt) or a bad query — counted as a rejection.
+            METRICS.inc_sql_rejected();
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("{e:#}") })),
+            )
+                .into_response()
+        }
         Err(e) => error(format!("{e}")),
     }
 }

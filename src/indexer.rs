@@ -9,6 +9,7 @@ use crate::chains::{self, Finality};
 use crate::chunker::{self, AdaptiveWindow};
 use crate::cli::DevArgs;
 use crate::config::{Config, DB_FILE};
+use crate::metrics::METRICS;
 use crate::registry::DecodeRegistry;
 use crate::rpc::RpcClient;
 use crate::seal;
@@ -388,6 +389,7 @@ async fn index_loop(
                 continue;
             }
         };
+        METRICS.set_tip(tip);
 
         // Reorg check: has the last block we committed against stayed canonical? If not, the
         // mutable hot store rolls back to the deepest surviving checkpoint (the only place a
@@ -406,6 +408,8 @@ async fn index_loop(
 
                     let removed = store.rollback_to(ancestor)?;
                     store.set_meta(LAST_BLOCK_KEY, &ancestor.to_string())?;
+                    METRICS.inc_reorgs();
+                    METRICS.set_last_block(ancestor);
                     tracing::warn!("reorg detected: rolled back to block {ancestor} (removed {removed} entities)");
                     next = ancestor + 1;
                     continue;
@@ -471,6 +475,8 @@ async fn index_loop(
                     store.set_block_hash(to, &hash)?;
                 }
                 store.set_meta(LAST_BLOCK_KEY, &to.to_string())?;
+                METRICS.set_last_block(to);
+                METRICS.add_rows_decoded(stored as u64);
                 if stored > 0 {
                     tracing::info!(
                         "blocks {next}..={to}: +{stored} rows (total {})",
@@ -585,6 +591,8 @@ fn maybe_seal(dir: &std::path::Path, store: &Store, finalized_through: u64) -> R
     match seal::seal_range(dir, &entities, from, ceiling)? {
         Some(summary) => {
             store.set_meta(SEALED_THROUGH_KEY, &ceiling.to_string())?;
+            METRICS.set_sealed_through(ceiling);
+            METRICS.add_rows_sealed(summary.rows as u64);
             let pruned = store.prune_range(from, ceiling)?;
             tracing::info!(
                 "sealed blocks {from}..={ceiling}: {} rows across {} table(s); pruned {pruned} from hot",
@@ -595,6 +603,7 @@ fn maybe_seal(dir: &std::path::Path, store: &Store, finalized_through: u64) -> R
         None => {
             // Finalized range with no transfers — just advance the watermark.
             store.set_meta(SEALED_THROUGH_KEY, &ceiling.to_string())?;
+            METRICS.set_sealed_through(ceiling);
             tracing::debug!(
                 "blocks {from}..={ceiling} finalized with no transfers; watermark advanced"
             );

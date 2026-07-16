@@ -15,6 +15,7 @@ pub mod cli;
 pub mod config;
 pub mod indexer;
 pub mod mcp;
+pub mod metrics;
 pub mod project;
 pub mod registry;
 pub mod rpc;

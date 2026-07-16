@@ -97,6 +97,16 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-16 — RFC-0005 step 2: operator runtime surface (`/metrics`, SIGTERM, bind warning).**
+  The §6 operator signals — the endpoint an operator alerts and bills against. New `GET /metrics`
+  (hand-rolled Prometheus text, no framework): `nuthatch_tip_height` / `last_block` / `tip_lag_blocks`
+  / `sealed_through` gauges, `rows_decoded` / `rows_sealed` / `reorgs` / `http_requests` / `sql_queries`
+  / `sql_rejections` / `rpc_requests` counters, and `rss_bytes`. **Graceful shutdown** on SIGTERM/SIGINT
+  (axum drains, ingest is checkpointed → clean exit 0, restart resumes without gaps). A **loud startup
+  warning** when bound off-localhost, pointing at the guards + the new `docs/operators.md` (guards,
+  metrics, lifecycle, 0.x stability contract). The `/sql` guards themselves (timeout + row cap +
+  concurrency) already shipped. Verified live: `/metrics` served real values, bind warning fired on
+  `0.0.0.0`, SIGTERM exited 0. 63 tests (+2).
 - **2026-07-16 — RFC-0004 step 5: adaptive `getLogs` range chunker.** Replaces the fixed per-chain
   window with a controller (`chunker::AdaptiveWindow`) targeting ~2,000 logs/response: overshoot or a
   provider "result too large" error shrinks it (and retries the same range), an undershoot grows it —

@@ -58,6 +58,7 @@ impl RpcClient {
         for i in 0..n {
             let url = &self.urls[(start + i) % n];
             self.requests.fetch_add(1, Ordering::Relaxed);
+            crate::metrics::METRICS.inc_rpc();
             match self.call_one(url, method, &params).await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
@@ -78,6 +79,7 @@ impl RpcClient {
         for i in 0..n {
             let url = &self.urls[(start + i) % n];
             self.requests.fetch_add(1, Ordering::Relaxed);
+            crate::metrics::METRICS.inc_rpc();
             match self.post_one(url, body).await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
