@@ -1,0 +1,35 @@
+// ---------------------------------------------------------------------------
+// The sanctions-screening stage (RFC-0008 C2).
+//
+// Screening is PURE and list-as-data: the component is handed the transfers AND
+// the sanctions list as two Arrow IPC batches, and returns the hits as a third.
+// It calls no screening API — there is no network in its world at all. Both the
+// address set it checks against and the transfers it checks are inputs, so a hit
+// is reproducible from (list-snapshot bytes, transfer bytes, component hash)
+// alone. Same batched-Arrow boundary as `stage`; two inputs instead of one.
+//
+// The component never sees the list's content address — it only sees addresses.
+// The host stamps each hit with the snapshot hash and the component hash, so the
+// audit trail is assembled host-side from inputs the component cannot forge.
+// ---------------------------------------------------------------------------
+
+interface screen {
+    /// Screen a batch of transfers against a sanctioned-address set.
+    ///
+    /// - transfers  : Arrow IPC (one RecordBatch): block_number:u64, log_index:u64,
+    ///                from:utf8, to:utf8, value:utf8 (base units as text — i128-safe).
+    /// - sanctioned : Arrow IPC (one RecordBatch): address:utf8 (normalised lowercase).
+    /// - ok(..)     : Arrow IPC of hits: block_number:u64, log_index:u64, address:utf8
+    ///                (the sanctioned address that matched), side:utf8 ("from"|"to"),
+    ///                counterparty:utf8, value:utf8.
+    /// - err(s)     : a recoverable error for this batch; the host logs it and moves on.
+    run: func(transfers: list<u8>, sanctioned: list<u8>) -> result<list<u8>, string>;
+}
+
+/// A PURE screening stage: exports `screen`, imports nothing but base WASI. Zero
+/// granted capabilities → deterministic by construction → its output is an
+/// auditable annotation, reproducible by re-running the same component over the
+/// same inputs. Purity is checkable from the world's imports alone.
+world screen-stage {
+    export screen;
+}

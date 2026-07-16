@@ -80,6 +80,7 @@ pub async fn init(args: InitArgs) -> Result<()> {
             schema_version: CURRENT_SCHEMA_VERSION,
         },
         contracts,
+        screening: crate::config::Screening::default(),
     };
     config.save(&dir)?;
 

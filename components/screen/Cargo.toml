@@ -1,0 +1,25 @@
+# Standalone guest component — deliberately NOT a member of the nuthatch workspace (a wasm32-wasip2
+# cdylib only links for that target). Build + stage with:
+#   cargo build --manifest-path components/screen/Cargo.toml --target wasm32-wasip2 --release
+#   cp target/wasm32-wasip2/release/screen.wasm components/screen.wasm
+# The staged .wasm is loaded by the host (src/screen.rs). Purity is checkable with:
+#   wasm-tools component wit components/screen.wasm   # imports: base WASI only
+[package]
+name = "screen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.57", default-features = false, features = ["macros"] }
+arrow-array = { version = "56", default-features = false }
+arrow-schema = { version = "56", default-features = false }
+arrow-ipc = { version = "56", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

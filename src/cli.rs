@@ -29,6 +29,71 @@ pub enum Command {
     Bench(BenchArgs),
     /// Manage labeled address sets — the compliance annotation substrate (RFC-0008 C1).
     Labels(LabelsArgs),
+    /// Manage sanctions/watch lists as content-addressed snapshots (RFC-0008 C2).
+    Lists(ListsArgs),
+    /// Screen sealed transfers against a list snapshot, recording `sanction_hit` annotations
+    /// (RFC-0008 C2). Replayable: same list hash + range + component → identical hits.
+    Screen(ScreenArgs),
+}
+
+#[derive(Args)]
+pub struct ListsArgs {
+    #[command(subcommand)]
+    pub what: ListsWhat,
+}
+
+#[derive(Subcommand)]
+pub enum ListsWhat {
+    /// Fetch a sanctions/watch list (host-side, out-of-band) into a content-addressed snapshot.
+    Fetch(ListsFetchArgs),
+    /// List the fetched list snapshots and how many addresses each carries.
+    List(ListsListArgs),
+}
+
+#[derive(Args)]
+pub struct ListsFetchArgs {
+    /// List name. Known: `ofac-sdn`, `eu-consolidated` (have default URLs). Any other name needs
+    /// `--url` or `--file`.
+    pub list: String,
+
+    /// Read the list from a local file instead of downloading (any text: XML/CSV/JSON/plain — the
+    /// fetcher extracts every `0x…40hex` address).
+    #[arg(long)]
+    pub file: Option<String>,
+
+    /// Override the download URL for this list.
+    #[arg(long)]
+    pub url: Option<String>,
+
+    /// Nest directory to fetch into (writes `lists/<hash>.json`).
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+}
+
+#[derive(Args)]
+pub struct ListsListArgs {
+    /// Nest directory to read list snapshots from.
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+}
+
+#[derive(Args)]
+pub struct ScreenArgs {
+    /// The list snapshot hash to screen against (from `nuthatch lists fetch`).
+    #[arg(long)]
+    pub list: String,
+
+    /// First block of the range to screen (inclusive).
+    #[arg(long)]
+    pub from: u64,
+
+    /// Last block of the range to screen (inclusive).
+    #[arg(long)]
+    pub to: u64,
+
+    /// Nest directory (must contain a `nuthatch.toml` and sealed segments over the range).
+    #[arg(long, default_value = ".")]
+    pub dir: String,
 }
 
 #[derive(Args)]

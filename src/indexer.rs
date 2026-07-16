@@ -14,6 +14,7 @@ use crate::labels::{self, LabelSet};
 use crate::metrics::METRICS;
 use crate::registry::DecodeRegistry;
 use crate::rpc::RpcClient;
+use crate::screen::{self, LiveScreener, TransferRow};
 use crate::seal;
 use crate::serve;
 use crate::source::Source;
@@ -79,6 +80,13 @@ pub async fn run(
             labels.len()
         );
     }
+    // Optional live sanctions screening (RFC-0008 C2). Absent unless the nest configures
+    // `[screening].lists`; when present, every window's transfers are screened against the pure
+    // component and `sanction_hit` annotations are stored + sealed alongside the transfers.
+    let screener = Arc::new(screen::LiveScreener::from_config(
+        &dir,
+        &config.screening.lists,
+    )?);
 
     // Warm restart: the derived views (balances, exposure) aren't persisted, so rebuild them from
     // stored facts before serving or ingesting. On a cold start there is nothing stored → no-op.
@@ -138,6 +146,7 @@ pub async fn run(
         balances.clone(),
         exposure.clone(),
         labels.clone(),
+        screener.clone(),
         finality,
         window,
         seal_direct,
@@ -335,6 +344,7 @@ async fn index_loop(
     balances: BalanceView,
     exposure: ExposureView,
     labels: Arc<LabelSet>,
+    screener: Arc<Option<LiveScreener>>,
     finality: Finality,
     window: u64,
     seal_direct: bool,
@@ -480,6 +490,8 @@ async fn index_loop(
                 let mut stored = 0usize;
                 let mut deltas = Vec::new();
                 let mut exp_deltas = Vec::new();
+                // Transfers to screen this window (only collected when screening is on).
+                let mut to_screen: Vec<TransferRow> = Vec::new();
                 for row in &mut rows {
                     row.block_timestamp = timestamps.get(&row.block_number).copied().unwrap_or(0);
                     let key = Store::entity_key(row.block_number, row.log_index);
@@ -491,6 +503,16 @@ async fn index_loop(
                             exp_deltas
                                 .extend(exposure::exposure_deltas(&from, &to_addr, v, 1, &labels));
                         }
+                        if screener.is_some() {
+                            to_screen.push(TransferRow {
+                                block_number: row.block_number,
+                                log_index: row.log_index,
+                                from: from.to_ascii_lowercase(),
+                                to: to_addr.to_ascii_lowercase(),
+                                value: value.unwrap_or_default(),
+                                tx_hash: row.tx_hash.clone(),
+                            });
+                        }
                     }
                     // Every row is stored uniformly as typed JSON with a `table` field; per-table
                     // sealing groups by it.
@@ -499,6 +521,23 @@ async fn index_loop(
                 }
                 balances.apply(deltas);
                 exposure.apply(exp_deltas);
+
+                // Live sanctions screening (RFC-0008 C2): screen this window's transfers against the
+                // configured list snapshots and store `sanction_hit` annotations. They share the
+                // transfers' block keys, so they seal and roll back with the same range. Stored before
+                // `maybe_seal` below so a freshly-finalized window seals its hits alongside its rows.
+                if let Some(s) = screener.as_ref() {
+                    let hits = s.screen_window(&to_screen);
+                    for (key, ann) in &hits {
+                        store.put_entity(key, &ann.to_string())?;
+                    }
+                    if !hits.is_empty() {
+                        tracing::warn!(
+                            "sanctions screening: {} hit(s) in {next}..={to}",
+                            hits.len()
+                        );
+                    }
+                }
                 // Checkpoint the window boundary's canonical hash for future reorg detection.
                 if let Ok(Some(hash)) = source.block_hash(to).await {
                     store.set_block_hash(to, &hash)?;

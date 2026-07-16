@@ -8,7 +8,9 @@
 //! redb-only storage (no DuckDB/Parquet yet), no IVM, no MCP. Those are the next layers to grow
 //! onto this spine — see docs/ROADMAP as it lands. What matters here is that it's *alive*.
 
-use nuthatch::{bench, check, cli, config, indexer, labels, mcp, project, store, transform};
+use nuthatch::{
+    bench, check, cli, config, indexer, labels, lists, mcp, project, screen, store, transform,
+};
 
 use anyhow::Result;
 use clap::Parser;
@@ -33,6 +35,40 @@ async fn main() -> Result<()> {
             cli::BenchWhat::Backfill(a) => bench::backfill(a).await,
         },
         cli::Command::Labels(args) => run_labels(args),
+        cli::Command::Lists(args) => run_lists(args).await,
+        cli::Command::Screen(args) => screen::backfill(args),
+    }
+}
+
+/// `nuthatch lists …` — manage sanctions/watch lists as content-addressed snapshots (RFC-0008 C2).
+async fn run_lists(args: cli::ListsArgs) -> Result<()> {
+    use std::path::{Path, PathBuf};
+    match args.what {
+        cli::ListsWhat::Fetch(a) => {
+            let dir = PathBuf::from(&a.dir);
+            let (hash, count) = lists::fetch(
+                &dir,
+                &a.list,
+                a.url.as_deref(),
+                a.file.as_deref().map(Path::new),
+            )
+            .await?;
+            println!(
+                "✓ fetched {count} sanctioned address(es) → lists/{}.json",
+                &hash[..16]
+            );
+            println!(
+                "  screen a range with:  nuthatch screen --list {hash} --from <block> --to <block>"
+            );
+            Ok(())
+        }
+        cli::ListsWhat::List(a) => {
+            let dir = PathBuf::from(&a.dir);
+            for (hash, count) in lists::snapshots(&dir) {
+                println!("{hash}  {count} address(es)");
+            }
+            Ok(())
+        }
     }
 }
 

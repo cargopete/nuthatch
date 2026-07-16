@@ -26,6 +26,24 @@ pub struct Config {
     pub nest: Nest,
     #[serde(default)]
     pub contracts: Vec<Contract>,
+    /// Optional sanctions-screening stage (RFC-0008 C2). When present with a non-empty `lists`, the
+    /// indexer screens every transfer against those list snapshots live and records `sanction_hit`
+    /// annotations. Absent → no screening, zero cost. Not serialised when empty (keeps nests clean).
+    #[serde(default, skip_serializing_if = "Screening::is_empty")]
+    pub screening: Screening,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct Screening {
+    /// Content-addressed list-snapshot hashes to screen against (see `nuthatch lists fetch`).
+    #[serde(default)]
+    pub lists: Vec<String>,
+}
+
+impl Screening {
+    fn is_empty(&self) -> bool {
+        self.lists.is_empty()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -99,6 +117,7 @@ impl Config {
                 start_block: None,
                 abi: ABI_FILE.to_string(),
             }],
+            screening: Screening::default(),
         })
     }
 
@@ -165,6 +184,7 @@ mod tests {
                     abi: "abis/weth.json".into(),
                 },
             ],
+            screening: Screening::default(),
         };
         let raw = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&raw).unwrap();

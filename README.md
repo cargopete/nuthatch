@@ -29,7 +29,8 @@ remains is the scaled (Postgres / DataFusion) mode and wiring reth ExEx to a nod
 | `GET /tables` + `GET /table/{name}` (hot+cold merged) — the full data model | |
 | IVM balance view (DBSP) — **i128** base units, reorg = retraction | |
 | IVM restart-replay — the views rebuild from stored facts on restart | |
-| Labels + direct counterparty-exposure view (DBSP) — content-addressed label snapshots, `/exposure/{addr}` | sanctions screening, threshold/velocity flags, alert webhooks (RFC-0008 C2–C6) |
+| Labels + direct counterparty-exposure view (DBSP) — content-addressed label snapshots, `/exposure/{addr}` | threshold/velocity flags, effectful worlds, alert webhooks (RFC-0008 C3–C6) |
+| Pure sanctions screening — content-addressed list snapshots × a zero-capability WASM component → sealed `sanction_hit` annotations, replayable `nuthatch screen` | signed pack manifest + `pack verify` / `audit replay` (RFC-0008 C6) |
 | WASM transform runtime (pure, sandboxed, batched Arrow) | |
 | MCP server (stdio, 8 tools, offline) + `schema.json` + `llms.txt` + `.claude/skills` scaffold | |
 | redb hot store, entity point-reads with cold (DuckDB) fallback | |
@@ -100,6 +101,27 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 ## Progress log
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
+
+- **2026-07-16 — RFC-0008 C2: pure sanctions screening.** The audit centrepiece: screening is a
+  **pure, zero-capability WASM component**, and lists are **content-addressed data** — so every hit
+  traces to `(list-snapshot hash, block range, component hash)` and reproduces byte-for-byte. New
+  `nuthatch lists fetch <ofac-sdn|eu-consolidated|…> [--file|--url]` extracts every `0x…40hex` address
+  (crypto-addresses only — no name/entity fuzzy matching) into a `lists/<sha256>.json` snapshot,
+  host-side and out-of-band (never a phone-home in the data path). New `screen` component
+  (`components/screen/`, wasm32-wasip2, embedded in the binary via `include_bytes!` so it always
+  travels with the single binary; **imports = base WASI only**, verifiable with `wasm-tools component
+  wit`) takes a transfers batch + a sanctioned-address batch over the Arrow boundary and emits
+  `sanction_hit` facts; the host stamps each with the list + component hashes the sandbox never sees.
+  Two paths: a **live stage** (`[screening] lists = [...]` in `nuthatch.toml`) that screens each
+  window, and the audit-grade **backfill** `nuthatch screen --list <hash> --from --to` that re-screens
+  *sealed* transfers over immutable segments. Hits become append-only `sanction_hit` annotations —
+  block-keyed (so they seal + roll back with their transfers), sealed to their own Parquet table,
+  queryable at `/sql`. Segment sealing is now **content-addressed idempotent** (re-auditing a range is
+  a no-op, not a double-count). **Gate met:** golden test (fixture list → exact hits) + the replay test
+  (live screening == backfill screening, i128 values loss-free), 80 tests green, clippy clean. Verified
+  live on USDC: `lists fetch` → `screen` over 32,149 sealed transfers → 1,475 `sanction_hit`s with full
+  provenance in `/sql`; re-run idempotent; live stage logged per-window hits. 6 new tests (+3 lists,
+  +3 screen incl. the golden + replay gates); the pure component's purity checked via `wasm-tools`.
 
 - **2026-07-16 — RFC-0008 C1: labels + direct counterparty-exposure view.** The compliance pack's
   foundation. New `nuthatch labels import <csv|json>` writes a **content-addressed** label snapshot

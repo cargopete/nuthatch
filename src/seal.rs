@@ -83,10 +83,17 @@ pub fn seal_range(
         let bytes = write_parquet(&batch)?;
         let hash = hex::encode(Sha256::digest(&bytes));
         let file = format!("{table}-{hash}.parquet");
+        let segments = manifest.tables.entry(table).or_default();
+        // Content-addressed idempotency: an identical segment (same table + hash) is already
+        // catalogued, so re-sealing the same rows — e.g. re-running `nuthatch screen` over a range to
+        // re-audit — is a no-op rather than a double-listed (double-counted) segment.
+        if segments.iter().any(|s| s.hash == hash) {
+            continue;
+        }
         std::fs::write(seg_dir.join(&file), &bytes).context("failed to write segment")?;
         summary.tables += 1;
         summary.rows += rows.len();
-        manifest.tables.entry(table).or_default().push(Segment {
+        segments.push(Segment {
             hash,
             from_block: from,
             to_block: to,
