@@ -394,6 +394,110 @@ pub async fn backfill_direct_pipelined(
     Ok(total)
 }
 
+/// Factory-aware sequential seal-direct backfill (RFC-0009 §3). Per chunk, two passes: pass 1 fetches
+/// with the current address filter (base contracts + children discovered so far) and updates the
+/// child registry from the factory events it decodes; pass 2 (a fixpoint loop, for nested factories
+/// within one chunk) re-fetches the same range for *only* the newly discovered children. All logs are
+/// then decoded together with the full registry, stamped, sorted by `(block, log_index)`, and sealed —
+/// so the segments are deterministic and (step 3a) will match the pipelined path byte-for-byte. Uses
+/// the efficient address filter, not the tip loop's topic0-only fetch. Grows `children`.
+#[allow(clippy::too_many_arguments)]
+pub async fn backfill_direct_factory(
+    source: &dyn Source,
+    registry: &DecodeRegistry,
+    factory: &FactorySet,
+    children: &mut ChildRegistry,
+    dir: &std::path::Path,
+    topic0s: &[String],
+    from: u64,
+    to: u64,
+    window: u64,
+) -> Result<u64> {
+    use std::collections::HashSet;
+    let base: Vec<String> = registry
+        .addresses()
+        .iter()
+        .map(|a| format!("0x{}", hex::encode(a)))
+        .collect();
+    let empty_ts = std::collections::HashMap::new();
+
+    let mut buf: Vec<String> = Vec::new();
+    let mut batch_from = from;
+    let mut next = from;
+    let mut total = 0u64;
+    let mut chunker = AdaptiveWindow::for_window(window);
+    while next <= to {
+        let chunk_to = (next + chunker.window() - 1).min(to);
+
+        // Pass 1: current filter = base contracts + all children discovered so far.
+        let mut fetched: HashSet<String> = base.iter().map(|s| s.to_ascii_lowercase()).collect();
+        let mut current: Vec<String> = base.clone();
+        for c in children.addresses() {
+            if fetched.insert(c.to_ascii_lowercase()) {
+                current.push(c.to_string());
+            }
+        }
+        let logs1 = match source.logs(&current, topic0s, next, chunk_to).await {
+            Ok(l) => {
+                chunker.observed(l.len() as u64);
+                l
+            }
+            Err(e) if chunker::is_result_too_large(&e) => {
+                chunker.too_large();
+                continue; // retry the same range with a smaller window
+            }
+            Err(e) => return Err(e).with_context(|| format!("getLogs {next}..={chunk_to}")),
+        };
+        let mut all_logs = logs1;
+        // Decode to discover children (rows discarded here; the authoritative decode is below once
+        // every child in this chunk is known and timestamps are in hand).
+        let _ = decode_window(registry, Some(factory), children, &all_logs, &empty_ts);
+
+        // Pass 2+ (fixpoint): re-fetch the chunk for children discovered here but not yet fetched.
+        loop {
+            let new: Vec<String> = children
+                .addresses()
+                .iter()
+                .filter(|c| !fetched.contains(&c.to_ascii_lowercase()))
+                .map(|c| c.to_string())
+                .collect();
+            if new.is_empty() {
+                break;
+            }
+            for c in &new {
+                fetched.insert(c.to_ascii_lowercase());
+            }
+            let more = source
+                .logs(&new, topic0s, next, chunk_to)
+                .await
+                .with_context(|| format!("getLogs (children) {next}..={chunk_to}"))?;
+            let _ = decode_window(registry, Some(factory), children, &more, &empty_ts);
+            all_logs.extend(more);
+        }
+
+        // Authoritative decode with the full child set, real timestamps, deterministic order.
+        let mut blocks: Vec<u64> = all_logs.iter().map(|l| l.block_number).collect();
+        blocks.sort_unstable();
+        blocks.dedup();
+        let ts = source.block_timestamps(&blocks).await.unwrap_or_default();
+        let rows = decode_window(registry, Some(factory), children, &all_logs, &ts);
+        for r in &rows {
+            buf.push(r.to_json().to_string());
+            total += 1;
+        }
+        next = chunk_to + 1;
+
+        if buf.len() >= SEAL_DIRECT_BATCH || next > to {
+            if !buf.is_empty() {
+                seal::seal_range(dir, &buf, batch_from, chunk_to)?;
+                buf.clear();
+            }
+            batch_from = next;
+        }
+    }
+    Ok(total)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn index_loop(
     source: Arc<dyn Source>,
@@ -433,10 +537,6 @@ async fn index_loop(
             }
         }
     }
-    // Factory backfill efficiency (topic0-only over deep ranges) lands in RFC-0009 steps 3–4; until
-    // then a factory nest uses the tip loop, so seal-direct's address-filtered fast path is disabled.
-    let seal_direct = seal_direct && factory.is_none();
-
     // Phase 0 (cold start, `--seal-direct`): fast-seal the finalized history straight to Parquet,
     // bypassing the hot store, then rebuild the IVM view from those segments. The tip-following loop
     // below picks up from where this left off and handles the near-tip (un-finalized) window the
@@ -451,21 +551,42 @@ async fn index_loop(
         let finalized_through = seal_ceiling(finality, tip, finalized_tag);
         if origin <= finalized_through {
             store.set_meta(START_BLOCK_KEY, &origin.to_string())?;
-            tracing::info!(
-                "seal-direct backfill: {origin}..={finalized_through} (tip {tip}, {concurrency}-way)…"
-            );
-            let sealed = backfill_direct_pipelined(
-                source.as_ref(),
-                &registry,
-                &dir,
-                &addresses,
-                &topic0s,
-                origin,
-                finalized_through,
-                window,
-                concurrency,
-            )
-            .await?;
+            // A factory nest backfills with the sequential two-pass (RFC-0009 §3, address-filtered,
+            // efficient); the pipelined path composes with factories in step 3a. A static nest uses
+            // the pipelined path as before.
+            let sealed = if let Some(fs) = factory.as_deref() {
+                tracing::info!(
+                    "seal-direct factory backfill: {origin}..={finalized_through} (tip {tip}, sequential two-pass)…"
+                );
+                backfill_direct_factory(
+                    source.as_ref(),
+                    &registry,
+                    fs,
+                    &mut children,
+                    &dir,
+                    &topic0s,
+                    origin,
+                    finalized_through,
+                    window,
+                )
+                .await?
+            } else {
+                tracing::info!(
+                    "seal-direct backfill: {origin}..={finalized_through} (tip {tip}, {concurrency}-way)…"
+                );
+                backfill_direct_pipelined(
+                    source.as_ref(),
+                    &registry,
+                    &dir,
+                    &addresses,
+                    &topic0s,
+                    origin,
+                    finalized_through,
+                    window,
+                    concurrency,
+                )
+                .await?
+            };
             store.set_meta(SEALED_THROUGH_KEY, &finalized_through.to_string())?;
             store.set_meta(LAST_BLOCK_KEY, &finalized_through.to_string())?;
             tracing::info!(
@@ -1270,6 +1391,166 @@ async fn sleep_secs(s: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An address-aware mock source: `logs` respects the address filter (empty = all), so a factory
+    /// backfill's pass 1 (contracts) and pass 2 (children-only) return different logs, as on a real
+    /// provider. Used to prove the two-pass discovery (RFC-0009 §3).
+    struct FilteringSource {
+        logs: Vec<crate::rpc::Log>,
+    }
+
+    #[async_trait::async_trait]
+    impl Source for FilteringSource {
+        async fn tip(&self) -> Result<u64> {
+            Ok(self.logs.iter().map(|l| l.block_number).max().unwrap_or(0))
+        }
+        async fn block_hash(&self, _n: u64) -> Result<Option<String>> {
+            Ok(None)
+        }
+        async fn logs(
+            &self,
+            addrs: &[String],
+            _t: &[String],
+            from: u64,
+            to: u64,
+        ) -> Result<Vec<crate::rpc::Log>> {
+            let allow: std::collections::HashSet<String> =
+                addrs.iter().map(|a| a.to_ascii_lowercase()).collect();
+            Ok(self
+                .logs
+                .iter()
+                .filter(|l| l.block_number >= from && l.block_number <= to)
+                .filter(|l| allow.is_empty() || allow.contains(&l.address.to_ascii_lowercase()))
+                .cloned()
+                .collect())
+        }
+        async fn block_timestamps(
+            &self,
+            blocks: &[u64],
+        ) -> Result<std::collections::HashMap<u64, u64>> {
+            Ok(blocks.iter().map(|&b| (b, b * 1000)).collect())
+        }
+    }
+
+    /// RFC-0009 step 3 gate: the sequential two-pass backfill discovers a child in a chunk (pass 1's
+    /// factory event) and re-fetches the chunk for that child (pass 2), so the child's *historical*
+    /// activity is sealed — even though it wasn't in pass 1's address filter.
+    #[tokio::test]
+    async fn factory_backfill_two_pass_seals_child_activity() {
+        use crate::registry::{ContractSpec, DecodeRegistry, TemplateSpec};
+        use crate::rpc::Log;
+
+        let factory_addr = "0x1111111111111111111111111111111111111111";
+        let pool_addr = "0x2222222222222222222222222222222222222222";
+        let reg = DecodeRegistry::build_with_templates(
+            vec![ContractSpec {
+                alias: "factory".into(),
+                address: factory_addr.parse().unwrap(),
+                abi: serde_json::from_str(
+                    r#"[{"type":"event","name":"PoolCreated","anonymous":false,"inputs":[{"name":"pool","type":"address","indexed":false}]}]"#,
+                ).unwrap(),
+            }],
+            vec![TemplateSpec {
+                name: "pool".into(),
+                abi: serde_json::from_str(
+                    r#"[{"type":"event","name":"Swap","anonymous":false,"inputs":[{"name":"amount","type":"uint256","indexed":false}]}]"#,
+                ).unwrap(),
+            }],
+        )
+        .unwrap();
+        let topic0 = |table: &str| {
+            format!(
+                "0x{}",
+                hex::encode(
+                    reg.tables()
+                        .iter()
+                        .find(|d| d.table == table)
+                        .unwrap()
+                        .topic0
+                )
+            )
+        };
+        let config: Config = toml::from_str(
+            r#"
+[nest]
+name="t"
+chain="mainnet"
+chain_id=1
+rpc_urls=["https://rpc"]
+[[contracts]]
+alias="factory"
+address="0x1111111111111111111111111111111111111111"
+abi="abis/f.json"
+[[templates]]
+name="pool"
+abi="abis/p.json"
+[[factories]]
+watch="factory"
+event="PoolCreated"
+child_param="pool"
+template="pool"
+"#,
+        )
+        .unwrap();
+        let fs = FactorySet::build(&config).unwrap();
+
+        // Pool created at block 10; its Swap at block 15 — both in the backfill range, but the Swap
+        // is only reachable in pass 2 (the pool isn't in pass 1's contract-only filter).
+        let source = FilteringSource {
+            logs: vec![
+                Log {
+                    address: factory_addr.into(),
+                    topics: vec![topic0("factory__pool_created")],
+                    data: format!("0x{:0>64}", pool_addr.trim_start_matches("0x")),
+                    block_number: 10,
+                    block_hash: "0xbh".into(),
+                    tx_hash: "0xt1".into(),
+                    log_index: 0,
+                },
+                Log {
+                    address: pool_addr.into(),
+                    topics: vec![topic0("pool__swap")],
+                    data: format!("0x{:064x}", 999u64),
+                    block_number: 15,
+                    block_hash: "0xbh".into(),
+                    tx_hash: "0xt2".into(),
+                    log_index: 0,
+                },
+            ],
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut children = ChildRegistry::new();
+        let sealed = backfill_direct_factory(
+            &source,
+            &reg,
+            &fs,
+            &mut children,
+            dir.path(),
+            &[],
+            10,
+            20,
+            100,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            sealed, 2,
+            "the factory event and the child's historical swap both sealed"
+        );
+        assert!(
+            children.contains(pool_addr),
+            "the pool was discovered during backfill"
+        );
+        // The child's Swap is queryable from the sealed segment.
+        let n = crate::analytics::query(dir.path(), r#"SELECT count(*) AS n FROM "pool__swap""#)
+            .unwrap();
+        assert_eq!(n[0]["n"], serde_json::Value::from(1u64));
+        let row =
+            crate::analytics::query(dir.path(), r#"SELECT address FROM "pool__swap""#).unwrap();
+        assert_eq!(row[0]["address"], serde_json::Value::from(pool_addr));
+    }
 
     /// RFC-0009 step 2 gate: a child created and active in the *same* window is decoded — the
     /// factory's `PoolCreated` (log 0) discovers the pool, so the pool's `Swap` (log 1) routes to the

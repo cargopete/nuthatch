@@ -106,6 +106,19 @@ It bridges to the local `nuthatch dev` - no external calls, no telemetry, no gat
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-17 - RFC-0009 step 3: factories over history (sequential two-pass backfill).** Factories
+  now work in `--seal-direct` backfill, not just the tip. New `backfill_direct_factory`: per chunk,
+  pass 1 fetches with the current address filter (base contracts + children discovered so far) and
+  updates the child registry from the factory events it decodes; a pass-2 fixpoint loop re-fetches the
+  same range for *only* the newly discovered children (children-only, so nested factories within one
+  chunk resolve too); all logs are then decoded together with the full registry, stamped, sorted by
+  `(block, log_index)`, and sealed - deterministic segments (the byte-identical property step 3a will
+  pin against the pipelined path). Uses the efficient address filter, not the tip loop's topic0-only
+  fetch. Seal-direct is re-enabled for factory nests (routing to this sequential path; the pipelined
+  path composes in step 3a). **Gate met:** hermetic two-pass test (a pool created in pass 1, its
+  historical swap fetched + sealed in pass 2, queryable). Verified **live on Uniswap V3**: a
+  seal-direct backfill sealed 104 pools and **106 historical swaps across 65 discovered pools**. 103
+  tests green (+1), clippy clean.
 - **2026-07-16 - RFC-0009 step 2: factory tip regime - it indexes Uniswap.** Dynamic child contracts
   are now decoded live. The decode registry gains **template decoders** (`registry.rs`: topic0-keyed,
   address-agnostic, matched against the runtime child registry not a fixed address; `decode_child`,
