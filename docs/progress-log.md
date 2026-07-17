@@ -2,6 +2,22 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-17 - RFC-0009 step 6: the `{template}__children` view + docs (RFC-0009 COMPLETE).** The
+  finale of dynamic contract discovery. Every template now gets an auto-generated **`{template}__children`**
+  DuckDB view over the sealed factory events - the discovered children with provenance (address,
+  discovered_block, discovered_log_index, discovered_timestamp, parent_address), de-duplicated to the
+  earliest discovery per address (`define_children_views` reads the nest's factory config, unions the
+  factory tables per template, `QUALIFY row_number()` picks the earliest). So `SELECT * FROM
+  "pool__children"` answers "which pools, discovered when, by which factory" in one query, and
+  `discovered_timestamp` answers "pools created this week" without a join. New `docs/factories.md`
+  (config, how tip/backfill/reorg/scale work, the children view); README status row; MCP schema hint.
+  **Gate met:** children-view test (two pools + a duplicate discovery → 2 distinct, earliest wins,
+  provenance columns correct). Verified **live on Uniswap V3**: `pool__children` listed **83 discovered
+  pools** with block + real-timestamp provenance. 106 tests green (+1), clippy clean. **RFC-0009 is
+  complete** - factories work at the tip, over history, reorg-safely, at scale, with a queryable
+  children view; **it indexes Uniswap.** (Step 5a - ExEx-mode factories - is inherent via the
+  local-filter path; explicit bridge-harness test remains a small `exex`-feature follow-up.)
+
 - **2026-07-17 - RFC-0009 step 5: the address-list → topic0 filter flip at scale.** A factory
   backfill's address filter grows with every discovered child; providers cap address-list size, so
   above **~500 children** (or a per-template `filter = "topic0"` override) the backfill **flips** to a

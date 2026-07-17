@@ -169,6 +169,15 @@ impl FactorySet {
         self.rules.keys().cloned().collect()
     }
 
+    /// `(template, announcing_table, child_param)` for every rule — the sources the analytics layer
+    /// unions into each `{template}__children` view (RFC-0009 §Serving).
+    pub fn view_sources(&self) -> Vec<(String, String, String)> {
+        self.rules
+            .iter()
+            .map(|(table, r)| (r.template.clone(), table.clone(), r.child_param.clone()))
+            .collect()
+    }
+
     /// Discover a child from a *stored* factory-event row (JSON), for the warm-restart rebuild. Same
     /// semantics as [`discover`] but reading the persisted columns rather than a live `DecodedRow`.
     pub fn discover_stored(&self, table: &str, row: &serde_json::Value) -> Option<ChildEntry> {

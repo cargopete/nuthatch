@@ -204,6 +204,11 @@ COMPLIANCE (RFC-0008; amounts are i128 base units as decimal strings)
                    SELECT * FROM sanction_hit WHERE address = '0x…' — each row carries its
                    list_snapshot hash, so a hit traces to (list version, block, component).
 
+FACTORIES (RFC-0009; only in a nest with [[templates]]/[[factories]])
+  Children of a template share tables (`pool__swap`, …), distinguished by the `address` column. Each
+  template also has a `{template}__children` view: which children were discovered, when, and by which
+  parent — SELECT address, discovered_block, discovered_timestamp, parent_address FROM "pool__children".
+
 SQL (tool `sql`, read-only, over FINALIZED data)
   Each sealed table is a DuckDB view of the same name (quote it). Examples:
     SELECT count(*) FROM "usdc__transfer"

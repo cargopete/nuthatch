@@ -71,6 +71,9 @@ fn run(dir: &Path, sql: &str, guard: Option<QueryGuard>) -> Result<QueryOutput> 
     // The compliance substrate: expose imported label snapshots as a `labels` view so `/sql` (and the
     // internal `cold_exposure` fold) can join against them. Best-effort — no snapshots, no view.
     define_labels_view(&conn, dir);
+    // Factory nests (RFC-0009): a `{template}__children` view over the sealed factory events, so
+    // "which pools, discovered when, by which parent" is one query. Best-effort — no factories, no-op.
+    define_children_views(&conn, dir);
 
     // Hard wall-clock deadline for the untrusted surface: a watchdog thread interrupts the in-flight
     // query once it outlives the guard's timeout (a cartesian blow-up can't be stopped by the memory
@@ -313,6 +316,57 @@ fn define_labels_view(conn: &Connection, dir: &Path) {
     }
 }
 
+/// Define a `{template}__children` view per template for a factory nest (RFC-0009 §Serving): the set
+/// of discovered child contracts with their provenance (address, discovered block/log/timestamp,
+/// parent), unioned across every factory that produces the template and de-duplicated to the earliest
+/// discovery per address. Reads the nest's factory config from `nuthatch.toml`; best-effort, so a
+/// factory table with no sealed events yet (only an empty typed view) just yields an empty children
+/// view. Non-factory nests are a no-op.
+fn define_children_views(conn: &Connection, dir: &Path) {
+    let Ok(config) = crate::config::Config::load(dir) else {
+        return;
+    };
+    if config.factories.is_empty() {
+        return;
+    }
+    let Ok(fs) = crate::factory::FactorySet::build(&config) else {
+        return;
+    };
+
+    let mut by_template: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    for (template, table, child_param) in fs.view_sources() {
+        by_template
+            .entry(template)
+            .or_default()
+            .push((table, child_param));
+    }
+
+    for (template, sources) in by_template {
+        // `child_param`/`table` are registry-derived (never user text) → no injection surface.
+        let selects: Vec<String> = sources
+            .iter()
+            .map(|(table, cp)| {
+                format!(
+                    "SELECT lower(\"{cp}\") AS address, block_number AS discovered_block, \
+                     log_index AS discovered_log_index, block_timestamp AS discovered_timestamp, \
+                     lower(address) AS parent_address FROM \"{table}\""
+                )
+            })
+            .collect();
+        let union = selects.join(" UNION ALL ");
+        let ddl = format!(
+            "CREATE VIEW \"{template}__children\" AS \
+             SELECT address, discovered_block, discovered_log_index, discovered_timestamp, parent_address \
+             FROM ({union}) \
+             QUALIFY row_number() OVER (PARTITION BY address ORDER BY discovered_block, discovered_log_index) = 1"
+        );
+        if let Err(e) = conn.execute_batch(&ddl) {
+            tracing::debug!("children view {template}__children skipped: {e}");
+        }
+    }
+}
+
 /// Point-read fallback: fetch a single sealed transfer by (block, log_index). Used when the hot
 /// store has already pruned it. Integers are interpolated (not user text), so no injection surface.
 pub fn get_row(dir: &Path, block: u64, log_index: u64) -> Result<Option<Value>> {
@@ -548,6 +602,67 @@ mod tests {
         let out = query_guarded(dir.path(), r#"SELECT * FROM "t__transfer""#, guard).unwrap();
         assert_eq!(out.rows.len(), 3);
         assert!(!out.truncated);
+    }
+
+    /// RFC-0009 step 6: a factory nest gets an auto-generated `{template}__children` view over the
+    /// sealed factory events — the discovered children with provenance, de-duplicated to the earliest
+    /// discovery per address. Answers "which pools, discovered when, by whom" in one query.
+    #[test]
+    fn children_view_lists_discovered_contracts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::config::CONFIG_FILE),
+            r#"
+[nest]
+name="univ3"
+chain="mainnet"
+chain_id=1
+rpc_urls=["https://rpc"]
+[[contracts]]
+alias="factory"
+address="0x1f98431c8ad98523631ae4a59f267346ea31f984"
+abi="abis/factory.json"
+[[templates]]
+name="pool"
+abi="abis/pool.json"
+[[factories]]
+watch="factory"
+event="PoolCreated"
+child_param="pool"
+template="pool"
+"#,
+        )
+        .unwrap();
+        // Seal two PoolCreated events (pool_a, pool_b) + a duplicate discovery of pool_a (later block,
+        // must be de-duplicated to the earliest).
+        let rows = vec![
+            r#"{"table":"factory__pool_created","pool":"0xAAAA000000000000000000000000000000000001","block_number":10,"log_index":0,"block_timestamp":1700000010,"tx_hash":"0xt","address":"0x1f98431c8ad98523631ae4a59f267346ea31f984"}"#.to_string(),
+            r#"{"table":"factory__pool_created","pool":"0xBBBB000000000000000000000000000000000002","block_number":12,"log_index":1,"block_timestamp":1700000012,"tx_hash":"0xt","address":"0x1f98431c8ad98523631ae4a59f267346ea31f984"}"#.to_string(),
+            r#"{"table":"factory__pool_created","pool":"0xAAAA000000000000000000000000000000000001","block_number":20,"log_index":0,"block_timestamp":1700000020,"tx_hash":"0xt","address":"0x1f98431c8ad98523631ae4a59f267346ea31f984"}"#.to_string(),
+        ];
+        crate::seal::seal_range(dir.path(), &rows, 10, 20).unwrap();
+
+        let count = query(dir.path(), r#"SELECT count(*) AS n FROM "pool__children""#).unwrap();
+        assert_eq!(
+            count[0]["n"],
+            Value::from(2u64),
+            "two distinct discovered pools"
+        );
+        let a = query(
+            dir.path(),
+            r#"SELECT discovered_block, discovered_timestamp, parent_address FROM "pool__children" WHERE address = '0xaaaa000000000000000000000000000000000001'"#,
+        )
+        .unwrap();
+        assert_eq!(
+            a[0]["discovered_block"],
+            Value::from(10u64),
+            "earliest discovery wins"
+        );
+        assert_eq!(a[0]["discovered_timestamp"], Value::from(1700000010u64));
+        assert_eq!(
+            a[0]["parent_address"],
+            Value::from("0x1f98431c8ad98523631ae4a59f267346ea31f984")
+        );
     }
 
     /// A runaway query is interrupted by the watchdog and surfaced as a timeout, not left to hang.

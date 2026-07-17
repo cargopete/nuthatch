@@ -35,6 +35,7 @@ remains is the scaled (Postgres / DataFusion) mode and wiring reth ExEx to a nod
 | Effectful WASM stages - per-component capability grants (`kv` now, HTTP next), imports checked against the grant at load, annotations-only output | wasi:http-sandboxed egress variant (optional) |
 | Alert webhooks - flag/hit annotations (and reorg `flag_retracted`) POSTed at-least-once via a durable outbox that never blocks the indexer | |
 | Signed compliance-pack manifest (`pack build`/`verify`, ed25519) + `audit replay`/`report` (re-prove sealed annotations) + MCP `flags`/`exposure`/`screen_status` | **RFC-0008 complete - all 8 RFCs shipped** |
+| Factories & dynamic contract discovery ([RFC-0009](docs/factories.md)) - `[[templates]]`/`[[factories]]`, tip + backfill + reorg-safe, address-list→topic0 flip at scale, `{template}__children` view. **It indexes Uniswap.** | |
 | WASM transform runtime (pure, sandboxed, batched Arrow) | |
 | MCP server (stdio, 8 tools, offline) + `schema.json` + `llms.txt` + `.claude/skills` scaffold | |
 | redb hot store, entity point-reads with cold (DuckDB) fallback | |
