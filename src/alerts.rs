@@ -96,10 +96,16 @@ pub fn enqueue(
     Ok(())
 }
 
-/// Drain up to [`DELIVERY_BATCH`] pending deliveries once, POSTing each to its URL. A delivered entry
-/// (2xx) is removed; a failed one is left for retry (at-least-once). A failure doesn't stop the drain
-/// — a dead sink won't hold up a live one. Returns how many were delivered. Testable in isolation.
-pub async fn deliver_pending(store: &Store, client: &reqwest::Client) -> usize {
+/// Drain up to [`DELIVERY_BATCH`] pending deliveries once, POSTing the exact stored payload bytes to
+/// its URL (so an HMAC signature covers what's actually sent). A payload whose `webhook` names a
+/// secret in `secrets` gets an `X-Nuthatch-Signature: sha256=<hmac>` header (RFC-0010 Part B). A
+/// delivered entry (2xx) is removed; a failure is left for retry (at-least-once) and doesn't stop the
+/// drain. Returns how many were delivered.
+pub async fn deliver_pending(
+    store: &Store,
+    client: &reqwest::Client,
+    secrets: &std::collections::HashMap<String, String>,
+) -> usize {
     let pending = store.outbox_pending(DELIVERY_BATCH).unwrap_or_default();
     let mut delivered = 0usize;
     for (seq, payload_str) in pending {
@@ -108,7 +114,20 @@ pub async fn deliver_pending(store: &Store, client: &reqwest::Client) -> usize {
             continue;
         };
         let url = payload.get("url").and_then(Value::as_str).unwrap_or("");
-        match client.post(url).json(&payload).send().await {
+        // Send the stored bytes verbatim so a signature matches; sign if the webhook has a secret.
+        let mut req = client
+            .post(url)
+            .header("content-type", "application/json")
+            .body(payload_str.clone());
+        if let Some(secret) = payload
+            .get("webhook")
+            .and_then(Value::as_str)
+            .and_then(|n| secrets.get(n))
+        {
+            let sig = crate::webhooks::hmac_sha256_hex(secret.as_bytes(), payload_str.as_bytes());
+            req = req.header("X-Nuthatch-Signature", format!("sha256={sig}"));
+        }
+        match req.send().await {
             Ok(resp) if resp.status().is_success() => {
                 let _ = store.outbox_remove(seq);
                 delivered += 1;
@@ -130,7 +149,7 @@ pub async fn deliver_pending(store: &Store, client: &reqwest::Client) -> usize {
 /// The background delivery worker: drain the outbox, publish the depth gauge, sleep, repeat. Runs
 /// alongside the indexer and API on its own task; enqueuing is decoupled from it so a slow webhook
 /// never blocks indexing. The `POLL_INTERVAL` sleep is also the retry backoff for failed deliveries.
-pub async fn run_delivery_worker(store: Store) {
+pub async fn run_delivery_worker(store: Store, secrets: std::collections::HashMap<String, String>) {
     let client = match reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build() {
         Ok(c) => c,
         Err(e) => {
@@ -140,7 +159,7 @@ pub async fn run_delivery_worker(store: Store) {
     };
     tracing::info!("alert delivery worker started");
     loop {
-        let delivered = deliver_pending(&store, &client).await;
+        let delivered = deliver_pending(&store, &client, &secrets).await;
         crate::metrics::METRICS.set_alert_outbox(store.outbox_len());
         if delivered > 0 {
             tracing::debug!(
@@ -248,7 +267,7 @@ mod tests {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .unwrap();
-        let delivered = deliver_pending(&store, &client).await;
+        let delivered = deliver_pending(&store, &client, &std::collections::HashMap::new()).await;
         assert_eq!(delivered, 2);
         assert_eq!(store.outbox_len(), 0, "delivered entries leave the outbox");
 
@@ -257,6 +276,78 @@ mod tests {
         assert_eq!(got[0]["event"], "flag");
         assert_eq!(got[0]["annotation"]["address"], "0xbad");
         assert_eq!(got[1]["event"], "flag_retracted");
+    }
+
+    /// RFC-0010 egress security: a webhook whose payload names a secret is signed with
+    /// `X-Nuthatch-Signature: sha256=<hmac>` over the *exact bytes sent*, so the receiver can verify
+    /// provenance. A payload without a matching secret goes unsigned.
+    #[tokio::test]
+    async fn signs_delivery_when_the_webhook_has_a_secret() {
+        use axum::{extract::State, http::HeaderMap, routing::post, Router};
+        use std::sync::{Arc, Mutex};
+
+        // Records (signature-header, raw-body) for each request.
+        type Seen = Arc<Mutex<Vec<(Option<String>, String)>>>;
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route(
+                "/hook",
+                post(
+                    |State(sink): State<Seen>, headers: HeaderMap, body: String| async move {
+                        let sig = headers
+                            .get("x-nuthatch-signature")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        sink.lock().unwrap().push((sig, body));
+                        "ok"
+                    },
+                ),
+            )
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!("http://{addr}/hook");
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.redb")).unwrap();
+
+        // One payload names webhook "signed" (secret configured), one names "plain" (no secret).
+        let signed = json!({ "event": "rows", "webhook": "signed", "url": url, "rows": [1] });
+        let plain = json!({ "event": "rows", "webhook": "plain", "url": url, "rows": [2] });
+        store.outbox_push(&signed.to_string()).unwrap();
+        store.outbox_push(&plain.to_string()).unwrap();
+
+        let mut secrets = std::collections::HashMap::new();
+        secrets.insert("signed".to_string(), "topsecret".to_string());
+
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap();
+        let delivered = deliver_pending(&store, &client, &secrets).await;
+        assert_eq!(delivered, 2);
+
+        let got = seen.lock().unwrap();
+        let signed_row = got
+            .iter()
+            .find(|(_, b)| b.contains("\"webhook\":\"signed\""))
+            .unwrap();
+        let plain_row = got
+            .iter()
+            .find(|(_, b)| b.contains("\"webhook\":\"plain\""))
+            .unwrap();
+
+        // The signature covers the exact bytes POSTed, under the configured secret.
+        let expect = crate::webhooks::hmac_sha256_hex(b"topsecret", signed_row.1.as_bytes());
+        assert_eq!(
+            signed_row.0.as_deref(),
+            Some(format!("sha256={expect}").as_str())
+        );
+        // No secret → no signature header.
+        assert_eq!(plain_row.0, None, "an unsecreted webhook is not signed");
     }
 
     /// A dead endpoint leaves the alert in the outbox for retry — at-least-once, never dropped on the
@@ -283,7 +374,7 @@ mod tests {
             .timeout(Duration::from_millis(500))
             .build()
             .unwrap();
-        let delivered = deliver_pending(&store, &client).await;
+        let delivered = deliver_pending(&store, &client, &std::collections::HashMap::new()).await;
         assert_eq!(delivered, 0);
         assert_eq!(
             store.outbox_len(),

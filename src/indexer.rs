@@ -190,7 +190,10 @@ pub async fn run(
             config.alerts.len(),
             config.webhooks.len()
         );
-        Some(tokio::spawn(alerts::run_delivery_worker(store.clone())))
+        Some(tokio::spawn(alerts::run_delivery_worker(
+            store.clone(),
+            crate::webhooks::secrets(&config.webhooks),
+        )))
     };
 
     // Kick off the indexing loop in the background; serve the API on this task.

@@ -2,6 +2,20 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-17 - RFC-0010 Part B: signed webhook egress (HMAC).** The last egress-security piece: a
+  `[[webhooks]]` entry can now carry a `secret`, and every delivery for it is signed with an
+  `X-Nuthatch-Signature: sha256=<hex>` header so a receiver can verify the payload came from this nest
+  and wasn't tampered with. HMAC-SHA256 is hand-rolled over `sha2` (RFC 2104, no new dependency) and
+  proven against the standard reference vector. Crucially the signature covers the *exact bytes POSTed*:
+  the worker sends the stored payload string verbatim and signs those same bytes, so there's no
+  serialization skew between what's signed and what's sent. It threads through the one shared delivery
+  worker, so both producers - compliance alerts (C5) and user webhooks - get signing for free; a webhook
+  with no secret goes unsigned, unchanged. **Gate met:** HMAC known-answer test + a live-receiver test
+  asserting the secreted webhook arrives with a correct `sha256=` header over the received body while an
+  unsecreted one arrives bare. 112 tests green (+2), clippy clean. RFC-0010's tip-finality delivery path
+  (hot, not-yet-sealed rows + retractions) stays deferred - it needs a hot-row SQL surface, which is a
+  scaled-mode architectural piece, not a webhook detail.
+
 - **2026-07-17 - RFC-0010 Part A: the built-in admin UI.** A single self-contained page (`src/admin.html`,
   ~13 KB, embedded via `include_str!`), served at `/_admin/`, no framework, no CDN, zero external
   requests - it only talks to this same-origin API. Four tabs: **Status** (live gauges - hot rows,
