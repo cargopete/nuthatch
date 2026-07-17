@@ -8,7 +8,7 @@
 use alloy_dyn_abi::{DynSolValue, EventExt};
 use alloy_json_abi::{Event, JsonAbi};
 use alloy_primitives::{Address, B256};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value as Json};
 use sha2::{Digest, Sha256};
@@ -370,6 +370,8 @@ pub struct ContractSpec {
     pub alias: String,
     pub address: Address,
     pub abi: JsonAbi,
+    /// Event allowlist (RFC-0011): only events whose ABI name is listed are decoded. Empty = all.
+    pub events: Vec<String>,
 }
 
 /// A template (RFC-0009): an ABI applied to contracts discovered at runtime rather than a fixed
@@ -404,6 +406,7 @@ impl DecodeRegistry {
                 alias: c.alias.clone(),
                 address: parse_address(&c.address)?,
                 abi,
+                events: c.events.clone(),
             });
         }
         // Template ABIs (RFC-0009): loaded the same way, keyed by template name (not an address).
@@ -434,15 +437,43 @@ impl DecodeRegistry {
         let mut skipped_anonymous = 0usize;
 
         for c in &contracts {
-            skipped_anonymous += register_events(&mut by_topic0, &c.alias, c.address, &c.abi);
+            // A typo in an allowlist would silently index nothing at scale — reject it loudly.
+            if !c.events.is_empty() {
+                let known: std::collections::HashSet<&str> =
+                    c.abi.events().map(|e| e.name.as_str()).collect();
+                for want in &c.events {
+                    if !known.contains(want.as_str()) {
+                        bail!(
+                            "contract '{}' allowlists event '{}', which its ABI does not define \
+                             (known events: {})",
+                            c.alias,
+                            want,
+                            {
+                                let mut ks: Vec<&str> = known.iter().copied().collect();
+                                ks.sort();
+                                ks.join(", ")
+                            }
+                        );
+                    }
+                }
+            }
+            skipped_anonymous +=
+                register_events(&mut by_topic0, &c.alias, c.address, &c.abi, &c.events);
         }
 
         // Template decoders share the same machinery; their contract address is unused (ZERO) — they
         // are matched by template name against the runtime child registry, not by address.
         let mut templates_by_topic0: HashMap<B256, Vec<EventDecoder>> = HashMap::new();
         for t in &templates {
-            skipped_anonymous +=
-                register_events(&mut templates_by_topic0, &t.name, Address::ZERO, &t.abi);
+            // Templates are address-agnostic child ABIs; no per-template allowlist (RFC-0009 nests
+            // author focused template ABIs already). Pass an empty allowlist = decode all.
+            skipped_anonymous += register_events(
+                &mut templates_by_topic0,
+                &t.name,
+                Address::ZERO,
+                &t.abi,
+                &[],
+            );
         }
 
         let hash = registry_hash(&by_topic0, &templates_by_topic0);
@@ -668,11 +699,15 @@ fn register_events(
     alias: &str,
     address: Address,
     abi: &JsonAbi,
+    events_allow: &[String],
 ) -> usize {
+    // An event is indexed when the allowlist is empty (index all) or names it (by ABI event name).
+    let allowed =
+        |ev: &Event| events_allow.is_empty() || events_allow.iter().any(|a| a == &ev.name);
     let mut skipped = 0usize;
     let mut name_counts: HashMap<String, usize> = HashMap::new();
     for ev in abi.events() {
-        if ev.anonymous {
+        if ev.anonymous || !allowed(ev) {
             continue;
         }
         *name_counts.entry(snake_case(&ev.name)).or_default() += 1;
@@ -681,6 +716,9 @@ fn register_events(
         if ev.anonymous {
             skipped += 1;
             continue;
+        }
+        if !allowed(ev) {
+            continue; // filtered out by the per-contract allowlist (RFC-0011)
         }
         let mut dec = EventDecoder::new(alias, address, ev.clone());
         if name_counts.get(&snake_case(&ev.name)).copied().unwrap_or(0) > 1 {
@@ -770,6 +808,15 @@ mod tests {
             alias: alias.into(),
             address: parse_address(addr).unwrap(),
             abi: abi(abi_json),
+            events: Vec::new(),
+        }
+    }
+
+    /// Like [`spec`] but with an event allowlist (RFC-0011).
+    fn spec_events(alias: &str, addr: &str, abi_json: &str, events: &[&str]) -> ContractSpec {
+        ContractSpec {
+            events: events.iter().map(|s| s.to_string()).collect(),
+            ..spec(alias, addr, abi_json)
         }
     }
 
@@ -867,6 +914,82 @@ mod tests {
         // one topic0, two decoders keyed by address
         assert_eq!(reg.topic0s().len(), 2); // Transfer + Approval share across both → 2 distinct topic0s
         assert_eq!(reg.addresses().len(), 2);
+    }
+
+    /// RFC-0011: a per-contract `events` allowlist decodes only the listed events. The ERC20 ABI has
+    /// Transfer + Approval; allowlisting Transfer drops Approval from the tables *and* the topic0 set,
+    /// so the getLogs filter narrows too. An Approval log no longer decodes.
+    #[test]
+    fn event_allowlist_restricts_tables_and_topics() {
+        let full = DecodeRegistry::build(vec![spec("t", USDC, ERC20)]).unwrap();
+        assert_eq!(full.tables().len(), 2, "unfiltered: Transfer + Approval");
+
+        let reg =
+            DecodeRegistry::build(vec![spec_events("t", USDC, ERC20, &["Transfer"])]).unwrap();
+        let tables: Vec<&str> = reg.tables().iter().map(|d| d.table.as_str()).collect();
+        assert_eq!(tables, vec!["t__transfer"], "only the allowlisted event");
+        assert_eq!(
+            reg.topic0s().len(),
+            1,
+            "Approval's topic0 isn't even requested"
+        );
+
+        // A Transfer still decodes; an Approval on the same contract now doesn't.
+        let transfer = log(
+            USDC,
+            &[
+                "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                "0x000000000000000000000000943f303a8019652d3a14b29954b2d780dde42ca3",
+                "0x000000000000000000000000db5985dbd132b9e5cc4bf0a18a8fb04a396ba0a0",
+            ],
+            "0x000000000000000000000000000000000000000000000000000000001cd4ad20",
+            1,
+            0,
+        );
+        assert!(reg.decode(&transfer).unwrap().is_some());
+        let approval = log(
+            USDC,
+            &[
+                "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+                "0x000000000000000000000000943f303a8019652d3a14b29954b2d780dde42ca3",
+                "0x000000000000000000000000db5985dbd132b9e5cc4bf0a18a8fb04a396ba0a0",
+            ],
+            "0x000000000000000000000000000000000000000000000000000000001cd4ad20",
+            1,
+            1,
+        );
+        assert!(
+            reg.decode(&approval).unwrap().is_none(),
+            "Approval filtered out"
+        );
+    }
+
+    /// The allowlist changes the registry's content hash — the data model is content-addressed, so a
+    /// filtered nest is a different (smaller) model, not the same one.
+    #[test]
+    fn event_allowlist_changes_the_registry_hash() {
+        let full = DecodeRegistry::build(vec![spec("t", USDC, ERC20)]).unwrap();
+        let filtered =
+            DecodeRegistry::build(vec![spec_events("t", USDC, ERC20, &["Transfer"])]).unwrap();
+        assert_ne!(full.hash(), filtered.hash());
+    }
+
+    /// A typo in the allowlist (an event the ABI doesn't define) is a loud build error, never a silent
+    /// "indexes nothing" — the whole point at GraphToken scale.
+    #[test]
+    fn unknown_allowlisted_event_is_a_build_error() {
+        let err = match DecodeRegistry::build(vec![spec_events("t", USDC, ERC20, &["Transferr"])]) {
+            Ok(_) => panic!("a typo'd allowlist should fail the build"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("Transferr"),
+            "names the offending event: {err}"
+        );
+        assert!(
+            err.contains("Approval, Transfer"),
+            "lists the known events: {err}"
+        );
     }
 
     #[test]

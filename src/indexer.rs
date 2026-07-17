@@ -1577,6 +1577,7 @@ mod tests {
                 abi: serde_json::from_str(
                     r#"[{"type":"event","name":"PoolCreated","anonymous":false,"inputs":[{"name":"pool","type":"address","indexed":false}]}]"#,
                 ).unwrap(),
+                events: Vec::new(),
             }],
             vec![TemplateSpec {
                 name: "pool".into(),
@@ -1712,6 +1713,7 @@ template="pool"
                 abi: serde_json::from_str(
                     r#"[{"type":"event","name":"PoolCreated","anonymous":false,"inputs":[{"name":"pool","type":"address","indexed":false}]}]"#,
                 ).unwrap(),
+                events: Vec::new(),
             }],
             vec![TemplateSpec {
                 name: "pool".into(),
@@ -1858,6 +1860,7 @@ template="pool"
                 alias: "factory".into(),
                 address: factory_addr.parse().unwrap(),
                 abi: factory_abi,
+                events: Vec::new(),
             }],
             vec![TemplateSpec {
                 name: "pool".into(),
@@ -2054,6 +2057,7 @@ template = "pool"
             alias: "usdc".into(),
             address: addr,
             abi,
+            events: Vec::new(),
         }])
         .unwrap();
 
