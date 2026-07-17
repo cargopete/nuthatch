@@ -39,6 +39,7 @@ remains is the scaled (Postgres / DataFusion) mode and wiring reth ExEx to a nod
 | Built-in admin UI at `/_admin/` (RFC-0010 Part A) - embedded, no framework/CDN, status + table browser + SQL runner + nest inspector, read-only, localhost-gated | tip-finality webhook path + retractions (RFC-0010, deferred - needs hot-row SQL) |
 | User webhooks (RFC-0010 Part B) - `[[webhooks]]` POST sealed rows matching a `where` to a URL via the shared at-least-once outbox; `since` suppresses backfill history | |
 | Signed webhook egress (RFC-0010 Part B) - a webhook `secret` signs each delivery with `X-Nuthatch-Signature: sha256=<hmac>` over the exact bytes sent (HMAC-SHA256, no new dep) | |
+| Per-contract event allowlist (RFC-0011) - `events = ["Transfer", ...]` in `[[contracts]]` decodes only the listed events (default = all); narrows both decode and the getLogs fetch, typo = loud build error | the `graph-network-nest` + Lodestar migration (cross-repo) |
 | WASM transform runtime (pure, sandboxed, batched Arrow) | |
 | MCP server (stdio, 8 tools, offline) + `schema.json` + `llms.txt` + `.claude/skills` scaffold | |
 | redb hot store, entity point-reads with cold (DuckDB) fallback | |

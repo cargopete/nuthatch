@@ -68,6 +68,7 @@ pub async fn init(args: InitArgs) -> Result<()> {
             address: address.clone(),
             start_block,
             abi: abi_path,
+            events: Vec::new(),
         });
     }
 

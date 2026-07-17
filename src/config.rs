@@ -199,6 +199,12 @@ pub struct Contract {
     pub start_block: Option<u64>,
     /// ABI path relative to the nest dir, e.g. "abis/usdc.json".
     pub abi: String,
+    /// Optional per-contract event allowlist (RFC-0011): only these events (by ABI name) are decoded
+    /// and stored for this contract. Empty (the default) indexes every event the ABI defines. This is
+    /// how a nest indexing e.g. GraphToken keeps only `Transfer` instead of millions of irrelevant
+    /// rows. A name here that the ABI doesn't define is a config error, caught at registry build.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<String>,
 }
 
 impl Config {
@@ -249,6 +255,7 @@ impl Config {
                 address: v1.address,
                 start_block: None,
                 abi: ABI_FILE.to_string(),
+                events: Vec::new(),
             }],
             screening: Screening::default(),
             flags: Flags::default(),
@@ -314,12 +321,14 @@ mod tests {
                     address: "0xaaaa".into(),
                     start_block: Some(6_082_465),
                     abi: "abis/usdc.json".into(),
+                    events: Vec::new(),
                 },
                 Contract {
                     alias: "weth".into(),
                     address: "0xbbbb".into(),
                     start_block: None,
                     abi: "abis/weth.json".into(),
+                    events: vec!["Transfer".into()],
                 },
             ],
             screening: Screening::default(),
@@ -334,6 +343,9 @@ mod tests {
         assert_eq!(back.contracts.len(), 2);
         assert_eq!(back.contracts[0].start_block, Some(6_082_465));
         assert_eq!(back.contracts[1].start_block, None);
+        // The per-contract event allowlist (RFC-0011) round-trips; an empty one stays empty.
+        assert!(back.contracts[0].events.is_empty());
+        assert_eq!(back.contracts[1].events, vec!["Transfer".to_string()]);
         assert_eq!(back.primary().unwrap().alias, "usdc");
     }
 }

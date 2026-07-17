@@ -2,6 +2,22 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-17 - RFC-0011 kickoff: the per-contract event allowlist (the blocking core amendment).**
+  RFC-0011 (the graph-network nest + Lodestar migration) is mostly cross-repo work, but it forces one
+  small change on RFC-0001 that blocks everything else: a per-contract `events = ["Transfer", ...]`
+  allowlist in `[[contracts]]`. Without it, a nest that includes GraphToken (L2GRT) would index millions
+  of irrelevant `Transfer` rows. So this ships that amendment: `Contract.events` (default empty = index
+  every event, fully backward-compatible) threads into `ContractSpec` and a filter in the decode
+  registry's `register_events`. Because the getLogs topic0 set is *derived from the registry decoders*,
+  filtering the decoders narrows both the decode **and** the fetch - an unlisted event's topic0 isn't
+  even requested. A typo (an event the ABI doesn't define) is a loud build error listing the known
+  events, never a silent "indexes nothing" - which is the whole point at that scale. The registry
+  content-hash reflects the filtered model, so a narrowed nest is honestly a different (smaller) data
+  model, not the same one pretending. **Gate met:** allowlist-restricts-tables-and-topics test (2
+  events → 1 table, 1 topic0, Approval no longer decodes), hash-changes test, unknown-event-build-error
+  test, config round-trip test. 115 green (+3), clippy clean. The nest authoring + Lodestar panel
+  migration + GraphOps/Hetzner shadow are the next, cross-repo, steps.
+
 - **2026-07-17 - RFC-0010 Part B: signed webhook egress (HMAC).** The last egress-security piece: a
   `[[webhooks]]` entry can now carry a `secret`, and every delivery for it is signed with an
   `X-Nuthatch-Signature: sha256=<hex>` header so a receiver can verify the payload came from this nest
