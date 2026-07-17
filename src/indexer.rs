@@ -236,6 +236,11 @@ pub async fn run(
 /// from-history backfill regardless of how long the range is.
 const SEAL_DIRECT_BATCH: usize = 20_000;
 
+/// Above this many discovered children, the factory backfill flips from an address-list filter to a
+/// topic0-only fetch with local registry-lookup filtering (RFC-0009 §4) — providers cap address-list
+/// size, and a huge list is slower than fetching by topic0 and discarding non-children locally.
+const FACTORY_FLIP_THRESHOLD: usize = 500;
+
 /// Stream a *finalized* block range straight to sealed Parquet, bypassing the hot store entirely
 /// (RFC-0004 §1): decode → buffered rows → content-addressed segments. No redb write, no read-back,
 /// no prune — the churn a from-history backfill otherwise pays for every historical row. Rows carry
@@ -412,6 +417,7 @@ pub async fn backfill_direct_factory(
     from: u64,
     to: u64,
     window: u64,
+    force_topic0: bool,
 ) -> Result<u64> {
     use std::collections::HashSet;
     let base: Vec<String> = registry
@@ -425,54 +431,85 @@ pub async fn backfill_direct_factory(
     let mut batch_from = from;
     let mut next = from;
     let mut total = 0u64;
+    let mut flipped_logged = false;
     let mut chunker = AdaptiveWindow::for_window(window);
     while next <= to {
         let chunk_to = (next + chunker.window() - 1).min(to);
 
-        // Pass 1: current filter = base contracts + all children discovered so far.
-        let mut fetched: HashSet<String> = base.iter().map(|s| s.to_ascii_lowercase()).collect();
-        let mut current: Vec<String> = base.clone();
-        for c in children.addresses() {
-            if fetched.insert(c.to_ascii_lowercase()) {
-                current.push(c.to_string());
-            }
+        // Filter flip (RFC-0009 §4): a forced override or a discovered set past the threshold switches
+        // this chunk from the address-list two-pass to a single topic0-only fetch + local filtering.
+        let use_topic0 = force_topic0 || base.len() + children.len() > FACTORY_FLIP_THRESHOLD;
+        if use_topic0 && !flipped_logged {
+            tracing::info!(
+                "factory backfill filter flipped to topic0-only + local filter ({} children)",
+                children.len()
+            );
+            flipped_logged = true;
         }
-        let logs1 = match source.logs(&current, topic0s, next, chunk_to).await {
-            Ok(l) => {
-                chunker.observed(l.len() as u64);
-                l
-            }
-            Err(e) if chunker::is_result_too_large(&e) => {
-                chunker.too_large();
-                continue; // retry the same range with a smaller window
-            }
-            Err(e) => return Err(e).with_context(|| format!("getLogs {next}..={chunk_to}")),
-        };
-        let mut all_logs = logs1;
-        // Decode to discover children (rows discarded here; the authoritative decode is below once
-        // every child in this chunk is known and timestamps are in hand).
-        let _ = decode_window(registry, Some(factory), children, &all_logs, &empty_ts);
 
-        // Pass 2+ (fixpoint): re-fetch the chunk for children discovered here but not yet fetched.
-        loop {
-            let new: Vec<String> = children
-                .addresses()
-                .iter()
-                .filter(|c| !fetched.contains(&c.to_ascii_lowercase()))
-                .map(|c| c.to_string())
-                .collect();
-            if new.is_empty() {
-                break;
+        let mut all_logs;
+        if use_topic0 {
+            // Topic0-only: every matching log (contract + all children) is in hand in one fetch, so
+            // there is no second pass; `decode_window` filters locally by registry membership.
+            all_logs = match source.logs(&[], topic0s, next, chunk_to).await {
+                Ok(l) => {
+                    chunker.observed(l.len() as u64);
+                    l
+                }
+                Err(e) if chunker::is_result_too_large(&e) => {
+                    chunker.too_large();
+                    continue;
+                }
+                Err(e) => return Err(e).with_context(|| format!("getLogs {next}..={chunk_to}")),
+            };
+            let _ = decode_window(registry, Some(factory), children, &all_logs, &empty_ts);
+        } else {
+            // Pass 1: current filter = base contracts + all children discovered so far.
+            let mut fetched: HashSet<String> =
+                base.iter().map(|s| s.to_ascii_lowercase()).collect();
+            let mut current: Vec<String> = base.clone();
+            for c in children.addresses() {
+                if fetched.insert(c.to_ascii_lowercase()) {
+                    current.push(c.to_string());
+                }
             }
-            for c in &new {
-                fetched.insert(c.to_ascii_lowercase());
+            let logs1 = match source.logs(&current, topic0s, next, chunk_to).await {
+                Ok(l) => {
+                    chunker.observed(l.len() as u64);
+                    l
+                }
+                Err(e) if chunker::is_result_too_large(&e) => {
+                    chunker.too_large();
+                    continue; // retry the same range with a smaller window
+                }
+                Err(e) => return Err(e).with_context(|| format!("getLogs {next}..={chunk_to}")),
+            };
+            all_logs = logs1;
+            // Decode to discover children (rows discarded here; the authoritative decode is below once
+            // every child in this chunk is known and timestamps are in hand).
+            let _ = decode_window(registry, Some(factory), children, &all_logs, &empty_ts);
+
+            // Pass 2+ (fixpoint): re-fetch the chunk for children discovered here but not yet fetched.
+            loop {
+                let new: Vec<String> = children
+                    .addresses()
+                    .iter()
+                    .filter(|c| !fetched.contains(&c.to_ascii_lowercase()))
+                    .map(|c| c.to_string())
+                    .collect();
+                if new.is_empty() {
+                    break;
+                }
+                for c in &new {
+                    fetched.insert(c.to_ascii_lowercase());
+                }
+                let more = source
+                    .logs(&new, topic0s, next, chunk_to)
+                    .await
+                    .with_context(|| format!("getLogs (children) {next}..={chunk_to}"))?;
+                let _ = decode_window(registry, Some(factory), children, &more, &empty_ts);
+                all_logs.extend(more);
             }
-            let more = source
-                .logs(&new, topic0s, next, chunk_to)
-                .await
-                .with_context(|| format!("getLogs (children) {next}..={chunk_to}"))?;
-            let _ = decode_window(registry, Some(factory), children, &more, &empty_ts);
-            all_logs.extend(more);
         }
 
         // Authoritative decode with the full child set, real timestamps, deterministic order.
@@ -582,6 +619,7 @@ async fn index_loop(
                     origin,
                     finalized_through,
                     window,
+                    fs.force_topic0(),
                 )
                 .await?
             } else {
@@ -1552,6 +1590,7 @@ template="pool"
             10,
             20,
             100,
+            false,
         )
         .await
         .unwrap();
@@ -1681,6 +1720,7 @@ template="pool"
             logs: Vec<crate::rpc::Log>,
             reg: &crate::registry::DecodeRegistry,
             fs: &FactorySet,
+            force_topic0: bool,
         ) -> (tempfile::TempDir, Vec<String>) {
             let source = FilteringSource { logs };
             let dir = tempfile::tempdir().unwrap();
@@ -1695,6 +1735,7 @@ template="pool"
                 10,
                 20,
                 100,
+                force_topic0,
             )
             .await
             .unwrap();
@@ -1708,9 +1749,16 @@ template="pool"
             (dir, sig)
         }
 
-        let (_d1, sig1) = seal_sig(logs.clone(), &reg, &fs).await;
-        let (_d2, sig2) = seal_sig(logs.clone(), &reg, &fs).await;
+        // Address-list mode is reproducible; and the RFC-0009 §4 topic0-flip produces byte-identical
+        // segments (the flip changes only the fetch strategy, never the output).
+        let (_d1, sig1) = seal_sig(logs.clone(), &reg, &fs, false).await;
+        let (_d2, sig2) = seal_sig(logs.clone(), &reg, &fs, false).await;
+        let (_d3, sig3) = seal_sig(logs.clone(), &reg, &fs, true).await;
         assert!(!sig1.is_empty(), "something was sealed");
+        assert_eq!(
+            sig1, sig3,
+            "topic0-flip mode seals byte-identical segments to address-list mode"
+        );
         assert_eq!(
             sig1, sig2,
             "identical range + history → byte-identical sealed segments"

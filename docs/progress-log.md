@@ -2,6 +2,19 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-17 - RFC-0009 step 5: the address-list → topic0 filter flip at scale.** A factory
+  backfill's address filter grows with every discovered child; providers cap address-list size, so
+  above **~500 children** (or a per-template `filter = "topic0"` override) the backfill **flips** to a
+  single topic0-only fetch + local registry-lookup filtering (`decode_window` already routes each log
+  by contract/child membership), dropping the address-list two-pass entirely - logged once when it
+  flips. The flip is **byte-identical**: a new assertion proves topic0-flip mode seals the exact same
+  segments as address-list mode (the flip changes only the *fetch strategy*, never the output) - which
+  is also why flip mode composes with a pipelined backfill for free (topic0-only filters are
+  version-independent). New `Template.filter` config + `FactorySet::force_topic0()`. 105 tests green,
+  clippy clean. *(Step 5a - ExEx-mode factories - is inherent: ExEx logs arrive in-process with no
+  getLogs filter, so they route through the same `decode_window` local filter; an explicit bridge-
+  harness test is a small follow-up under the `exex` feature.)*
+
 - **2026-07-17 - RFC-0009 step 4: reorg convergence for the discovered set + registry snapshot in the
   seal manifest.** Two correctness guarantees for factories. (1) A **reorg convergence property test**
   (`child_registry_reorg_converges`, 96 cases): discovering pools along a prefix chain, reorging at a

@@ -67,6 +67,11 @@ pub struct Template {
     pub name: String,
     /// ABI path relative to the nest dir, e.g. "abis/uniswap_v3_pool.json".
     pub abi: String,
+    /// Backfill filter strategy override (RFC-0009 §4): `"topic0"` forces the topic0-only fetch (with
+    /// local registry-lookup filtering) instead of the address list — useful when a template is known
+    /// to have many children. Omit for the automatic address-list → topic0 flip above ~500 children.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
 }
 
 /// A factory rule (RFC-0009): when `watch`'s `event` fires, the child address in `child_param` is
