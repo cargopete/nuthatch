@@ -2,6 +2,19 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-17 - RFC-0010 Part A: the built-in admin UI.** A single self-contained page (`src/admin.html`,
+  ~13 KB, embedded via `include_str!`), served at `/_admin/`, no framework, no CDN, zero external
+  requests - it only talks to this same-origin API. Four tabs: **Status** (live gauges - hot rows,
+  tables, holders, exposure/velocity/outbox, IVM views - polled every 2s while visible, with a live tip
+  dot), **Tables** (a browser: click a table, see its newest 100 rows merged hot+sealed), **SQL** (a
+  runner over the read-only `/sql` surface, Ctrl/⌘-Enter to run), and **Nest** (a new `/nest` endpoint:
+  contracts, templates, factories, webhooks, registry hash). Read-only by design - the UI observes, the
+  CLI and files mutate. On by default on localhost; off-localhost it needs `NUTHATCH_ADMIN_TOKEN` or it
+  self-disables with a log line, and `--no-admin` removes it entirely (for hosted deployments fronting
+  their own dashboard). **Gate met:** served-when-enabled / 404-when-disabled test, `/nest` metadata
+  test, and a budget test asserting the embedded UI is < 150 KB and makes no external requests. Rendered
+  live against a real USDC nest (screenshot: clean dark UI, live data). 110 tests green (+2), clippy clean.
+
 - **2026-07-17 - RFC-0010 Part B: user webhooks (the shared-engine second producer).** RFC-0010's
   reconciliation is "one delivery engine, two producers" - and the engine already exists (I built the
   durable outbox + at-least-once worker host-side in RFC-0008 C5). So this adds the second producer:

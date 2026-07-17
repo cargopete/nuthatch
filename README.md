@@ -36,6 +36,8 @@ remains is the scaled (Postgres / DataFusion) mode and wiring reth ExEx to a nod
 | Alert webhooks - flag/hit annotations (and reorg `flag_retracted`) POSTed at-least-once via a durable outbox that never blocks the indexer | |
 | Signed compliance-pack manifest (`pack build`/`verify`, ed25519) + `audit replay`/`report` (re-prove sealed annotations) + MCP `flags`/`exposure`/`screen_status` | **RFC-0008 complete - all 8 RFCs shipped** |
 | Factories & dynamic contract discovery ([RFC-0009](docs/factories.md)) - `[[templates]]`/`[[factories]]`, tip + backfill + reorg-safe, address-list→topic0 flip at scale, `{template}__children` view. **It indexes Uniswap.** | |
+| Built-in admin UI at `/_admin/` (RFC-0010 Part A) - embedded, no framework/CDN, status + table browser + SQL runner + nest inspector, read-only, localhost-gated | tip-finality webhook path + retractions, HMAC (RFC-0010 Part B) |
+| User webhooks (RFC-0010 Part B) - `[[webhooks]]` POST sealed rows matching a `where` to a URL via the shared at-least-once outbox; `since` suppresses backfill history | |
 | WASM transform runtime (pure, sandboxed, batched Arrow) | |
 | MCP server (stdio, 8 tools, offline) + `schema.json` + `llms.txt` + `.claude/skills` scaffold | |
 | redb hot store, entity point-reads with cold (DuckDB) fallback | |

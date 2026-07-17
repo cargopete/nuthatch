@@ -6,6 +6,8 @@
 - Depends on: — (parallel to RFC-0001/0002; ExExSource bridge already stubbed and tested)
 - Blocks: RFC-0006 (the tip-latency number strengthens grant applications), website
   tip-latency claims
+- Related: RFC-0014 (firehose-class extraction) reads the *same* ExEx notification this
+  RFC handles — see the §6 forward-compatibility constraint added 2026-07-17.
 
 ## Abstract
 
@@ -118,6 +120,23 @@ reth mainnet full node (not archive — ExEx needs the live stream, history come
 sealed Parquet): ~1.2–2.5 TB NVMe, days to sync. Runs alongside the existing Graph
 indexer stack; disk is the constraint to verify before starting sync. Systemd unit +
 the existing Prometheus scrape (reth exposes metrics; add nuthatch tip-lag gauge).
+
+### 6. Forward-compatibility: don't collapse the notification to logs-only (RFC-0014)
+
+§2 decodes **logs only** (`decode(receipts_logs(block))`) — correct for tip mode. But
+the `ChainCommitted` notification also carries the full `ExecutionOutcome`
+(`BundleState`, i.e. the state diffs) and the block itself (re-executable for traces).
+RFC-0014 (firehose-class extraction — traces + state diffs) reads *that same
+notification*, so the state data it needs is already in hand here; it is not a second
+ingestion path.
+
+The one constraint this places on RFC-0003's build: **the ExEx handler must pass the
+whole notification through to the decode stage, not a pre-filtered logs-only view.**
+Keep the `ExecutionOutcome` and block reachable at decode time (even though tip mode
+ignores them today), so RFC-0014 is an additive row-producer later, not a re-plumb of
+the source. Zero cost now (we simply don't consume the extra fields); large cost saved
+later. This is the only thing RFC-0014 asks of RFC-0003 — the feature itself lives in
+RFC-0014 and stays deferred.
 
 ## Implementation plan
 

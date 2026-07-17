@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nuthatch</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #21262d; --line2: #30363d;
+    --fg: #e6edf3; --muted: #8b949e; --dim: #6e7681;
+    --accent: #d2a8ff; --accent2: #79c0ff; --good: #3fb950; --warn: #d29922; --bad: #f85149;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 14px; }
+  a { color: var(--accent2); text-decoration: none; }
+  header {
+    display: flex; align-items: baseline; gap: 14px; padding: 14px 20px;
+    border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5;
+  }
+  header .logo { font-weight: 700; letter-spacing: .3px; }
+  header .logo b { color: var(--accent); }
+  header .nest { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  header .grow { flex: 1; }
+  .pill {
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    border: 1px solid var(--line2); border-radius: 999px; padding: 2px 9px; white-space: nowrap;
+  }
+  .pill b { color: var(--fg); font-weight: 600; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 5px; background: var(--dim); }
+  .dot.live { background: var(--good); box-shadow: 0 0 6px var(--good); }
+  nav { display: flex; gap: 2px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  nav button {
+    background: none; border: none; color: var(--muted); font: inherit; padding: 10px 14px;
+    cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  nav button:hover { color: var(--fg); }
+  nav button.on { color: var(--fg); border-bottom-color: var(--accent); }
+  main { padding: 20px; max-width: 1200px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .stat .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
+  .stat .v { font-family: var(--mono); font-size: 20px; margin-top: 4px; }
+  .row { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .card h3 { margin: 0; padding: 10px 14px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); text-transform: uppercase; letter-spacing: .4px; font-weight: 600; }
+  .list { list-style: none; margin: 0; padding: 6px; max-height: 70vh; overflow: auto; min-width: 220px; }
+  .list li { padding: 6px 10px; border-radius: 6px; cursor: pointer; font-family: var(--mono); font-size: 12.5px; color: var(--fg); display: flex; justify-content: space-between; gap: 10px; }
+  .list li:hover { background: var(--line); }
+  .list li.on { background: var(--line2); }
+  .list li .n { color: var(--dim); }
+  table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 12px; }
+  .scroll { overflow: auto; max-height: 74vh; border: 1px solid var(--line); border-radius: 8px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; z-index: 1; }
+  td { color: var(--fg); }
+  tr:hover td { background: rgba(255,255,255,.02); }
+  textarea {
+    width: 100%; min-height: 96px; background: #010409; color: var(--fg); border: 1px solid var(--line2);
+    border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 13px; resize: vertical;
+  }
+  .btn { background: var(--accent); color: #0d1117; border: none; border-radius: 6px; padding: 8px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+  .btn:hover { filter: brightness(1.08); }
+  .toolbar { display: flex; gap: 10px; align-items: center; margin: 10px 0; color: var(--muted); font-size: 12px; }
+  .muted { color: var(--muted); }
+  .err { color: var(--bad); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; padding: 10px; }
+  .hint { color: var(--dim); font-size: 12px; margin: 8px 0 16px; }
+  code { font-family: var(--mono); background: var(--line); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .empty { color: var(--dim); padding: 24px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">🐦 <b>nuthatch</b></span>
+  <span class="nest" id="nest">—</span>
+  <span class="grow"></span>
+  <span class="pill"><span class="dot" id="dot"></span><span id="tip">tip —</span></span>
+  <span class="pill">sealed <b id="sealed">—</b></span>
+  <span class="pill" id="lagpill">lag <b id="lag">—</b></span>
+</header>
+<nav>
+  <button data-tab="status" class="on">Status</button>
+  <button data-tab="tables">Tables</button>
+  <button data-tab="sql">SQL</button>
+  <button data-tab="nest">Nest</button>
+</nav>
+<main>
+  <section id="tab-status">
+    <div class="grid" id="stats"></div>
+    <p class="hint">Read-only. The CLI and files mutate; this observes. Polls every 2s while this tab is visible.</p>
+  </section>
+
+  <section id="tab-tables" hidden>
+    <div class="row">
+      <div class="card"><h3>Tables</h3><ul class="list" id="tablist"><li class="empty">loading…</li></ul></div>
+      <div style="flex:1; min-width: 340px;">
+        <div class="toolbar"><span id="tabletitle" class="muted">pick a table</span></div>
+        <div class="scroll" id="tablerows"><div class="empty">select a table on the left</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-sql" hidden>
+    <textarea id="q" spellcheck="false" placeholder='SELECT * FROM "usdc__transfer" LIMIT 20'></textarea>
+    <div class="toolbar"><button class="btn" id="run">Run</button><span class="muted" id="sqlmeta"></span></div>
+    <p class="hint">Read-only, over sealed (finalized) data. SELECT/WITH only, quote table names. Ctrl/⌘-Enter to run.</p>
+    <div class="scroll" id="sqlrows"></div>
+  </section>
+
+  <section id="tab-nest" hidden>
+    <div id="nestbody"><div class="empty">loading…</div></div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+async function api(p){ const r = await fetch(p); if(!r.ok && r.status!==400) throw new Error(p+' → '+r.status); return r.json(); }
+function fmt(n){ return (n===null||n===undefined) ? '—' : (typeof n==='number' ? n.toLocaleString() : n); }
+
+let tab = 'status';
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  tab = b.dataset.tab;
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x===b));
+  ['status','tables','sql','nest'].forEach(t => $('#tab-'+t).hidden = t!==tab);
+  if(tab==='tables') loadTables();
+  if(tab==='nest') loadNest();
+});
+
+// ---- status (polled) ----
+const STAT_KEYS = [
+  ['entities','hot rows'], ['tables','tables'], ['holders','holders'],
+  ['exposure_entries','exposure'], ['velocity_buckets','velocity'], ['alert_outbox','alert outbox'],
+];
+async function poll(){
+  try {
+    const s = await api('/');
+    $('#nest').textContent = (s.name||'nest') + ' · ' + (s.chain||'');
+    $('#tip').textContent = 'tip ' + fmt(s.last_block);
+    $('#sealed').textContent = fmt(s.sealed_through);
+    $('#dot').classList.add('live');
+    const lag = (s.last_block && s.sealed_through) ? (s.last_block - s.sealed_through) : null;
+    $('#lag').textContent = lag===null ? '—' : fmt(lag)+' blk';
+    const g = STAT_KEYS.filter(([k]) => k in s).map(([k,label]) =>
+      `<div class="stat"><div class="k">${label}</div><div class="v">${fmt(s[k])}</div></div>`).join('');
+    $('#stats').innerHTML = g + `<div class="stat"><div class="k">views</div><div class="v" style="font-size:12px">${(s.views||[]).join('<br>')||'—'}</div></div>`;
+  } catch(e){ $('#dot').classList.remove('live'); }
+}
+setInterval(() => { if(tab==='status' && !document.hidden) poll(); }, 2000);
+poll();
+
+// ---- tables ----
+let curTable = null;
+async function loadTables(){
+  const d = await api('/tables');
+  $('#tablist').innerHTML = d.tables.map(t =>
+    `<li data-t="${esc(t.table)}"><span>${esc(t.table)}</span><span class="n">${t.columns.length}c</span></li>`).join('')
+    || '<li class="empty">no tables</li>';
+  $('#tablist').querySelectorAll('li[data-t]').forEach(li => li.onclick = () => openTable(li.dataset.t, li));
+}
+async function openTable(name, li){
+  curTable = name;
+  $('#tablist').querySelectorAll('li').forEach(x => x.classList.toggle('on', x===li));
+  $('#tabletitle').textContent = name + ' — newest 100 (hot + sealed)';
+  $('#tablerows').innerHTML = '<div class="empty">loading…</div>';
+  const d = await api('/table/'+encodeURIComponent(name)+'?limit=100');
+  $('#tablerows').innerHTML = rowsTable(d.items);
+}
+function rowsTable(items){
+  if(!items || !items.length) return '<div class="empty">no rows</div>';
+  const cols = [...new Set(items.flatMap(r => Object.keys(r)))];
+  const head = '<tr>'+cols.map(c=>`<th>${esc(c)}</th>`).join('')+'</tr>';
+  const body = items.map(r => '<tr>'+cols.map(c=>`<td>${r[c]===undefined?'':esc(r[c])}</td>`).join('')+'</tr>').join('');
+  return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+}
+
+// ---- sql ----
+async function runSql(){
+  const q = $('#q').value.trim(); if(!q) return;
+  $('#sqlmeta').textContent = 'running…'; $('#sqlrows').innerHTML='';
+  try {
+    const d = await api('/sql?q='+encodeURIComponent(q));
+    if(d.error){ $('#sqlrows').innerHTML = `<div class="err">${esc(d.error)}</div>`; $('#sqlmeta').textContent=''; return; }
+    $('#sqlmeta').textContent = `${fmt(d.count)} row(s)` + (d.truncated?' (truncated)':'');
+    $('#sqlrows').innerHTML = rowsTable(d.rows);
+  } catch(e){ $('#sqlrows').innerHTML = `<div class="err">${esc(e.message)}</div>`; $('#sqlmeta').textContent=''; }
+}
+$('#run').onclick = runSql;
+$('#q').addEventListener('keydown', e => { if((e.metaKey||e.ctrlKey) && e.key==='Enter') runSql(); });
+
+// ---- nest ----
+async function loadNest(){
+  const n = await api('/nest');
+  const tbl = (title, rows, cols) => rows.length ? `<div class="card" style="margin-bottom:16px"><h3>${title}</h3><div class="scroll" style="max-height:none">${rowsTable(rows.map(r=>Object.fromEntries(cols.map(c=>[c,r[c]]))))}</div></div>` : '';
+  let h = `<div class="grid" style="margin-bottom:16px">
+    <div class="stat"><div class="k">nest</div><div class="v" style="font-size:14px">${esc(n.name)}</div></div>
+    <div class="stat"><div class="k">chain</div><div class="v" style="font-size:14px">${esc(n.chain)} (${n.chain_id})</div></div>
+    <div class="stat"><div class="k">registry hash</div><div class="v" style="font-size:11px">${esc((n.registry_hash||'').slice(0,18))}…</div></div>
+    <div class="stat"><div class="k">tables</div><div class="v">${fmt(n.table_count)}</div></div>
+  </div>`;
+  h += tbl('Contracts', n.contracts||[], ['alias','address']);
+  if((n.templates||[]).length) h += tbl('Templates (RFC-0009)', n.templates, ['name','abi']);
+  if((n.factories||[]).length) h += tbl('Factories', n.factories, ['watch','event','child_param','template']);
+  if((n.webhooks||[]).length) h += tbl('Webhooks', n.webhooks, ['name','table','url','finality']);
+  $('#nestbody').innerHTML = h;
+}
+</script>
+</body>
+</html>

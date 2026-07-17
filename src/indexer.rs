@@ -51,6 +51,7 @@ pub async fn dev(args: DevArgs) -> Result<()> {
         args.backfill,
         args.seal_direct,
         args.concurrency,
+        args.no_admin,
     )
     .await
 }
@@ -67,6 +68,7 @@ pub async fn run(
     backfill: Option<u64>,
     seal_direct: bool,
     concurrency: usize,
+    no_admin: bool,
 ) -> Result<()> {
     let store = Store::open(&dir.join(DB_FILE))?;
     // The decode registry drives all contracts; the indexer decodes every declared event of every
@@ -217,6 +219,31 @@ pub async fn run(
         concurrency,
     ));
 
+    // Admin UI (RFC-0010 Part A): on by default on localhost. Off-localhost it needs an explicit
+    // token (auth is the operator's gateway's job, but the local UI should never appear unguarded on
+    // a public bind); `--no-admin` removes it entirely for hosted deployments.
+    let admin_enabled = !no_admin
+        && (serve::is_localhost(&listen) || std::env::var("NUTHATCH_ADMIN_TOKEN").is_ok());
+    if !no_admin && !admin_enabled {
+        tracing::warn!(
+            "admin UI disabled: bound off-localhost without NUTHATCH_ADMIN_TOKEN set (RFC-0010 Part A)"
+        );
+    }
+    let nest_info = serde_json::json!({
+        "name": config.nest.name,
+        "chain": config.nest.chain,
+        "chain_id": config.nest.chain_id,
+        "registry_hash": format!("0x{}", hex::encode(registry.hash())),
+        "table_count": registry.tables().len(),
+        "contracts": config.contracts.iter()
+            .map(|c| serde_json::json!({ "alias": c.alias, "address": c.address })).collect::<Vec<_>>(),
+        "templates": config.templates,
+        "factories": config.factories,
+        "webhooks": config.webhooks.iter()
+            .map(|w| serde_json::json!({ "name": w.name, "table": w.table, "url": w.url,
+                "finality": w.finality.clone().unwrap_or_else(|| "sealed".into()) })).collect::<Vec<_>>(),
+    });
+
     let app_state = serve::AppState {
         store: store.clone(),
         address: config.primary()?.address.clone(),
@@ -229,6 +256,8 @@ pub async fn run(
         velocity_threshold: velocity_cfg.map(|(amt, _)| amt),
         tables: Arc::new(registry.schema()),
         sql_gate: Arc::new(tokio::sync::Semaphore::new(serve::SQL_MAX_CONCURRENCY)),
+        admin_enabled,
+        nest_info: Arc::new(nest_info),
     };
     serve::run(&listen, app_state).await?;
 

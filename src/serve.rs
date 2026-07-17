@@ -52,6 +52,11 @@ pub struct AppState {
     pub threshold: Option<i128>,
     /// Velocity flag threshold in base units, if configured — the cutoff `/flags?kind=velocity` uses.
     pub velocity_threshold: Option<i128>,
+    /// Whether the built-in admin UI (`/_admin/`) is served (RFC-0010 Part A).
+    pub admin_enabled: bool,
+    /// Static nest metadata for the admin UI's Nest tab (`/nest`): contracts, templates, factories,
+    /// webhooks, registry hash. Computed once at startup.
+    pub nest_info: Arc<serde_json::Value>,
     /// The nest's table schemas (from the decode registry) — the source of truth for `/tables`.
     pub tables: Arc<Vec<TableSchema>>,
     /// Admission control for the analytical (DuckDB) surface: bounds how many `/sql` and cold
@@ -74,6 +79,9 @@ pub async fn run(listen: &str, state: AppState) -> Result<()> {
         .route("/balance/{address}", get(balance))
         .route("/exposure/{address}", get(exposure))
         .route("/flags", get(flags))
+        .route("/nest", get(nest))
+        .route("/_admin", get(admin_index))
+        .route("/_admin/", get(admin_index))
         // Count every served request for `/metrics` (the operator's billing signal).
         .layer(axum::middleware::from_fn(count_request))
         .with_state(state);
@@ -101,8 +109,29 @@ pub async fn run(listen: &str, state: AppState) -> Result<()> {
     Ok(())
 }
 
+/// The built-in admin UI (RFC-0010 Part A) — a single self-contained page, embedded in the binary.
+const ADMIN_HTML: &str = include_str!("admin.html");
+
+/// `GET /_admin/` — serve the admin UI when enabled, else 404 (it's off, or the bind is public with
+/// no token). The page is read-only and talks only to this same-origin API; no external requests.
+async fn admin_index(State(s): State<AppState>) -> impl IntoResponse {
+    if !s.admin_enabled {
+        return (StatusCode::NOT_FOUND, "admin UI disabled").into_response();
+    }
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        ADMIN_HTML,
+    )
+        .into_response()
+}
+
+/// `GET /nest` — static nest metadata for the admin UI's Nest tab (RFC-0010 Part A).
+async fn nest(State(s): State<AppState>) -> impl IntoResponse {
+    Json((*s.nest_info).clone())
+}
+
 /// Whether `listen` binds only the loopback interface.
-fn is_localhost(listen: &str) -> bool {
+pub fn is_localhost(listen: &str) -> bool {
     let host = listen.rsplit_once(':').map(|(h, _)| h).unwrap_or(listen);
     matches!(host, "127.0.0.1" | "::1" | "localhost" | "[::1]")
 }
@@ -536,6 +565,8 @@ mod tests {
             velocity_threshold: None,
             tables: Arc::new(vec![]),
             sql_gate: Arc::new(Semaphore::new(permits)),
+            admin_enabled: true,
+            nest_info: Arc::new(json!({ "name": "t" })),
         }
     }
 
@@ -584,5 +615,42 @@ mod tests {
         .await
         .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// RFC-0010 Part A: the admin UI serves when enabled and 404s when disabled (`--no-admin` or a
+    /// public bind without a token). `/nest` returns the static nest metadata either way.
+    #[tokio::test]
+    async fn admin_ui_gated_and_nest_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path(), SQL_MAX_CONCURRENCY);
+
+        let resp = admin_index(State(state.clone())).await.into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "admin UI served when enabled"
+        );
+
+        state.admin_enabled = false;
+        let resp = admin_index(State(state.clone())).await.into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "admin UI 404s when disabled"
+        );
+
+        let resp = nest(State(state)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn admin_html_is_embedded_and_bounded() {
+        assert!(ADMIN_HTML.contains("<title>nuthatch</title>"));
+        // The RFC-0010 budget: the embedded UI stays well under 150 KB and pulls in nothing external.
+        assert!(ADMIN_HTML.len() < 150 * 1024, "admin UI ≤ 150 KB");
+        assert!(
+            !ADMIN_HTML.contains("http://") && !ADMIN_HTML.contains("https://"),
+            "admin UI makes no external requests (same-origin only)"
+        );
     }
 }

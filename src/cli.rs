@@ -355,4 +355,10 @@ pub struct DevArgs {
     /// Try 8–16 against your own node; keep low on rate-limited public RPC.
     #[arg(long, default_value_t = 1)]
     pub concurrency: usize,
+
+    /// Disable the built-in admin UI (`/_admin/`) entirely — no routes, for hosted deployments that
+    /// front their own dashboard (RFC-0010 Part A). Off-localhost the UI also requires
+    /// `NUTHATCH_ADMIN_TOKEN` to be set, or it self-disables with a log line.
+    #[arg(long)]
+    pub no_admin: bool,
 }
