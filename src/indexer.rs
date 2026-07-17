@@ -90,9 +90,8 @@ pub async fn run(
     // contract in the nest into per-table rows.
     let registry = Arc::new(DecodeRegistry::from_nest(&dir, &config)?);
     let balances = BalanceView::start()?;
-    let exposure = ExposureView::start()?;
-    // Labels (RFC-0008 C1) are the annotation substrate the exposure view joins against. Loaded once
-    // at startup from the content-addressed snapshots under `labels/`; empty when none were imported.
+    // Labels (RFC-0008 C1) are the annotation substrate the exposure view joins against. Loaded before
+    // the exposure view so it only spins up when there's actually something to track.
     let labels = Arc::new(labels::load(&dir));
     if !labels.is_empty() {
         tracing::info!(
@@ -100,6 +99,9 @@ pub async fn run(
             labels.len()
         );
     }
+    // The exposure view joins transfers against the labeled set — with no labels it can only ever be
+    // empty, so don't spend a DBSP circuit + dedicated thread on it (deadlock-review finding L10).
+    let exposure = ExposureView::start(!labels.is_empty())?;
     // Optional live sanctions screening (RFC-0008 C2). Absent unless the nest configures
     // `[screening].lists`; when present, every window's transfers are screened against the pure
     // component and `sanction_hit` annotations are stored + sealed alongside the transfers.
@@ -113,7 +115,8 @@ pub async fn run(
     // (rebuilt on restart like balances/exposure).
     let threshold = config.flags.threshold_amount();
     let velocity_cfg = config.flags.velocity();
-    let velocity = VelocityView::start()?;
+    // Only fed when a velocity flag is configured — skip its circuit + thread otherwise (L10).
+    let velocity = VelocityView::start(velocity_cfg.is_some())?;
     if threshold.is_some() || velocity_cfg.is_some() {
         tracing::info!("flags enabled: threshold={threshold:?}, velocity={velocity_cfg:?}");
     }
@@ -866,6 +869,23 @@ async fn index_loop(
         if next > 0 {
             match detect_reorg(source.as_ref(), &store, next - 1).await {
                 Ok(Some(ancestor)) => {
+                    // A reorg below the sealed watermark is a finality violation this model can't
+                    // repair: the doomed blocks are already in immutable sealed segments (and pruned
+                    // from hot), so the retraction below would be silently incomplete and the sealed
+                    // layer would permanently disagree with the canonical chain. Halt loudly instead
+                    // (deadlock-review finding M6). The `--seal-direct` finality depth / `finalized`
+                    // tag is the contract; if it's being violated, it needs raising for this chain.
+                    let sealed_through = store
+                        .get_meta(SEALED_THROUGH_KEY)?
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    if ancestor < sealed_through {
+                        anyhow::bail!(
+                            "reorg to block {ancestor} is below the sealed/finalized watermark \
+                             {sealed_through} — a finality violation this indexer cannot repair; \
+                             halting. Raise the chain's finality depth."
+                        );
+                    }
                     // Retract the rolled-back transfers from the IVM view *before* dropping them
                     // from the hot store — a reorg is just the same facts re-fed with weight −1.
                     let last_indexed = store
@@ -1098,11 +1118,22 @@ async fn index_loop(
 /// If the checkpoint at `last` is no longer canonical, return the deepest checkpoint that still
 /// is (the common ancestor to roll back to); otherwise None. Returns Some(0) if none survive.
 async fn detect_reorg(source: &dyn Source, store: &Store, last: u64) -> Result<Option<u64>> {
-    let stored = match store.get_block_hash(last)? {
-        Some(h) => h,
-        None => return Ok(None), // no checkpoint here (e.g. cold start) — nothing to verify
+    // Usually `last` itself, but if that boundary's hash couldn't be stored (a transient block_hash
+    // failure at checkpoint time), fall back to the newest checkpoint we *do* have at/below `last`, so
+    // a reorg is still verified against a real checkpoint instead of giving up entirely — the previous
+    // "no hash here → nothing to verify" was a reorg blind spot (deadlock-review finding M7).
+    let (checkpoint, stored) = match store.get_block_hash(last)? {
+        Some(h) => (last, h),
+        None => match store
+            .checkpoints_desc()?
+            .into_iter()
+            .find(|(b, _)| *b <= last)
+        {
+            Some((b, h)) => (b, h),
+            None => return Ok(None), // genuinely no checkpoint yet (cold start)
+        },
     };
-    let canonical = match source.block_hash(last).await? {
+    let canonical = match source.block_hash(checkpoint).await? {
         Some(h) => h,
         None => return Ok(None), // source can't answer right now; try again next tick
     };
@@ -1110,7 +1141,7 @@ async fn detect_reorg(source: &dyn Source, store: &Store, last: u64) -> Result<O
         return Ok(None);
     }
     for (block, hash) in store.checkpoints_desc()? {
-        if block >= last {
+        if block >= checkpoint {
             continue;
         }
         if let Some(canon) = source.block_hash(block).await? {

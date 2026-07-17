@@ -241,9 +241,15 @@ pub struct VelocityView {
 }
 
 impl VelocityView {
-    pub fn start() -> Result<Self> {
+    /// Start the velocity view. When `enabled` is false (no velocity flag configured) the DBSP circuit
+    /// and its worker thread are not spawned — `apply` no-ops and `snapshot` stays empty (L10).
+    pub fn start(enabled: bool) -> Result<Self> {
         let (tx, rx) = channel::<Msg>();
         let rows = Arc::new(RwLock::new(HashMap::new()));
+        if !enabled {
+            drop(rx);
+            return Ok(Self { tx, rows });
+        }
         let shared = rows.clone();
         std::thread::Builder::new()
             .name("nuthatch-velocity".into())
@@ -389,7 +395,7 @@ mod tests {
 
     #[test]
     fn view_thread_serves_after_flush() {
-        let view = VelocityView::start().unwrap();
+        let view = VelocityView::start(true).unwrap();
         view.apply(velocity_deltas("a", 10, 4242, 1, 100));
         view.flush();
         assert_eq!(view.flags(1000)[0].volume, 4242);

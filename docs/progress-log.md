@@ -2,6 +2,21 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-18 - Backfill review M6/M7/M8/L10: reorg halt, checkpoint blind spot, atomic manifest, lazy views.**
+  The medium/low findings. **M6:** a reorg whose common ancestor is *below* the sealed watermark is a
+  finality violation this model can't repair (the doomed blocks are already immutable and pruned from
+  hot) — it now halts loudly instead of silently producing an incomplete retraction and a sealed layer
+  that disagrees with the chain. **M7:** `detect_reorg` gave up ("nothing to verify") when the top
+  boundary had no stored hash (a transient `block_hash` failure at checkpoint time), a reorg blind spot;
+  it now falls back to the newest checkpoint it *does* have. **M8:** the segment manifest — the
+  catalogue a `kill -9`-survivable binary lives or dies by — was written in place, so a crash mid-write
+  orphaned every `.parquet`; now written to a temp file and atomically `rename`d over. **L10:** the
+  exposure and velocity IVM views spun up a DBSP circuit + dedicated thread for *every* nest, even ones
+  with no labels / no velocity flag; `start(enabled)` now skips the circuit + thread when the nest can't
+  feed it (apply no-ops, snapshot stays empty) — real relief on the ≤2 GB budget for a plain nest.
+  122 tests, clippy clean. (The one remaining review finding, M5 — batch the per-row redb fsyncs and
+  move seal/DuckDB work off the async workers — is a bigger perf refactor, deferred to its own slice.)
+
 - **2026-07-17 - Backfill review H2/H3/H4: timestamp retry, pipelined shrink-retry, livelock floor.**
   The next batch of the deadlock-review findings, all "a transient hiccup quietly corrupts or hangs".
   **H4:** a whole-batch `block_timestamps` failure was `unwrap_or_default()`ed into an all-zeros map and

@@ -285,9 +285,16 @@ pub struct ExposureView {
 }
 
 impl ExposureView {
-    pub fn start() -> Result<Self> {
+    /// Start the exposure view. When `enabled` is false (a nest with no labels) the DBSP circuit and
+    /// its worker thread are *not* spawned — `apply` becomes a silent no-op (its send finds no
+    /// receiver) and `snapshot` stays empty, so an unused view costs nothing (L10).
+    pub fn start(enabled: bool) -> Result<Self> {
         let (tx, rx) = channel::<Msg>();
         let rows = Arc::new(RwLock::new(HashMap::new()));
+        if !enabled {
+            drop(rx);
+            return Ok(Self { tx, rows });
+        }
         let shared = rows.clone();
         std::thread::Builder::new()
             .name("nuthatch-exposure".into())
@@ -518,7 +525,7 @@ mod tests {
     #[test]
     fn view_thread_serves_after_flush() {
         let labels = labelset(&[("0xmixer", "mixer")]);
-        let view = ExposureView::start().unwrap();
+        let view = ExposureView::start(true).unwrap();
         view.apply(exposure_deltas("0xalice", "0xmixer", 42, 1, &labels));
         view.flush();
         let rows = view.exposure("0xalice");

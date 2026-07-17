@@ -188,7 +188,15 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest> {
 
 fn save_manifest(dir: &Path, manifest: &Manifest) -> Result<()> {
     let raw = serde_json::to_string_pretty(manifest)?;
-    std::fs::write(manifest_path(dir), raw).context("failed to write manifest")?;
+    // The manifest is the segment catalogue — the crown jewels of a `kill -9`-survivable single binary
+    // (a half-written `manifest.json` orphans every otherwise-fine `.parquet` and fails all cold reads,
+    // deadlock-review finding M8). Write a sibling temp file then rename it over the target: `rename`
+    // is atomic on the same filesystem, so a reader/crash sees either the old manifest or the new one,
+    // never a torn one.
+    let path = manifest_path(dir);
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, raw).context("failed to write manifest temp")?;
+    std::fs::rename(&tmp, &path).context("failed to install manifest")?;
     Ok(())
 }
 
