@@ -11,6 +11,7 @@ use crate::chunker::{self, AdaptiveWindow};
 use crate::cli::DevArgs;
 use crate::config::{Config, DB_FILE};
 use crate::exposure::{self, ExposureView};
+use crate::factory::{ChildRegistry, FactorySet};
 use crate::labels::{self, LabelSet};
 use crate::metrics::METRICS;
 use crate::registry::DecodeRegistry;
@@ -118,12 +119,34 @@ pub async fn run(
         }
     }
 
-    // The combined `eth_getLogs` filter: all contract addresses, matching any registered topic0.
-    let addresses: Vec<String> = registry
-        .addresses()
-        .iter()
-        .map(|a| format!("0x{}", hex::encode(a)))
-        .collect();
+    // Factory rules (RFC-0009): validated at load. A factory nest discovers child contracts at
+    // runtime, so the tip loop fetches topic0-only (empty address filter) — a child created and
+    // traded in the same block is then already in hand, no extra RPC.
+    let factory = {
+        let fs = FactorySet::build(&config)?;
+        if fs.is_empty() {
+            None
+        } else {
+            tracing::info!(
+                "factory nest: {} template(s), {} rule(s) — topic0-only tip fetch, children discovered at runtime",
+                config.templates.len(),
+                config.factories.len()
+            );
+            Some(Arc::new(fs))
+        }
+    };
+
+    // The combined `eth_getLogs` filter: contract addresses (empty for a factory nest → topic0-only),
+    // matching any registered topic0 (contract + template events).
+    let addresses: Vec<String> = if factory.is_some() {
+        Vec::new()
+    } else {
+        registry
+            .addresses()
+            .iter()
+            .map(|a| format!("0x{}", hex::encode(a)))
+            .collect()
+    };
     let topic0s: Vec<String> = registry
         .topic0s()
         .iter()
@@ -180,6 +203,7 @@ pub async fn run(
         threshold,
         velocity_cfg,
         router.clone(),
+        factory.clone(),
         finality,
         window,
         seal_direct,
@@ -388,11 +412,31 @@ async fn index_loop(
     threshold: Option<i128>,
     velocity_cfg: Option<(i128, u64)>,
     router: Arc<AlertRouter>,
+    factory: Option<Arc<FactorySet>>,
     finality: Finality,
     window: u64,
     seal_direct: bool,
     concurrency: usize,
 ) -> Result<()> {
+    // The discovered-child registry (RFC-0009). Empty for a static nest; for a factory nest it is
+    // rebuilt from stored factory events on a warm restart (a pure fold — determinism preserved) and
+    // grown inline as the loop decodes new factory events.
+    let mut children = ChildRegistry::new();
+    if let Some(fs) = factory.as_deref() {
+        if store.get_meta(LAST_BLOCK_KEY)?.is_some() {
+            children = rebuild_children(&dir, &store, &registry, fs);
+            if !children.is_empty() {
+                tracing::info!(
+                    "rebuilt child registry: {} discovered child contract(s)",
+                    children.len()
+                );
+            }
+        }
+    }
+    // Factory backfill efficiency (topic0-only over deep ranges) lands in RFC-0009 steps 3–4; until
+    // then a factory nest uses the tip loop, so seal-direct's address-filtered fast path is disabled.
+    let seal_direct = seal_direct && factory.is_none();
+
     // Phase 0 (cold start, `--seal-direct`): fast-seal the finalized history straight to Parquet,
     // bypassing the hot store, then rebuild the IVM view from those segments. The tip-following loop
     // below picks up from where this left off and handles the near-tip (un-finalized) window the
@@ -490,6 +534,14 @@ async fn index_loop(
                     if let Some((_, w)) = velocity_cfg {
                         velocity.apply(velocity_retraction_batch(&doomed, &registry, w));
                     }
+                    // Drop children whose announcing factory event was rolled back (RFC-0009): the
+                    // registry state at B is a pure fold over factory events ≤ B.
+                    if factory.is_some() {
+                        let dropped = children.rollback_to(ancestor);
+                        if dropped > 0 {
+                            tracing::warn!("reorg: dropped {dropped} discovered child contract(s)");
+                        }
+                    }
                     // Fire a `flag_retracted` alert for every rolled-back annotation a sink watches —
                     // a consumer that acted on a flag learns the chain took it back (RFC-0008 C5).
                     if !router.is_empty() {
@@ -533,20 +585,10 @@ async fn index_loop(
         match source.logs(&addresses, &topic0s, next, to).await {
             Ok(logs) => {
                 chunker.observed(logs.len() as u64);
-                // Decode first so we know which blocks actually produced rows, then fetch just those
-                // blocks' timestamps in one batch (cheap even for a dense window) and stamp each row.
-                let mut rows: Vec<_> = logs
-                    .iter()
-                    .filter_map(|log| match registry.decode(log) {
-                        Ok(Some(r)) => Some(r),
-                        Ok(None) => None,
-                        Err(e) => {
-                            tracing::debug!("decode skipped: {e:#}");
-                            None
-                        }
-                    })
-                    .collect();
-                let mut blocks: Vec<u64> = rows.iter().map(|r| r.block_number).collect();
+                // Fetch timestamps for the blocks these logs touch, then decode in chain order so
+                // factory discovery is inline: a child created at log i is in the registry before its
+                // own activity at log j>i in the same window decodes (RFC-0009 same-block handling).
+                let mut blocks: Vec<u64> = logs.iter().map(|l| l.block_number).collect();
                 blocks.sort_unstable();
                 blocks.dedup();
                 let timestamps = match source.block_timestamps(&blocks).await {
@@ -556,6 +598,13 @@ async fn index_loop(
                         std::collections::HashMap::new()
                     }
                 };
+                let mut rows = decode_window(
+                    &registry,
+                    factory.as_deref(),
+                    &mut children,
+                    &logs,
+                    &timestamps,
+                );
 
                 let mut stored = 0usize;
                 let mut deltas = Vec::new();
@@ -564,7 +613,6 @@ async fn index_loop(
                 // Transfers to screen this window (only collected when screening is on).
                 let mut to_screen: Vec<TransferRow> = Vec::new();
                 for row in &mut rows {
-                    row.block_timestamp = timestamps.get(&row.block_number).copied().unwrap_or(0);
                     let key = Store::entity_key(row.block_number, row.log_index);
                     // Feed the IVM balance + exposure views for transfer rows (extracted before storing).
                     if let Some((from, to_addr, value, _hex)) = row.erc20_transfer_fields() {
@@ -1110,6 +1158,111 @@ fn rebuild_velocity(
     Ok(())
 }
 
+/// Decode a window's logs in chain order (block, log_index), routing each to a contract decoder or —
+/// for a factory nest — a discovered child's template decoder, and discovering new children inline so
+/// same-window child activity decodes (RFC-0009). Each row is stamped with its block timestamp before
+/// discovery so a child's `discovered_timestamp` is exact. Pure aside from growing `children`.
+fn decode_window(
+    registry: &DecodeRegistry,
+    factory: Option<&FactorySet>,
+    children: &mut ChildRegistry,
+    logs: &[crate::rpc::Log],
+    timestamps: &std::collections::HashMap<u64, u64>,
+) -> Vec<crate::registry::DecodedRow> {
+    let mut ordered: Vec<&crate::rpc::Log> = logs.iter().collect();
+    ordered.sort_by(|a, b| {
+        a.block_number
+            .cmp(&b.block_number)
+            .then_with(|| a.log_index.cmp(&b.log_index))
+    });
+
+    let mut rows = Vec::new();
+    for log in ordered {
+        let decoded = match registry.decode(log) {
+            Ok(Some(r)) => Some(r),
+            Ok(None) => {
+                // Not a contract event — route to a discovered child's template decoder, if any.
+                factory.and_then(|_| {
+                    let addr = log.address.to_ascii_lowercase();
+                    children
+                        .template_of(&addr)
+                        .map(str::to_string)
+                        .and_then(|tmpl| registry.decode_child(log, &tmpl).ok().flatten())
+                })
+            }
+            Err(e) => {
+                tracing::debug!("decode skipped: {e:#}");
+                None
+            }
+        };
+        if let Some(mut r) = decoded {
+            r.block_timestamp = timestamps.get(&r.block_number).copied().unwrap_or(0);
+            if let Some(fs) = factory {
+                if let Some(child) = fs.discover(&r) {
+                    if children.insert(child.clone()) {
+                        tracing::info!(
+                            "factory discovered {} child {}… at block {}",
+                            child.template,
+                            &child.address[..12.min(child.address.len())],
+                            child.discovered_block
+                        );
+                    }
+                }
+            }
+            rows.push(r);
+        }
+    }
+    rows
+}
+
+/// Rebuild the discovered-child registry on a warm restart by folding the stored factory events
+/// (RFC-0009). Cold (sealed) and hot factory-event rows are read as JSON and re-discovered — a pure
+/// fold, so the reconstructed registry is identical to the one grown live. Best-effort per table.
+fn rebuild_children(
+    dir: &std::path::Path,
+    store: &Store,
+    _registry: &DecodeRegistry,
+    factory: &FactorySet,
+) -> ChildRegistry {
+    let mut children = ChildRegistry::new();
+    // Fold in block order so the earliest discovery of each child wins (matches the live path).
+    for table in factory.factory_tables() {
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        // Cold (sealed) rows via DuckDB, then hot (un-sealed) rows from the store; a table with no
+        // sealed segment yet just yields nothing cold.
+        if let Ok(cold) = crate::analytics::query(dir, &format!("SELECT * FROM \"{table}\"")) {
+            rows.extend(cold);
+        }
+        for raw in store
+            .recent_by_table(&table, usize::MAX)
+            .unwrap_or_default()
+        {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                rows.push(v);
+            }
+        }
+        rows.sort_by(|a, b| {
+            let key = |v: &serde_json::Value| {
+                (
+                    v.get("block_number")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                    v.get("log_index")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                )
+            };
+            key(a).cmp(&key(b))
+        });
+        for v in &rows {
+            if let Some(child) = factory.discover_stored(&table, v) {
+                children.insert(child);
+            }
+        }
+    }
+    children
+}
+
 async fn sleep_secs(s: u64) {
     tokio::time::sleep(std::time::Duration::from_secs(s)).await;
 }
@@ -1117,6 +1270,120 @@ async fn sleep_secs(s: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC-0009 step 2 gate: a child created and active in the *same* window is decoded — the
+    /// factory's `PoolCreated` (log 0) discovers the pool, so the pool's `Swap` (log 1) routes to the
+    /// template decoder in one in-order pass, no extra RPC. Verifies both rows and the child registry.
+    #[test]
+    fn factory_same_block_discovery_and_child_decode() {
+        use crate::registry::{ContractSpec, DecodeRegistry, TemplateSpec};
+        use crate::rpc::Log;
+
+        let factory_abi = serde_json::from_str(
+            r#"[{"type":"event","name":"PoolCreated","anonymous":false,"inputs":[{"name":"pool","type":"address","indexed":false}]}]"#,
+        )
+        .unwrap();
+        let pool_abi = serde_json::from_str(
+            r#"[{"type":"event","name":"Swap","anonymous":false,"inputs":[{"name":"amount","type":"uint256","indexed":false}]}]"#,
+        )
+        .unwrap();
+        let factory_addr = "0x1111111111111111111111111111111111111111";
+        let pool_addr = "0x2222222222222222222222222222222222222222";
+
+        let reg = DecodeRegistry::build_with_templates(
+            vec![ContractSpec {
+                alias: "factory".into(),
+                address: factory_addr.parse().unwrap(),
+                abi: factory_abi,
+            }],
+            vec![TemplateSpec {
+                name: "pool".into(),
+                abi: pool_abi,
+            }],
+        )
+        .unwrap();
+        let topic0 = |table: &str| {
+            format!(
+                "0x{}",
+                hex::encode(
+                    reg.tables()
+                        .iter()
+                        .find(|d| d.table == table)
+                        .unwrap()
+                        .topic0
+                )
+            )
+        };
+
+        let config: Config = toml::from_str(
+            r#"
+[nest]
+name = "t"
+chain = "mainnet"
+chain_id = 1
+rpc_urls = ["https://rpc"]
+[[contracts]]
+alias = "factory"
+address = "0x1111111111111111111111111111111111111111"
+abi = "abis/f.json"
+[[templates]]
+name = "pool"
+abi = "abis/p.json"
+[[factories]]
+watch = "factory"
+event = "PoolCreated"
+child_param = "pool"
+template = "pool"
+"#,
+        )
+        .unwrap();
+        let fs = FactorySet::build(&config).unwrap();
+
+        // PoolCreated(pool) at log 0, then the pool's Swap(500) at log 1 — same block.
+        let logs = vec![
+            Log {
+                address: factory_addr.into(),
+                topics: vec![topic0("factory__pool_created")],
+                data: format!("0x{:0>64}", pool_addr.trim_start_matches("0x")),
+                block_number: 100,
+                block_hash: "0xbh".into(),
+                tx_hash: "0xt1".into(),
+                log_index: 0,
+            },
+            Log {
+                address: pool_addr.into(),
+                topics: vec![topic0("pool__swap")],
+                data: format!("0x{:064x}", 500u64),
+                block_number: 100,
+                block_hash: "0xbh".into(),
+                tx_hash: "0xt2".into(),
+                log_index: 1,
+            },
+        ];
+
+        let mut children = ChildRegistry::new();
+        let ts = std::collections::HashMap::from([(100u64, 1_700_000_000u64)]);
+        let rows = decode_window(&reg, Some(&fs), &mut children, &logs, &ts);
+
+        assert_eq!(
+            rows.len(),
+            2,
+            "both the factory event and the child event decoded"
+        );
+        assert_eq!(rows[0].table, "factory__pool_created");
+        assert_eq!(
+            rows[1].table, "pool__swap",
+            "same-block child activity routed to the template"
+        );
+        assert_eq!(
+            rows[1].address, pool_addr,
+            "child row carries the child address"
+        );
+        assert!(children.contains(pool_addr), "the pool was discovered");
+        assert_eq!(children.template_of(pool_addr), Some("pool"));
+        // The child registry rolls the pool back on a reorg to before its creation block.
+        assert_eq!(children.clone().rollback_to(99), 1);
+    }
 
     #[test]
     fn cold_start_origin_policy() {

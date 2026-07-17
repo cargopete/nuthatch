@@ -151,6 +151,46 @@ impl FactorySet {
         &self.template_names
     }
 
+    /// The announcing table names (`{watch}__{event}`) — the tables to fold on a restart rebuild.
+    pub fn factory_tables(&self) -> Vec<String> {
+        self.rules.keys().cloned().collect()
+    }
+
+    /// Discover a child from a *stored* factory-event row (JSON), for the warm-restart rebuild. Same
+    /// semantics as [`discover`] but reading the persisted columns rather than a live `DecodedRow`.
+    pub fn discover_stored(&self, table: &str, row: &serde_json::Value) -> Option<ChildEntry> {
+        let rule = self.rules.get(table)?;
+        let block = row.get("block_number")?.as_u64()?;
+        if let Some(start) = rule.start {
+            if block < start {
+                return None;
+            }
+        }
+        let address = row.get(&rule.child_param)?.as_str()?.to_ascii_lowercase();
+        if !address.starts_with("0x") || address.len() != 42 {
+            return None;
+        }
+        Some(ChildEntry {
+            template: rule.template.clone(),
+            address,
+            discovered_block: block,
+            discovered_log_index: row
+                .get("log_index")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            discovered_timestamp: row
+                .get("block_timestamp")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            parent_address: row
+                .get("address")
+                .and_then(|a| a.as_str())
+                .unwrap_or("")
+                .to_string(),
+            depth: rule.watch_depth + 1,
+        })
+    }
+
     /// If `row` is a factory-announcement event, the child contract it discovers — else `None`. A
     /// pure function of the decoded row and the rule set (the fold step the registry is built from).
     pub fn discover(&self, row: &DecodedRow) -> Option<ChildEntry> {

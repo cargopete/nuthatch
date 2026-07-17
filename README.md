@@ -106,6 +106,21 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-16 — RFC-0009 step 2: factory tip regime — it indexes Uniswap.** Dynamic child contracts
+  are now decoded live. The decode registry gains **template decoders** (`registry.rs`: topic0-keyed,
+  address-agnostic, matched against the runtime child registry not a fixed address; `decode_child`,
+  `topic0s`/`tables`/`schema`/`registry_hash` all include templates). A factory nest fetches
+  **topic0-only** (empty address filter — `get_logs` now omits the field when empty), so a child
+  created *and* active in the same block is already in hand: the tip loop decodes each window in chain
+  order (`decode_window`), routing each log to a contract decoder or a discovered child's template
+  decoder, and **discovering new children inline** so same-window child activity decodes with no extra
+  RPC. Reorg drops children whose factory event rolled back; a warm restart rebuilds the child registry
+  by folding stored factory events (`rebuild_children` — a pure fold, determinism preserved).
+  `--seal-direct` is disabled for factory nests until the efficient factory backfill lands (steps 3–4).
+  **Gate met:** hermetic same-block test (factory `PoolCreated` at log 0 → pool `Swap` at log 1 in one
+  window → both decoded, child discovered + reorg-rolled-back). Verified **live on Uniswap V3**: 44
+  pools discovered from real `PoolCreated` events, **45 child swaps decoded** into `pool__swap` (a
+  discovered pool's swaps routed to the shared template table). 102 tests green (+1), clippy clean.
 - **2026-07-16 — RFC-0009 step 1: factory schema + the dynamic child registry.** The foundation for
   Uniswap-class dynamic contract discovery (a factory event announces a child contract, indexed under a
   template). New `[[templates]]` (name + ABI) and `[[factories]]` (`watch`/`event`/`child_param`/

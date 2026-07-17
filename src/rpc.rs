@@ -210,7 +210,12 @@ impl RpcClient {
         to: u64,
     ) -> Result<Vec<Log>> {
         let mut filter = serde_json::Map::new();
-        filter.insert("address".into(), json!(addresses));
+        // An empty address list means "no address filter" (topic0-only) — the factory tip regime
+        // (RFC-0009 §3) fetches this way so a child created and active in the same block is already in
+        // hand. Sending `"address": []` would instead match nothing, so omit the field when empty.
+        if !addresses.is_empty() {
+            filter.insert("address".into(), json!(addresses));
+        }
         if !topic0s.is_empty() {
             filter.insert("topics".into(), json!([topic0s]));
         }

@@ -372,9 +372,20 @@ pub struct ContractSpec {
     pub abi: JsonAbi,
 }
 
+/// A template (RFC-0009): an ABI applied to contracts discovered at runtime rather than a fixed
+/// address. Its decoders are keyed by topic0 but matched against the child registry, not an address.
+pub struct TemplateSpec {
+    pub name: String,
+    pub abi: JsonAbi,
+}
+
 /// The immutable per-nest decode registry.
 pub struct DecodeRegistry {
+    /// Contract decoders — matched by (topic0, emitting address ∈ the contract's fixed address).
     by_topic0: HashMap<B256, Vec<EventDecoder>>,
+    /// Template decoders (RFC-0009) — matched by (topic0, template name) against the runtime child
+    /// registry. Address-agnostic: one set of tables shared across every discovered child.
+    templates_by_topic0: HashMap<B256, Vec<EventDecoder>>,
     hash: [u8; 32],
     skipped_anonymous: usize,
 }
@@ -395,40 +406,49 @@ impl DecodeRegistry {
                 abi,
             });
         }
-        Self::build(specs)
+        // Template ABIs (RFC-0009): loaded the same way, keyed by template name (not an address).
+        let mut templates = Vec::with_capacity(config.templates.len());
+        for t in &config.templates {
+            let abi_path = dir.join(&t.abi);
+            let raw = std::fs::read_to_string(&abi_path)
+                .with_context(|| format!("reading template ABI {}", abi_path.display()))?;
+            let abi: JsonAbi = serde_json::from_str(&raw)
+                .with_context(|| format!("parsing template ABI {}", abi_path.display()))?;
+            templates.push(TemplateSpec {
+                name: t.name.clone(),
+                abi,
+            });
+        }
+        Self::build_with_templates(specs, templates)
     }
 
     pub fn build(contracts: Vec<ContractSpec>) -> Result<DecodeRegistry> {
+        Self::build_with_templates(contracts, Vec::new())
+    }
+
+    pub fn build_with_templates(
+        contracts: Vec<ContractSpec>,
+        templates: Vec<TemplateSpec>,
+    ) -> Result<DecodeRegistry> {
         let mut by_topic0: HashMap<B256, Vec<EventDecoder>> = HashMap::new();
         let mut skipped_anonymous = 0usize;
 
         for c in &contracts {
-            // Detect overloaded event names within this contract for table disambiguation.
-            let mut name_counts: HashMap<String, usize> = HashMap::new();
-            for ev in c.abi.events() {
-                if ev.anonymous {
-                    continue;
-                }
-                *name_counts.entry(snake_case(&ev.name)).or_default() += 1;
-            }
-            for ev in c.abi.events() {
-                if ev.anonymous {
-                    skipped_anonymous += 1;
-                    continue;
-                }
-                let mut dec = EventDecoder::new(&c.alias, c.address, ev.clone());
-                if name_counts.get(&snake_case(&ev.name)).copied().unwrap_or(0) > 1 {
-                    // Overload: append a 4-hex topic0 suffix.
-                    let t0 = hex::encode(dec.topic0);
-                    dec.table = format!("{}_{}", dec.table, &t0[..4]);
-                }
-                by_topic0.entry(dec.topic0).or_default().push(dec);
-            }
+            skipped_anonymous += register_events(&mut by_topic0, &c.alias, c.address, &c.abi);
         }
 
-        let hash = registry_hash(&by_topic0);
+        // Template decoders share the same machinery; their contract address is unused (ZERO) — they
+        // are matched by template name against the runtime child registry, not by address.
+        let mut templates_by_topic0: HashMap<B256, Vec<EventDecoder>> = HashMap::new();
+        for t in &templates {
+            skipped_anonymous +=
+                register_events(&mut templates_by_topic0, &t.name, Address::ZERO, &t.abi);
+        }
+
+        let hash = registry_hash(&by_topic0, &templates_by_topic0);
         Ok(DecodeRegistry {
             by_topic0,
+            templates_by_topic0,
             hash,
             skipped_anonymous,
         })
@@ -442,9 +462,23 @@ impl DecodeRegistry {
         self.skipped_anonymous
     }
 
-    /// All topic0s to request in a combined `eth_getLogs` filter.
+    /// All topic0s to request in a combined `eth_getLogs` filter — contract *and* template events,
+    /// so a factory nest's topic0-only tip fetch (RFC-0009) captures children's logs too.
     pub fn topic0s(&self) -> Vec<B256> {
-        self.by_topic0.keys().copied().collect()
+        let mut set: Vec<B256> = self
+            .by_topic0
+            .keys()
+            .chain(self.templates_by_topic0.keys())
+            .copied()
+            .collect();
+        set.sort();
+        set.dedup();
+        set
+    }
+
+    /// True if this nest declares any templates (i.e. is a factory nest).
+    pub fn has_templates(&self) -> bool {
+        !self.templates_by_topic0.is_empty()
     }
 
     /// All contract addresses to request in a combined filter.
@@ -460,9 +494,14 @@ impl DecodeRegistry {
         set
     }
 
-    /// Every table this registry produces, with its columns (for schema generation).
+    /// Every table this registry produces (contract and template), with its columns.
     pub fn tables(&self) -> Vec<&EventDecoder> {
-        let mut v: Vec<&EventDecoder> = self.by_topic0.values().flatten().collect();
+        let mut v: Vec<&EventDecoder> = self
+            .by_topic0
+            .values()
+            .flatten()
+            .chain(self.templates_by_topic0.values().flatten())
+            .collect();
         v.sort_by(|a, b| a.table.cmp(&b.table));
         v
     }
@@ -491,56 +530,81 @@ impl DecodeRegistry {
             .collect()
     }
 
-    /// Decode a log. Returns None if no decoder matches (topic0 + emitting address).
+    /// Decode a log against the contract decoders. Returns None if no decoder matches (topic0 +
+    /// emitting address). Factory children are decoded separately via [`decode_child`].
     pub fn decode(&self, log: &Log) -> Result<Option<DecodedRow>> {
         let Some(t0_str) = log.topics.first() else {
             return Ok(None);
         };
         let topic0 = parse_b256(t0_str)?;
+        let emitter = parse_address(&log.address)?;
         let Some(decoders) = self.by_topic0.get(&topic0) else {
             return Ok(None);
         };
-        let emitter = parse_address(&log.address)?;
         // Contract-specific decoders first (Allium ordering; a future generic fallback appends).
         let Some(dec) = decoders.iter().find(|d| d.contract == emitter) else {
             return Ok(None);
         };
-
-        let topics: Vec<B256> = log
-            .topics
-            .iter()
-            .map(|t| parse_b256(t))
-            .collect::<Result<_>>()?;
-        let data = parse_bytes(&log.data)?;
-        let decoded = dec
-            .event
-            .decode_log_parts(topics.iter().copied(), &data)
-            .map_err(|e| anyhow!("decode {}: {e}", dec.signature))?;
-
-        let mut indexed = decoded.indexed.iter();
-        let mut body = decoded.body.iter();
-        let mut params = Vec::with_capacity(dec.columns.len());
-        for col in &dec.columns {
-            let dv = if col.indexed {
-                indexed.next()
-            } else {
-                body.next()
-            }
-            .ok_or_else(|| anyhow!("param count mismatch decoding {}", dec.signature))?;
-            params.push((col.name.clone(), value_from_dynsol(dv, col)));
-        }
-
-        Ok(Some(DecodedRow {
-            table: dec.table.clone(),
-            params,
-            block_number: log.block_number,
-            block_hash: log.block_hash.clone(),
-            block_timestamp: 0, // filled by the indexer from the block header (see index_loop)
-            log_index: log.log_index,
-            tx_hash: log.tx_hash.clone(),
-            address: format!("0x{}", hex::encode(emitter)),
-        }))
+        Ok(Some(build_row(dec, log, emitter)?))
     }
+
+    /// Decode a log emitted by a discovered child under `template` (RFC-0009). The caller has already
+    /// confirmed the log's address is in the child registry for this template; here we match the
+    /// event by topic0 within that template's decoders. Rows land in the shared `{template}__{event}`
+    /// table, distinguished by the implicit `address` column.
+    pub fn decode_child(&self, log: &Log, template: &str) -> Result<Option<DecodedRow>> {
+        let Some(t0_str) = log.topics.first() else {
+            return Ok(None);
+        };
+        let topic0 = parse_b256(t0_str)?;
+        let Some(decoders) = self.templates_by_topic0.get(&topic0) else {
+            return Ok(None);
+        };
+        let Some(dec) = decoders.iter().find(|d| d.alias == template) else {
+            return Ok(None);
+        };
+        let emitter = parse_address(&log.address)?;
+        Ok(Some(build_row(dec, log, emitter)?))
+    }
+}
+
+/// Decode a log's params against a matched decoder into a [`DecodedRow`]. Shared by contract and
+/// template decode; the emitter address is recorded so template rows are per-child distinguishable.
+fn build_row(dec: &EventDecoder, log: &Log, emitter: Address) -> Result<DecodedRow> {
+    let topics: Vec<B256> = log
+        .topics
+        .iter()
+        .map(|t| parse_b256(t))
+        .collect::<Result<_>>()?;
+    let data = parse_bytes(&log.data)?;
+    let decoded = dec
+        .event
+        .decode_log_parts(topics.iter().copied(), &data)
+        .map_err(|e| anyhow!("decode {}: {e}", dec.signature))?;
+
+    let mut indexed = decoded.indexed.iter();
+    let mut body = decoded.body.iter();
+    let mut params = Vec::with_capacity(dec.columns.len());
+    for col in &dec.columns {
+        let dv = if col.indexed {
+            indexed.next()
+        } else {
+            body.next()
+        }
+        .ok_or_else(|| anyhow!("param count mismatch decoding {}", dec.signature))?;
+        params.push((col.name.clone(), value_from_dynsol(dv, col)));
+    }
+
+    Ok(DecodedRow {
+        table: dec.table.clone(),
+        params,
+        block_number: log.block_number,
+        block_hash: log.block_hash.clone(),
+        block_timestamp: 0, // filled by the indexer from the block header (see index_loop)
+        log_index: log.log_index,
+        tx_hash: log.tx_hash.clone(),
+        address: format!("0x{}", hex::encode(emitter)),
+    })
 }
 
 fn value_from_dynsol(dv: &DynSolValue, col: &Column) -> Value {
@@ -596,27 +660,61 @@ fn dynsol_to_json(dv: &DynSolValue) -> Json {
     }
 }
 
-/// sha256 over a canonical serialization of the registry (deterministic, order-independent).
-fn registry_hash(by_topic0: &HashMap<B256, Vec<EventDecoder>>) -> [u8; 32] {
-    let mut lines: Vec<String> = by_topic0
-        .values()
-        .flatten()
-        .map(|d| {
-            let cols: Vec<String> = d
-                .columns
-                .iter()
-                .map(|c| format!("{}:{}:{}", c.name, c.sol_type, c.kind.as_str()))
-                .collect();
-            format!(
-                "{}|0x{}|0x{}|{}|{}",
-                d.alias,
-                hex::encode(d.contract),
-                hex::encode(d.topic0),
-                d.signature,
-                cols.join(",")
-            )
-        })
-        .collect();
+/// Register every (non-anonymous) event of one ABI into `map` under `alias` (a contract alias or a
+/// template name) with `address` (a fixed contract address, or `Address::ZERO` for a template).
+/// Overloaded event names get a 4-hex topic0 table suffix. Returns the anonymous-event skip count.
+fn register_events(
+    map: &mut HashMap<B256, Vec<EventDecoder>>,
+    alias: &str,
+    address: Address,
+    abi: &JsonAbi,
+) -> usize {
+    let mut skipped = 0usize;
+    let mut name_counts: HashMap<String, usize> = HashMap::new();
+    for ev in abi.events() {
+        if ev.anonymous {
+            continue;
+        }
+        *name_counts.entry(snake_case(&ev.name)).or_default() += 1;
+    }
+    for ev in abi.events() {
+        if ev.anonymous {
+            skipped += 1;
+            continue;
+        }
+        let mut dec = EventDecoder::new(alias, address, ev.clone());
+        if name_counts.get(&snake_case(&ev.name)).copied().unwrap_or(0) > 1 {
+            let t0 = hex::encode(dec.topic0);
+            dec.table = format!("{}_{}", dec.table, &t0[..4]);
+        }
+        map.entry(dec.topic0).or_default().push(dec);
+    }
+    skipped
+}
+
+/// sha256 over a canonical serialization of the registry (deterministic, order-independent). Includes
+/// template decoders (RFC-0009) so a factory nest's data model is content-addressed too.
+fn registry_hash(
+    by_topic0: &HashMap<B256, Vec<EventDecoder>>,
+    templates_by_topic0: &HashMap<B256, Vec<EventDecoder>>,
+) -> [u8; 32] {
+    let line = |d: &EventDecoder, kind: &str| {
+        let cols: Vec<String> = d
+            .columns
+            .iter()
+            .map(|c| format!("{}:{}:{}", c.name, c.sol_type, c.kind.as_str()))
+            .collect();
+        format!(
+            "{kind}|{}|0x{}|0x{}|{}|{}",
+            d.alias,
+            hex::encode(d.contract),
+            hex::encode(d.topic0),
+            d.signature,
+            cols.join(",")
+        )
+    };
+    let mut lines: Vec<String> = by_topic0.values().flatten().map(|d| line(d, "c")).collect();
+    lines.extend(templates_by_topic0.values().flatten().map(|d| line(d, "t")));
     lines.sort();
     Sha256::digest(lines.join("\n").as_bytes()).into()
 }
