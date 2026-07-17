@@ -2,6 +2,14 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-17 - Release v0.2.0.** Cuts a current release (v0.1.0 predated everything from RFC-0008
+  onward). Since 0.1.0: the compliance pack (RFC-0008, screening/flags/alerts/effectful stages/signed
+  manifest/audit), factories & dynamic discovery (RFC-0009, "it indexes Uniswap"), the admin UI +
+  user webhooks + HMAC-signed egress (RFC-0010), and the per-contract event allowlist (RFC-0011). The
+  release job builds `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin` binaries. Cut because the
+  first real deployment (serving Lodestar's delegation-events feed from a nest on the Helsinki box)
+  should point only at a released build, per RFC-0011 §5.
+
 - **2026-07-17 - RFC-0011 kickoff: the per-contract event allowlist (the blocking core amendment).**
   RFC-0011 (the graph-network nest + Lodestar migration) is mostly cross-repo work, but it forces one
   small change on RFC-0001 that blocks everything else: a per-contract `events = ["Transfer", ...]`

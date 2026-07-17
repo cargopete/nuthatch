@@ -10,3 +10,6 @@ nuthatch.toml
 
 # guest component build dirs (the staged component .wasm at components/*.wasm IS committed)
 components/*/target
+
+# local smoke-test nest (scripts/try-nuthatch.sh)
+nuthatch-trial/
