@@ -2,6 +2,17 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-17 - `--window` override for sparse-contract backfills (RFC-0004 follow-up), release v0.2.1.**
+  The static seal-direct backfill uses a fixed `eth_getLogs` block-window (the chain default, e.g. 2000
+  on Arbitrum) - fine for a dense contract, but for a *sparse* one over a long range it means tens of
+  thousands of near-empty requests. Backfilling 12 months of Graph GNS `SubgraphPublished` events (for
+  Lodestar's developer-activity panel) at the 2000 default was ~62,000 requests / ~100 min; with
+  `--window 50000` it's ~2,500 requests / **~4 min**, same 3,411 events. So `dev` gains a `--window`
+  flag that overrides the chain default (a zero is ignored). Small, principled, and it's the same wall
+  the eventual full graph-network-nest (RFC-0011) would hit. **Gate met:** `effective_window` unit test
+  (override wins, zero ignored, default otherwise) + verified live (125M-block Arbitrum backfill in 4
+  min). 119 tests green (+2), clippy clean. Released as v0.2.1.
+
 - **2026-07-17 - Release v0.2.0.** Cuts a current release (v0.1.0 predated everything from RFC-0008
   onward). Since 0.1.0: the compliance pack (RFC-0008, screening/flags/alerts/effectful stages/signed
   manifest/audit), factories & dynamic discovery (RFC-0009, "it indexes Uniswap"), the admin UI +

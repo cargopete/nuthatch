@@ -367,6 +367,14 @@ pub struct DevArgs {
     #[arg(long, default_value_t = 1)]
     pub concurrency: usize,
 
+    /// Override the `eth_getLogs` block-window (the chain default otherwise). For a *sparse* contract
+    /// over a long backfill — few events across many blocks — a large window (e.g. 50000) turns tens
+    /// of thousands of near-empty requests into a few, so a from-history backfill finishes in minutes.
+    /// Keep it under your provider's max block-range for `getLogs` (many allow 100k+ when the result
+    /// set is small); the concurrent backfill fails the range rather than auto-shrinking it.
+    #[arg(long)]
+    pub window: Option<u64>,
+
     /// Disable the built-in admin UI (`/_admin/`) entirely — no routes, for hosted deployments that
     /// front their own dashboard (RFC-0010 Part A). Off-localhost the UI also requires
     /// `NUTHATCH_ADMIN_TOKEN` to be set, or it self-disables with a log line.

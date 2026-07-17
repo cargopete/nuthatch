@@ -53,6 +53,7 @@ pub async fn dev(args: DevArgs) -> Result<()> {
         args.backfill,
         args.seal_direct,
         args.concurrency,
+        args.window,
         args.no_admin,
     )
     .await
@@ -70,6 +71,7 @@ pub async fn run(
     backfill: Option<u64>,
     seal_direct: bool,
     concurrency: usize,
+    window_override: Option<u64>,
     no_admin: bool,
 ) -> Result<()> {
     let store = Store::open(&dir.join(DB_FILE))?;
@@ -158,10 +160,12 @@ pub async fn run(
         .collect();
 
     // Per-chain policy from the registry; a custom (unregistered) chain falls back to defaults.
-    let (finality, window) = match chains::lookup(&config.nest.chain) {
+    let (finality, chain_window) = match chains::lookup(&config.nest.chain) {
         Some(c) => (c.finality, c.log_window),
         None => (DEFAULT_FINALITY, DEFAULT_WINDOW),
     };
+    // A `--window` override wins over the chain default (for sparse-contract long backfills).
+    let window = effective_window(window_override, chain_window);
 
     tracing::info!(
         "indexing nest '{}' on {}: {} contract(s), {} table(s), {} anonymous skipped, finality {:?}, window {}, registry {}…",
@@ -1008,6 +1012,15 @@ async fn detect_reorg(source: &dyn Source, store: &Store, last: u64) -> Result<O
 /// blocks", overriding a vendored deploy block (this is what keeps the recent-history use working on
 /// a nest that declares start blocks). Otherwise, the nest's earliest vendored `start_block` gives
 /// full history from deployment; failing that, a default recent window. Pure, so it's unit-testable.
+/// The `eth_getLogs` window to use: an explicit `--window` override, else the chain default. A zero
+/// override is ignored (a zero-block window can't make progress).
+fn effective_window(override_: Option<u64>, chain_window: u64) -> u64 {
+    match override_ {
+        Some(w) if w > 0 => w,
+        _ => chain_window,
+    }
+}
+
 fn cold_start_block(start_block: Option<u64>, backfill: Option<u64>, tip: u64) -> u64 {
     match (backfill, start_block) {
         (Some(n), _) => tip.saturating_sub(n),
@@ -1970,6 +1983,16 @@ template = "pool"
         assert_eq!(cold_start_block(None, Some(5_000), 100), 0); // no underflow
                                                                  // Neither → a default recent window.
         assert_eq!(cold_start_block(None, None, 1_000_000), 995_000);
+    }
+
+    #[test]
+    fn window_override_policy() {
+        // No override → the chain default window.
+        assert_eq!(effective_window(None, 2_000), 2_000);
+        // A positive override wins (sparse-contract long backfill).
+        assert_eq!(effective_window(Some(50_000), 2_000), 50_000);
+        // A zero override is ignored — a zero-block window can't make progress.
+        assert_eq!(effective_window(Some(0), 2_000), 2_000);
     }
 
     #[test]
