@@ -342,6 +342,9 @@ pub async fn backfill_direct(
                 logs
             }
             Err(e) if chunker::is_result_too_large(&e) => {
+                if next >= chunk_to {
+                    return Err(e).with_context(|| single_block_over_cap(next)); // H3: can't shrink a block
+                }
                 chunker.too_large();
                 tracing::debug!("range {next}..={chunk_to} too large; shrinking and retrying");
                 continue; // retry the same `next` with a smaller window
@@ -363,7 +366,7 @@ pub async fn backfill_direct(
         let mut blocks: Vec<u64> = rows.iter().map(|r| r.block_number).collect();
         blocks.sort_unstable();
         blocks.dedup();
-        let ts = source.block_timestamps(&blocks).await.unwrap_or_default();
+        let ts = source.block_timestamps(&blocks).await?;
         for r in &mut rows {
             r.block_timestamp = ts.get(&r.block_number).copied().unwrap_or(0);
             buf.push(r.to_json().to_string());
@@ -382,6 +385,47 @@ pub async fn backfill_direct(
         }
     }
     Ok(total)
+}
+
+/// The error context when a single block's logs exceed a provider's `getLogs` result cap — it can't be
+/// split or shrunk further, so the backfill/tip loop stops loudly instead of retrying forever (H3).
+fn single_block_over_cap(block: u64) -> String {
+    format!(
+        "block {block} alone exceeds the provider's getLogs result cap — use a provider with a \
+         higher/no cap"
+    )
+}
+
+/// Fetch logs for `[from, to]`, transparently splitting the range in half and retrying each half when
+/// a provider rejects it as "too many results" (RFC-0004 §2). The pipelined backfill uses a *fixed*
+/// window and otherwise has no shrink-retry (deadlock-review finding H2), so an oversized `--window`
+/// against a capped provider would abort the whole run; this makes it self-correct. A single block that
+/// alone exceeds the cap can't be split further, so it fails with a clear message rather than looping
+/// forever (finding H3).
+fn fetch_logs_splitting<'a>(
+    source: &'a dyn Source,
+    addresses: &'a [String],
+    topic0s: &'a [String],
+    from: u64,
+    to: u64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<crate::rpc::Log>>> + Send + 'a>>
+{
+    Box::pin(async move {
+        match source.logs(addresses, topic0s, from, to).await {
+            Ok(logs) => Ok(logs),
+            Err(e) if chunker::is_result_too_large(&e) => {
+                if from >= to {
+                    return Err(e).with_context(|| single_block_over_cap(from));
+                }
+                let mid = from + (to - from) / 2;
+                let mut left = fetch_logs_splitting(source, addresses, topic0s, from, mid).await?;
+                let right = fetch_logs_splitting(source, addresses, topic0s, mid + 1, to).await?;
+                left.extend(right);
+                Ok(left)
+            }
+            Err(e) => Err(e).with_context(|| format!("getLogs {from}..={to}")),
+        }
+    })
 }
 
 /// Concurrent-fetch variant of [`backfill_direct`]: up to `concurrency` window fetches are in flight
@@ -420,10 +464,8 @@ pub async fn backfill_direct_pipelined(
     // one task; `buffered` yields them back in window order.
     let mut stream = futures::stream::iter(windows)
         .map(|(w_from, w_to)| async move {
-            let logs = source
-                .logs(addresses, topic0s, w_from, w_to)
-                .await
-                .with_context(|| format!("getLogs {w_from}..={w_to}"))?;
+            // Split-and-retry on a provider result cap instead of aborting the whole backfill (H2/H3).
+            let logs = fetch_logs_splitting(source, addresses, topic0s, w_from, w_to).await?;
             let mut rows: Vec<_> = logs
                 .iter()
                 .filter_map(|log| match registry.decode(log) {
@@ -438,7 +480,7 @@ pub async fn backfill_direct_pipelined(
             let mut blocks: Vec<u64> = rows.iter().map(|r| r.block_number).collect();
             blocks.sort_unstable();
             blocks.dedup();
-            let ts = source.block_timestamps(&blocks).await.unwrap_or_default();
+            let ts = source.block_timestamps(&blocks).await?;
             let json: Vec<String> = rows
                 .iter_mut()
                 .map(|r| {
@@ -533,6 +575,9 @@ pub async fn backfill_direct_factory(
                     l
                 }
                 Err(e) if chunker::is_result_too_large(&e) => {
+                    if next >= chunk_to {
+                        return Err(e).with_context(|| single_block_over_cap(next));
+                    }
                     chunker.too_large();
                     continue;
                 }
@@ -555,6 +600,9 @@ pub async fn backfill_direct_factory(
                     l
                 }
                 Err(e) if chunker::is_result_too_large(&e) => {
+                    if next >= chunk_to {
+                        return Err(e).with_context(|| single_block_over_cap(next));
+                    }
                     chunker.too_large();
                     continue; // retry the same range with a smaller window
                 }
@@ -592,7 +640,7 @@ pub async fn backfill_direct_factory(
         let mut blocks: Vec<u64> = all_logs.iter().map(|l| l.block_number).collect();
         blocks.sort_unstable();
         blocks.dedup();
-        let ts = source.block_timestamps(&blocks).await.unwrap_or_default();
+        let ts = source.block_timestamps(&blocks).await?;
         let rows = decode_window(registry, Some(factory), children, &all_logs, &ts);
         for r in &rows {
             buf.push(r.to_json().to_string());
@@ -890,8 +938,14 @@ async fn index_loop(
                 let timestamps = match source.block_timestamps(&blocks).await {
                     Ok(t) => t,
                     Err(e) => {
-                        tracing::debug!("block timestamps unavailable: {e:#}");
-                        std::collections::HashMap::new()
+                        // Don't store this window with zeroed timestamps — once it finalizes it would
+                        // seal `block_timestamp = 0` permanently (deadlock-review finding H4). The
+                        // cursor hasn't advanced, so skip and re-fetch the same window next poll.
+                        tracing::warn!(
+                            "block timestamps unavailable for {next}..={to}: {e:#} — retrying window"
+                        );
+                        sleep_secs(2).await;
+                        continue;
                     }
                 };
                 let mut rows = decode_window(
@@ -1026,6 +1080,9 @@ async fn index_loop(
                 }
             }
             Err(e) if chunker::is_result_too_large(&e) => {
+                if next >= to {
+                    return Err(e).with_context(|| single_block_over_cap(next)); // H3: can't shrink a block
+                }
                 // Provider capped the response — shrink and retry the same range immediately.
                 chunker.too_large();
                 tracing::debug!("range {next}..={to} too large; shrinking and retrying");
@@ -1617,6 +1674,60 @@ async fn sleep_secs(s: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// H2/H3: `fetch_logs_splitting` halves a range and retries when a provider caps the result, so an
+    /// oversized window self-corrects instead of aborting the backfill; a single block that alone
+    /// exceeds the cap can't be split, so it fails loudly rather than looping forever.
+    #[tokio::test]
+    async fn fetch_logs_splitting_shrinks_then_fails_on_a_single_block() {
+        use crate::rpc::Log;
+        struct CappedSource {
+            cap: u64,
+        }
+        #[async_trait::async_trait]
+        impl Source for CappedSource {
+            async fn tip(&self) -> Result<u64> {
+                Ok(1000)
+            }
+            async fn block_hash(&self, _n: u64) -> Result<Option<String>> {
+                Ok(None)
+            }
+            async fn logs(
+                &self,
+                _a: &[String],
+                _t: &[String],
+                from: u64,
+                to: u64,
+            ) -> Result<Vec<Log>> {
+                if to - from + 1 > self.cap {
+                    anyhow::bail!("query returned more than 10000 results");
+                }
+                Ok((from..=to)
+                    .map(|b| Log {
+                        address: "0xabc".into(),
+                        topics: vec![],
+                        data: "0x".into(),
+                        block_number: b,
+                        block_hash: "0x".into(),
+                        tx_hash: "0x".into(),
+                        log_index: 0,
+                    })
+                    .collect())
+            }
+        }
+        // A 100-block range against an 8-block cap splits all the way down and returns every log.
+        let src = CappedSource { cap: 8 };
+        let logs = fetch_logs_splitting(&src, &[], &[], 1, 100).await.unwrap();
+        assert_eq!(logs.len(), 100);
+
+        // A single block that itself exceeds the cap can't be split → a clear, loud error.
+        let tiny = CappedSource { cap: 0 };
+        let err = fetch_logs_splitting(&tiny, &[], &[], 42, 42)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("block 42 alone exceeds"), "got: {err}");
+    }
 
     /// An address-aware mock source: `logs` respects the address filter (empty = all), so a factory
     /// backfill's pass 1 (contracts) and pass 2 (children-only) return different logs, as on a real
