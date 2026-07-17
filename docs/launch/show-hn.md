@@ -54,7 +54,7 @@ grant-funded public good, not a startup — the sustainability plan and the "wha
 list are both in-repo.
 
 Install, quickstart, the footprint methodology, and the full progress log:
-https://github.com/cargopete/nuthatch
+https://github.com/nuthatch-indexer/nuthatch
 
 Happy to answer anything — architecture, the DuckDB single-writer design, the determinism proofs, or
 why the binary is 67 MB (DuckDB + DBSP + wasmtime statically bundled; it's 5.8 MB without them, but a

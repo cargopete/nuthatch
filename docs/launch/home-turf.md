@@ -40,7 +40,7 @@ and a public "what we'll never build" list.
 _(Optional, only if the operator has announced:) An operator in this ecosystem is preparing a hosted
 option for teams who'd rather not self-host — same AGPL binary, their gateway in front._
 
-Repo, install, and the Horizon nest: https://github.com/cargopete/nuthatch
+Repo, install, and the Horizon nest: https://github.com/nuthatch-indexer/nuthatch
 
 What I'm after here specifically: **where does the decoded Horizon state drift from what you'd expect,
 and what would stop you running this next to your indexer?** Not looking for stars — looking for the

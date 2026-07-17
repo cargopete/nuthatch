@@ -7,7 +7,7 @@ anything shipped moves from "budget" to "evidence")._
 - **Fund / call:** NGI Zero (Commons / Assure lineage — verify which is open at submission).
 - **Requested:** €38,400.
 - **Applicant:** Pete (cargopete), sole maintainer. Routed via Nixum Ltd (see RFC-0006 Q1).
-- **Project:** nuthatch — https://github.com/cargopete/nuthatch · https://www.nuthatch-indexer.com
+- **Project:** nuthatch — https://github.com/nuthatch-indexer/nuthatch · https://www.nuthatch-indexer.com
 - **License:** AGPL-3.0-only (core). Free, self-hosted-first public good; no direct monetization.
 
 ## Abstract (the sovereignty pitch)
