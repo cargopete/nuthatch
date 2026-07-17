@@ -74,6 +74,10 @@ pub struct Webhook {
     /// or a block number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
+    /// Optional HMAC-SHA256 secret. When set, each delivery carries an `X-Nuthatch-Signature:
+    /// sha256=<hex>` header over the POST body, so the receiver can verify it came from this nest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
 }
 
 /// One alert webhook sink: annotations whose kind is in `kinds` are POSTed to `url` (RFC-0008 C5).
