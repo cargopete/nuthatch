@@ -2,6 +2,23 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-17 - Backfill review H2/H3/H4: timestamp retry, pipelined shrink-retry, livelock floor.**
+  The next batch of the deadlock-review findings, all "a transient hiccup quietly corrupts or hangs".
+  **H4:** a whole-batch `block_timestamps` failure was `unwrap_or_default()`ed into an all-zeros map and
+  sealed - baking `block_timestamp = 0` into immutable segments from a 5-second blip. Now the batch
+  retries (4×, backing off) and, if it still fails, returns `Err` instead of zeroing: the backfill
+  propagates (and resumes cleanly via C1), the tip loop skips and re-fetches the window. **H2:** the
+  pipelined backfill used a fixed window with no shrink-retry, so an oversized `--window` against a
+  capped provider aborted the whole run (while the sequential/factory paths quietly self-corrected -
+  same flag, different behaviour). New `fetch_logs_splitting` halves the range and retries on a "too
+  many results" cap, so the pipelined path self-corrects too. **H3:** every adaptive `too_large` arm
+  floored the window at 1 block and retried forever - a single block whose logs exceed the provider cap
+  was an infinite hang. All of them (sequential, both factory passes, tip loop, and the new splitter)
+  now stop loudly with "block N alone exceeds the provider's getLogs result cap" instead of looping.
+  **Gate met:** `fetch_logs_splitting_shrinks_then_fails_on_a_single_block` (100-block range against an
+  8-block cap splits and returns all 100; a single over-cap block errors loudly). 122 tests (+1), clippy
+  clean.
+
 - **2026-07-17 - Backfill review C1: resumable seal-direct backfill + fail-fast lifecycle.** A critical
   review (prompted by "anything else like the deadlock?") turned up a family of silent-failure bugs;
   this fixes the worst. (1) **Fail-fast lifecycle:** `run()` previously awaited only the HTTP server and

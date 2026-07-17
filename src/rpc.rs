@@ -6,6 +6,10 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+/// How many times a whole `block_timestamps` batch is retried before it's returned as an error rather
+/// than silently yielding an all-zeros timestamp map into the sealed path.
+const TIMESTAMP_ATTEMPTS: usize = 4;
+
 /// Merge `preferred` RPC endpoints ahead of a `fallback` list, preserving order and dropping
 /// duplicates. Used by `init --rpc` and `dev --rpc` to prefer a user's own node while keeping the
 /// built-in / configured endpoints as fallback. An empty `preferred` leaves `fallback` untouched.
@@ -157,8 +161,13 @@ impl RpcClient {
     }
 
     /// Unix timestamps (seconds) for the given block numbers, fetched in a single JSON-RPC batch so
-    /// even a dense window costs one round-trip. Best-effort: blocks the endpoint can't answer are
-    /// simply absent from the map (the caller stores timestamp 0 for those).
+    /// even a dense window costs one round-trip.
+    ///
+    /// Two different "missing" cases, deliberately kept distinct because timestamps feed the sealed
+    /// (immutable) path: a block the endpoint *answered but omitted* is simply absent from the returned
+    /// map (best-effort; the caller stores 0 for it), but a *whole-batch request failure* is retried a
+    /// few times and then returned as `Err` — never silently collapsed into an all-zeros map, which
+    /// would bake `block_timestamp = 0` into a permanent segment from a transient blip.
     pub async fn block_timestamps(&self, blocks: &[u64]) -> Result<HashMap<u64, u64>> {
         if blocks.is_empty() {
             return Ok(HashMap::new());
@@ -171,7 +180,33 @@ impl RpcClient {
                         "params": [format!("0x{b:x}"), false] })
             })
             .collect();
-        let resp = self.post_with_failover(&Value::Array(batch)).await?;
+        let body = Value::Array(batch);
+        let mut resp = None;
+        let mut last_err = None;
+        for attempt in 0..TIMESTAMP_ATTEMPTS {
+            match self.post_with_failover(&body).await {
+                Ok(r) => {
+                    resp = Some(r);
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!("block_timestamps attempt {} failed: {e:#}", attempt + 1);
+                    last_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        200 * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+            }
+        }
+        let resp = match resp {
+            Some(r) => r,
+            None => {
+                return Err(last_err
+                    .unwrap()
+                    .context("block_timestamps batch failed after retries"))
+            }
+        };
         let mut out = HashMap::new();
         for item in resp.as_array().into_iter().flatten() {
             let Some(idx) = item.get("id").and_then(Value::as_u64) else {
