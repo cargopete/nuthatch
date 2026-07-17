@@ -2,6 +2,21 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-17 - Lodestar developer-activity panel live on nuthatch + a deadlock found.** Second
+  Lodestar panel migrated (after the delegation feed): the Developer Activity chart (subgraphs
+  published/week) now comes from a nuthatch nest indexing L2GNS `SubgraphPublished` on Arbitrum One.
+  Validated to exact weekly parity on short windows and ~1% total divergence over 12 months (a handful
+  of L1-origin/legacy subgraphs the network subgraph folds in that native L2 publishes don't emit) -
+  documented, not silent, per RFC-0011 §2. The README now names Lodestar as the first production user.
+  **Known bug found, not yet fixed:** the large static seal-direct backfill (125M Arbitrum blocks,
+  `--window 50000`, `--concurrency 8`) **deadlocks** on the Helsinki box - the process parks in
+  `futex_do_wait` with zero network activity, having sealed nothing. The *same binary and nest* backfill
+  cleanly on a dev laptop, so it's an environment-sensitive race (timing/CPU), not the RPC (arb1 serves
+  the box fast under sequential *and* concurrent load). Worked around by backfilling on the laptop and
+  shipping the content-addressed segments + cursor to the box (which then only tip-follows - that path
+  is fine) - which is really a proof of the portable-segments design, but the deadlock needs a real fix.
+  Suspect the DBSP merger runtime interacting with the pipelined seal loop over many buffered windows.
+
 - **2026-07-17 - `--window` override for sparse-contract backfills (RFC-0004 follow-up), release v0.2.1.**
   The static seal-direct backfill uses a fixed `eth_getLogs` block-window (the chain default, e.g. 2000
   on Arbitrum) - fine for a dense contract, but for a *sparse* one over a long range it means tens of

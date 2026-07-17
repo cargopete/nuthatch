@@ -11,6 +11,16 @@ external services - no Postgres, no Docker, no IPFS. See [`CLAUDE.md`](CLAUDE.md
 design brief, [`GOVERNANCE.md`](GOVERNANCE.md) for sustainability + neutrality, and
 [`docs/operators.md`](docs/operators.md) for running it as a service.
 
+### In production
+
+[**Lodestar**](https://lodestar-dashboard.com), an analytics dashboard for The Graph Protocol on
+Arbitrum One, serves a growing set of its event-derived panels from nuthatch instead of The Graph
+gateway (the [RFC-0011](docs/rfcs/0011-graph-network-nest-lodestar-migration.md) pilot). Today that's
+the **Delegation Activity** feed (HorizonStaking delegation events) and the **Developer Activity**
+chart (L2GNS subgraph publishes), each proven byte-for-byte against the subgraph before cutover and
+served from a single nuthatch binary on one small VPS. It's the live proof of the wedge: move a real
+product off a third-party data API onto an indexer you run yourself, one panel at a time.
+
 ## Status: embedded mode built end-to-end; scaled mode + reth ExEx outstanding
 
 The embedded single-binary path works from `init → dev → live API`, with multi-contract ABI-driven
