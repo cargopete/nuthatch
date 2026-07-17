@@ -23,7 +23,7 @@ use std::time::Duration;
 
 /// Bound on the durable outbox. A dead webhook can't grow it without limit; past this the oldest
 /// undelivered alerts are shed (loudly). Generous — a transient outage of minutes is absorbed.
-const OUTBOX_MAX: u64 = 10_000;
+pub const OUTBOX_MAX: u64 = 10_000;
 /// How many pending deliveries a single drain attempts.
 const DELIVERY_BATCH: usize = 100;
 /// Poll interval between outbox drains — also the (constant) retry backoff for a failed delivery.

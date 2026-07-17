@@ -2,6 +2,23 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-17 - RFC-0010 Part B: user webhooks (the shared-engine second producer).** RFC-0010's
+  reconciliation is "one delivery engine, two producers" - and the engine already exists (I built the
+  durable outbox + at-least-once worker host-side in RFC-0008 C5). So this adds the second producer:
+  `[[webhooks]]` config (name/table/where/url/batch_max/finality/since) and a `webhooks.rs` table
+  predicate producer that, when a range seals, queries the newly-sealed rows of a webhook's table
+  matching its `where`, batches them by `batch_max`, and pushes them onto the same outbox - the same
+  worker POSTs them, never blocking the loop. The RFC's correctness catch is handled: `since` cursors
+  each webhook (persisted in the hot store), and the default `"registration"` starts it at the tip so a
+  `--seal-direct` backfill sealing all of history does *not* fire millions of rows; `"genesis"`/a block
+  replays deliberately. **Gate met:** registration-suppression test (backfill history below the cursor
+  delivers 0, a post-registration row delivers 1) + genesis-replay-with-where-and-batching test.
+  Verified live on USDC: a `where CAST(value AS HUGEINT) > 500000000000` webhook delivered 114 big
+  transfers in 14 batches of 10 to a real receiver, outbox drained clean. 108 tests green (+2), clippy
+  clean. *(Still to come in Part B: the tip-finality path + retraction deliveries, HMAC signing, and
+  folding the C5 alerts into this as webhook-over-annotation-tables. Part A - the admin UI - is a
+  separate build, best done with design eyes on it.)*
+
 - **2026-07-17 - RFC-0009 step 6: the `{template}__children` view + docs (RFC-0009 COMPLETE).** The
   finale of dynamic contract discovery. Every template now gets an auto-generated **`{template}__children`**
   DuckDB view over the sealed factory events - the discovered children with provenance (address,

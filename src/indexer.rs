@@ -175,13 +175,19 @@ pub async fn run(
     // deployment); otherwise a cold start falls back to the `--backfill` tip offset.
     let start_block = config.contracts.iter().filter_map(|c| c.start_block).min();
 
-    // Optional alert webhook sinks (RFC-0008 C5). The delivery worker drains the durable outbox on
-    // its own task, decoupled from indexing — a slow/dead webhook never blocks the loop.
+    // Optional alert sinks (RFC-0008 C5) + user webhooks (RFC-0010 Part B) — two producers, one
+    // shared delivery engine. The worker drains the durable outbox on its own task, decoupled from
+    // indexing, so a slow/dead endpoint never blocks the loop.
     let router = Arc::new(alerts::AlertRouter::new(config.alerts.clone()));
-    let alert_worker = if router.is_empty() {
+    let webhooks = Arc::new(config.webhooks.clone());
+    let alert_worker = if router.is_empty() && webhooks.is_empty() {
         None
     } else {
-        tracing::info!("{} alert sink(s) configured", config.alerts.len());
+        tracing::info!(
+            "{} alert sink(s), {} webhook(s) configured",
+            config.alerts.len(),
+            config.webhooks.len()
+        );
         Some(tokio::spawn(alerts::run_delivery_worker(store.clone())))
     };
 
@@ -203,6 +209,7 @@ pub async fn run(
         threshold,
         velocity_cfg,
         router.clone(),
+        webhooks.clone(),
         factory.clone(),
         finality,
         window,
@@ -560,12 +567,24 @@ async fn index_loop(
     threshold: Option<i128>,
     velocity_cfg: Option<(i128, u64)>,
     router: Arc<AlertRouter>,
+    webhooks: Arc<Vec<crate::config::Webhook>>,
     factory: Option<Arc<FactorySet>>,
     finality: Finality,
     window: u64,
     seal_direct: bool,
     concurrency: usize,
 ) -> Result<()> {
+    // User webhooks (RFC-0010 Part B): initialise each subscription's cursor before any sealing, so a
+    // `since = "registration"` webhook starts at the tip and a `--seal-direct` backfill doesn't fire
+    // its history. Best-effort — a tip lookup failure just defers registration to the first live tip.
+    if !webhooks.is_empty() {
+        if let Ok(tip) = source.tip().await {
+            if let Err(e) = crate::webhooks::init_cursors(&store, &webhooks, tip) {
+                tracing::warn!("webhook cursor init failed: {e:#}");
+            }
+        }
+    }
+
     // The discovered-child registry (RFC-0009). Empty for a static nest; for a factory nest it is
     // rebuilt from stored factory events on a warm restart (a pure fold — determinism preserved) and
     // grown inline as the loop decodes new factory events.
@@ -653,6 +672,15 @@ async fn index_loop(
             if let Some((_, w)) = velocity_cfg {
                 if let Err(e) = rebuild_velocity(&dir, &store, &registry, w, &velocity) {
                     tracing::warn!("velocity rebuild after seal-direct failed: {e:#}");
+                }
+            }
+            // Fire webhooks for the freshly-sealed history (a `since = "genesis"`/block webhook wants
+            // it; a `since = "registration"` one is cursored past it, so this is a no-op there).
+            if !webhooks.is_empty() {
+                if let Err(e) =
+                    crate::webhooks::deliver_sealed(&store, &dir, &webhooks, finalized_through)
+                {
+                    tracing::warn!("webhook delivery after seal-direct failed: {e:#}");
                 }
             }
         }
@@ -891,6 +919,15 @@ async fn index_loop(
                 let snapshot = factory.as_ref().map(|_| children.hash());
                 if let Err(e) = maybe_seal(&dir, &store, finalized_through, snapshot.as_deref()) {
                     tracing::warn!("sealing failed: {e:#}");
+                }
+                // Deliver user webhooks for whatever just sealed (RFC-0010 Part B) — enqueue only,
+                // the background worker POSTs; a slow endpoint never blocks the loop.
+                if !webhooks.is_empty() {
+                    if let Err(e) =
+                        crate::webhooks::deliver_sealed(&store, &dir, &webhooks, finalized_through)
+                    {
+                        tracing::warn!("webhook delivery failed: {e:#}");
+                    }
                 }
             }
             Err(e) if chunker::is_result_too_large(&e) => {

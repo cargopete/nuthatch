@@ -85,6 +85,7 @@ pub async fn init(args: InitArgs) -> Result<()> {
         alerts: Vec::new(),
         templates: Vec::new(),
         factories: Vec::new(),
+        webhooks: Vec::new(),
     };
     config.save(&dir)?;
 

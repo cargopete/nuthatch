@@ -47,6 +47,33 @@ pub struct Config {
     /// index with a template. Absent → static nest (no dynamic discovery).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub factories: Vec<Factory>,
+    /// Optional user webhooks (RFC-0010 Part B): POST rows of an event table matching a predicate to
+    /// a URL as they seal. Feeds the same host-side delivery engine as the compliance alerts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<Webhook>,
+}
+
+/// A user webhook subscription (RFC-0010 Part B): rows of `table` matching `where` are POSTed to `url`.
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct Webhook {
+    pub name: String,
+    /// The event table to watch, e.g. `staking__stake_delegated`.
+    pub table: String,
+    /// Optional SQL predicate over the table's columns (operator-authored, trusted like nest views).
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    pub where_clause: Option<String>,
+    pub url: String,
+    /// Max rows per delivery POST (default [`crate::webhooks::DEFAULT_BATCH_MAX`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_max: Option<usize>,
+    /// `"sealed"` (default — never lies, finality-gated) or `"tip"` (fast, may send retractions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finality: Option<String>,
+    /// Where the cursor starts on first registration: `"registration"` (default — only rows sealed
+    /// after the webhook is added, so a `--seal-direct` backfill doesn't fire history), `"genesis"`,
+    /// or a block number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
 }
 
 /// One alert webhook sink: annotations whose kind is in `kinds` are POSTed to `url` (RFC-0008 C5).
@@ -224,6 +251,7 @@ impl Config {
             alerts: Vec::new(),
             templates: Vec::new(),
             factories: Vec::new(),
+            webhooks: Vec::new(),
         })
     }
 
@@ -295,6 +323,7 @@ mod tests {
             alerts: Vec::new(),
             templates: Vec::new(),
             factories: Vec::new(),
+            webhooks: Vec::new(),
         };
         let raw = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&raw).unwrap();
