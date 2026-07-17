@@ -17,6 +17,7 @@ dependencies. Status lifecycle: **Draft → Accepted → Implemented → (Supers
 | [0010](0010-admin-ui-and-webhooks.md) | The admin UI and webhooks — ease-of-use parity | 0001, 0005 | Draft (v2) |
 | [0011](0011-graph-network-nest-lodestar-migration.md) | The graph-network nest and the Lodestar migration | 0001, 0002, 0004, 0005 | Draft |
 | [0012](0012-multi-nest-runtime-and-nest-packaging.md) | Multi-nest runtime and content-addressed nest packaging | 0001, 0009, 0004 | Draft |
+| [0013](0013-storage-and-query-engine-direction.md) | Storage and query-engine direction (DataFusion convergence, Turso deferred) | 0001, 0004 | Draft |
 
 ## Conventions
 
