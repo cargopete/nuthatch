@@ -7,7 +7,7 @@
 · Website: [www.nuthatch-indexer.com](https://www.nuthatch-indexer.com)
 
 Self-hosted-first, AI-native blockchain indexer. Embedded mode runs as a single process with no
-external services — no Postgres, no Docker, no IPFS. See [`CLAUDE.md`](CLAUDE.md) for the standing
+external services - no Postgres, no Docker, no IPFS. See [`CLAUDE.md`](CLAUDE.md) for the standing
 design brief, [`GOVERNANCE.md`](GOVERNANCE.md) for sustainability + neutrality, and
 [`docs/operators.md`](docs/operators.md) for running it as a service.
 
