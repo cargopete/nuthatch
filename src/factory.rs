@@ -47,6 +47,8 @@ pub struct FactorySet {
     rules: HashMap<String, FactoryRule>,
     /// Every declared template name (a factory's `template` must be one of these).
     template_names: HashSet<String>,
+    /// True if any template requests the topic0-only backfill filter (RFC-0009 §4 override).
+    force_topic0: bool,
 }
 
 impl FactorySet {
@@ -136,14 +138,25 @@ impl FactorySet {
             }
         }
 
+        let force_topic0 = config
+            .templates
+            .iter()
+            .any(|t| t.filter.as_deref() == Some("topic0"));
+
         Ok(Self {
             rules,
             template_names,
+            force_topic0,
         })
     }
 
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
+    }
+
+    /// Whether a template forces the topic0-only backfill filter (RFC-0009 §4 per-template override).
+    pub fn force_topic0(&self) -> bool {
+        self.force_topic0
     }
 
     /// Every declared template name.
