@@ -83,6 +83,8 @@ pub async fn init(args: InitArgs) -> Result<()> {
         screening: crate::config::Screening::default(),
         flags: crate::config::Flags::default(),
         alerts: Vec::new(),
+        templates: Vec::new(),
+        factories: Vec::new(),
     };
     config.save(&dir)?;
 
@@ -155,6 +157,9 @@ fn init_from(source: &str, dir_arg: &str) -> Result<()> {
         .with_context(|| format!("'{}' is not a valid nuthatch nest", target.display()))?;
     let registry = crate::registry::DecodeRegistry::from_nest(&target, &config)
         .context("nest ABIs failed to build a decode registry (is the nest self-contained?)")?;
+    // Validate factory rules (RFC-0009): references must resolve and depth stays within the ceiling.
+    let factories = crate::factory::FactorySet::build(&config)
+        .context("nest declares invalid factory/template rules")?;
 
     println!(
         "✓ nest '{}' ready — {} on {}, {} contract(s), {} table(s), {} anonymous event(s) skipped",
@@ -165,6 +170,13 @@ fn init_from(source: &str, dir_arg: &str) -> Result<()> {
         registry.tables().len(),
         registry.skipped_anonymous(),
     );
+    if !factories.is_empty() {
+        println!(
+            "  factories: {} template(s), {} rule(s) — children discovered at runtime (RFC-0009)",
+            config.templates.len(),
+            config.factories.len(),
+        );
+    }
     println!("next:  nuthatch dev --dir {}", target.display());
     Ok(())
 }

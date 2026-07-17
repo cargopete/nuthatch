@@ -17,6 +17,7 @@ pub mod cli;
 pub mod config;
 pub mod effectful;
 pub mod exposure;
+pub mod factory;
 pub mod flags;
 pub mod indexer;
 pub mod labels;

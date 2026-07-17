@@ -39,6 +39,14 @@ pub struct Config {
     /// blocks indexing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alerts: Vec<Alert>,
+    /// Optional child-contract templates (RFC-0009). A template is an ABI applied to contracts
+    /// discovered at runtime by a [`Factory`], rather than a fixed address. Absent → no factories.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub templates: Vec<Template>,
+    /// Optional factory rules (RFC-0009): a watched contract's event announces a child contract to
+    /// index with a template. Absent → static nest (no dynamic discovery).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub factories: Vec<Factory>,
 }
 
 /// One alert webhook sink: annotations whose kind is in `kinds` are POSTed to `url` (RFC-0008 C5).
@@ -51,6 +59,34 @@ pub struct Alert {
     pub url: String,
 }
 
+/// A child-contract template (RFC-0009): a name + a vendored ABI, applied to every contract a
+/// factory discovers. All children of one template share tables (`{template}__{event}`),
+/// distinguished by the implicit `address` column.
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct Template {
+    pub name: String,
+    /// ABI path relative to the nest dir, e.g. "abis/uniswap_v3_pool.json".
+    pub abi: String,
+}
+
+/// A factory rule (RFC-0009): when `watch`'s `event` fires, the child address in `child_param` is
+/// indexed under `template`. `watch` is a `[[contracts]]` alias or another template (nested).
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct Factory {
+    /// The alias of the watched contract (or a template, for nested factories).
+    pub watch: String,
+    /// The announcing event name, e.g. "PoolCreated".
+    pub event: String,
+    /// The event parameter holding the child contract address, e.g. "pool".
+    pub child_param: String,
+    /// Which [`Template`] to apply to the discovered child.
+    pub template: String,
+    /// Optional: only honour discoveries at or after this block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u64>,
+}
+
+/// One alert webhook sink: annotations whose kind is in `kinds` are POSTed to `url` (RFC-0008 C5).
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct Screening {
     /// Content-addressed list-snapshot hashes to screen against (see `nuthatch lists fetch`).
@@ -181,6 +217,8 @@ impl Config {
             screening: Screening::default(),
             flags: Flags::default(),
             alerts: Vec::new(),
+            templates: Vec::new(),
+            factories: Vec::new(),
         })
     }
 
@@ -250,6 +288,8 @@ mod tests {
             screening: Screening::default(),
             flags: Flags::default(),
             alerts: Vec::new(),
+            templates: Vec::new(),
+            factories: Vec::new(),
         };
         let raw = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&raw).unwrap();

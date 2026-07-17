@@ -106,6 +106,19 @@ It bridges to the local `nuthatch dev` — no external calls, no telemetry, no g
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-16 — RFC-0009 step 1: factory schema + the dynamic child registry.** The foundation for
+  Uniswap-class dynamic contract discovery (a factory event announces a child contract, indexed under a
+  template). New `[[templates]]` (name + ABI) and `[[factories]]` (`watch`/`event`/`child_param`/
+  `template`/optional `start`) config sections, validated: references must resolve, a template can't
+  collide with a contract alias, and nesting stays within the depth-3 ceiling (validated on
+  `init --from`). New `src/factory.rs`: `FactorySet::build` (validated rules) + `discover(row)` (the
+  pure fold step — extracts the child address from a factory-announcement event) + **`ChildRegistry`**
+  (address → discovered-child entry with block/log/timestamp/parent/depth; a monotonic `version` =
+  RFC-0009 §3's `filter_version`; idempotent insert; **reorg `rollback_to`** dropping children
+  discovered above a block; a content **`hash`** so a sealed segment can later record which discovered
+  set produced it). Determinism proven: a reorged-then-rolled-back registry has the identical content
+  hash to one folded canonically. No pipeline wiring yet — the tip/backfill/ExEx ingestion regimes that
+  *consume* this land in steps 2–5. 101 tests green (+5 factory), clippy clean.
 - **2026-07-16 — RFCs 0009–0011 filed (design docs, not yet built).** Three forward-looking RFCs
   committed to `docs/rfcs/`: **0009 factory & dynamic contract discovery** (v2 — Uniswap-class runtime
   child contracts, discovery composed with the shipped pipelined backfill via a `filter_version` rule,

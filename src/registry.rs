@@ -621,7 +621,9 @@ fn registry_hash(by_topic0: &HashMap<B256, Vec<EventDecoder>>) -> [u8; 32] {
     Sha256::digest(lines.join("\n").as_bytes()).into()
 }
 
-fn snake_case(name: &str) -> String {
+/// `EventName` → `event_name`. Crate-visible so the factory layer can compute a template's table
+/// name (`{template}__{event_snake}`) identically to how the decode registry names tables.
+pub(crate) fn snake_case(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 4);
     for (i, ch) in name.chars().enumerate() {
         if ch.is_ascii_uppercase() {
