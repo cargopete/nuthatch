@@ -11,6 +11,19 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   (proxy/EIP-1967 introspection, child-`end` conditions, SSE push, the 0012 live-parity proof). Notes
   the one node-independent 0014 slice worth building without the node (calldata decoder + `[extract]`
   config + schemas + volume guard). Linked from the RFC index.
+- **2026-07-18 - 🏷️ Release 0.4.0 — the hardening release.** Version 0.3.0 → 0.4.0. Cut after a
+  five-dimension codebase audit and a sweep that fixed **2 critical security bugs** (blob-mount RCE,
+  `/sql` arbitrary file-read), **2 high data-corruption bugs** (atomic seal/prune + structural SQL
+  disjointness, schema-drift view survival), added the **first e2e test harness** (a `TapeSource`
+  scripted-chain double closing the reorg-detection gap + the RFC-0012 roost-parity acceptance item),
+  **batched the tip-loop writes** (one txn per window vs per row), and cleared the correctness (partial
+  timestamps, column type-flip) and defensive (checked decode, nest-name validation, manifest fsync,
+  error-body sanitisation) fixes. Shipped the **core delight**: `nuthatch sql "<query>"` — terminal-
+  native SQL over the live tip ∪ sealed history, the down-payment on RFC-0015's "delightful core"
+  direction. README rewritten to **sell the one thing nuthatch is best at** (contract → local SQL) with
+  the full feature set below the fold; RFC-0015 records the 0.5 north star. Deferred items (benchmarks,
+  larger perf refactors, COR-5, the remaining lows) recorded in [backlog.md](backlog.md) with rationale.
+  151 tests (145 unit + 6 e2e), clippy `-D warnings` clean, footprint budget green.
 - **2026-07-18 - 0.4.0 hardening: defensive fixes (audit low-severity, the ones that earn their churn).**
   **COR-11:** a decoded `uint≤64` with dirty high bits above its declared width would panic `to::<u64>()`
   and kill the ingestion task (single-log DoS on RPC-derived data); now saturates. **SEC-10:** roost nest

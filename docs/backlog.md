@@ -104,6 +104,32 @@ discipline has been "build only what we can verify live."
   code as solo `dev` — but the belt-and-braces proof wants a real run; the public-RPC example roost
   suffices, no paid quota).
 
+## Track 5 — 0.4.0 hardening audit: deferred items
+
+The 0.4.0 hardening sweep fixed the critical/high tier (2 security, 2 data-corruption), added an e2e
+test harness, batched the tip-loop writes, and cleared the correctness + defensive fixes that earned
+their churn. These audit items were judged defer-worthy, with rationale:
+
+- **Benchmarks (from the perf audit).** `nuthatch bench` measures backfill events/sec + peak RSS but
+  **not** tip-lag ms or entity point-read p50/p99 or the `/sql` hot-scan cost — so those can regress
+  silently. A future regression-guard, not a release blocker; add a point-read + tip-lag bench before
+  the next perf push.
+- **Perf, larger refactors.** Bound the `/sql` hot-scan (it materialises the whole tip per query — the
+  #1 RAM risk on deep-finality L2s); single-scan the restart rebuild (currently 3× full scans); a
+  persistent DuckDB connection instead of rebuilding the world per query; a compact binary row format
+  instead of JSON-string storage. All real, all bigger than 0.4.
+- **COR-5 — factory tip-cap recovery.** A factory nest's topic0-only tip fetch can't clear a provider
+  `getLogs` cap on a very common template topic0 (busy chain) → the ingest task dies. It **fails safe**
+  (a loud error, not silent corruption) and the fix needs surgery in the sensitive tip loop; do it with
+  the address-filtered fallback the backfill path already has.
+- **Low-severity, deferred with rationale:** COR-6 reserved-column collision (rare; needs a schema
+  decision — namespace implicits or reject at build), COR-7 roost reorg fan-out blast radius (defensible
+  under the single-failure-boundary rule), COR-8 i128-band balance drop (exotic amounts), COR-10 `_seq`
+  20-bit `log_index` truncation (unreachable under current gas limits; add a debug-assert), SEC-7
+  `WITH`-prefixed DML slipping the keyword gate (ephemeral in-memory only), SEC-8 sequential webhook
+  delivery (one slow sink throttles others — `for_each_concurrent`), SEC-9 roost `/metrics` is the
+  process global not per-nest (observability, bigger refactor).
+
 ## Suggested sequencing
 
 1. **Decide the infra question** — is a colocated reth node worth provisioning now? It's the single

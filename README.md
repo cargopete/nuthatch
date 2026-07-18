@@ -1,127 +1,154 @@
 # nuthatch
 
-> **Be your own indexer.** One Rust binary, one command, live indexed API in under two minutes -
-> AI-native, and with no mandatory third-party data API to trust or pay. Ever.
+> **Turn any contract into a local SQL database.**
+> One command. One tiny binary. Your box, your data — no subgraph to author, no Postgres to run, no
+> monthly bill, no third-party API.
 
 [![ci](https://github.com/nuthatch-indexer/nuthatch/actions/workflows/ci.yml/badge.svg)](https://github.com/nuthatch-indexer/nuthatch/actions/workflows/ci.yml)
 · Website: [www.nuthatch-indexer.com](https://www.nuthatch-indexer.com)
 
-Self-hosted-first, AI-native blockchain indexer. Embedded mode runs as a single process with no
-external services - no Postgres, no Docker, no IPFS. See [`CLAUDE.md`](CLAUDE.md) for the standing
-design brief, [`GOVERNANCE.md`](GOVERNANCE.md) for sustainability + neutrality, and
-[`docs/operators.md`](docs/operators.md) for running it as a service.
-
-### In production
-
-[**Lodestar**](https://lodestar-dashboard.com), an analytics dashboard for The Graph Protocol on
-Arbitrum One, serves a growing set of its event-derived panels from nuthatch instead of The Graph
-gateway (the [RFC-0011](docs/rfcs/0011-graph-network-nest-lodestar-migration.md) pilot). Today that's
-the **Delegation Activity** feed (HorizonStaking delegation events) and the **Developer Activity**
-chart (L2GNS subgraph publishes), each proven byte-for-byte against the subgraph before cutover and
-served from a single nuthatch binary on one small VPS. It's the live proof of the wedge: move a real
-product off a third-party data API onto an indexer you run yourself, one panel at a time.
-
-## Status: embedded mode built end-to-end; scaled mode + reth ExEx outstanding
-
-The embedded single-binary path works from `init → dev → live API`, with multi-contract ABI-driven
-decode, reorg-safe storage, finality-sealed Parquet, DuckDB SQL, an incrementally-maintained balance
-view, sandboxed WASM transforms, and an MCP server - all in one process, no external services. What
-remains is the scaled (Postgres / DataFusion) mode and wiring reth ExEx to a node.
-
-| Working now | Outstanding |
-|---|---|
-| `init` → multi-contract ABI resolve (Sourcify → Etherscan, EIP-1967/legacy-OZ proxy) → scaffold (+ `schema.json`, `llms.txt`, skills) | reth ExEx wiring - `Source` trait ready; needs a synced node |
-| RPC log polling with round-robin failover, behind a `Source` trait | scaled Postgres mode (`HotStore` trait) + DataFusion federation |
-| Deterministic decode of **every declared event of every contract** (topic0-keyed registry → one table per `{alias}__{event}`) | effectful transform worlds + signed pipeline manifests |
-| Reorg self-healing (block-hash checkpoints → hot-store rollback) | governed semantic layer + natural-language queries |
-| Per-table finality-gated content-addressed Parquet sealing + hot-store pruning | IVM generalisation (derived views are DuckDB SQL over sealed data today) |
-| Read-only analytical SQL (DuckDB) - one view per table over sealed segments | GraphQL compatibility layer |
-| `GET /tables` + `GET /table/{name}` (hot+cold merged) - the full data model | |
-| IVM balance view (DBSP) - **i128** base units, reorg = retraction | |
-| IVM restart-replay - the views rebuild from stored facts on restart | |
-| Labels + direct counterparty-exposure view (DBSP) - content-addressed label snapshots, `/exposure/{addr}` | threshold/velocity flags, effectful worlds, alert webhooks (RFC-0008 C3–C6) |
-| Pure sanctions screening - content-addressed list snapshots × a zero-capability WASM component → sealed `sanction_hit` annotations, replayable `nuthatch screen` | signed pack manifest + `pack verify` / `audit replay` (RFC-0008 C6) |
-| Threshold & velocity flags - per-transfer `threshold_flag` annotations + a DBSP windowed velocity view (i128, reorg = retraction), served at `/flags` | alert webhooks (RFC-0008 C5) |
-| Effectful WASM stages - per-component capability grants (`kv` now, HTTP next), imports checked against the grant at load, annotations-only output | wasi:http-sandboxed egress variant (optional) |
-| Alert webhooks - flag/hit annotations (and reorg `flag_retracted`) POSTed at-least-once via a durable outbox that never blocks the indexer | |
-| Signed compliance-pack manifest (`pack build`/`verify`, ed25519) + `audit replay`/`report` (re-prove sealed annotations) + MCP `flags`/`exposure`/`screen_status` | **RFC-0008 complete - all 8 RFCs shipped** |
-| Factories & dynamic contract discovery ([RFC-0009](docs/factories.md)) - `[[templates]]`/`[[factories]]`, tip + backfill + reorg-safe, address-list→topic0 flip at scale, `{template}__children` view. **It indexes Uniswap.** | |
-| Built-in admin UI at `/_admin/` (RFC-0010 Part A) - embedded, no framework/CDN, status + table browser + SQL runner + nest inspector, read-only, localhost-gated | tip-finality webhook path + retractions (RFC-0010, deferred - needs hot-row SQL) |
-| User webhooks (RFC-0010 Part B) - `[[webhooks]]` POST sealed rows matching a `where` to a URL via the shared at-least-once outbox; `since` suppresses backfill history | |
-| Signed webhook egress (RFC-0010 Part B) - a webhook `secret` signs each delivery with `X-Nuthatch-Signature: sha256=<hmac>` over the exact bytes sent (HMAC-SHA256, no new dep) | |
-| Per-contract event allowlist (RFC-0011) - `events = ["Transfer", ...]` in `[[contracts]]` decodes only the listed events (default = all); narrows both decode and the getLogs fetch, typo = loud build error | the `graph-network-nest` + Lodestar migration (cross-repo) |
-| WASM transform runtime (pure, sandboxed, batched Arrow) | |
-| MCP server (stdio, 8 tools, offline) + `schema.json` + `llms.txt` + `.claude/skills` scaffold | |
-| redb hot store, entity point-reads with cold (DuckDB) fallback | |
-
-Scope today (**v0.1.0**): **Ethereum + Arbitrum One + Base**, all contract events decoded across a
-multi-contract nest, RPC polling (reth ExEx designed + stubbed), embedded storage (redb hot +
-DuckDB/Parquet cold), ~20× faster seal-direct backfill, and an operator surface (`/metrics`, `/sql`
-guards, graceful shutdown). The scaled (Postgres/DataFusion) mode and reth ExEx tip-following are the
-main things not built yet.
-
-### Measured footprint (the number nobody else publishes)
-
-| | |
-|---|---|
-| **Peak RAM** | **~58 MB** (3-contract nest, 23 tables - hot indexing + per-table sealing + DuckDB SQL + IVM, live mainnet) |
-| Single contract | ~37 MB (USDC alone) |
-| Binary size | 67 MB (release; DuckDB + DBSP + wasmtime statically bundled - 5.8 MB without them) |
-| Budget | ≤2 GB RAM - **using 2.8%** of it |
-
-Honest and reproducible: `nuthatch init 0xA0b8…eB48 0xC02a…6Cc2 0x6B17…71d0F && nuthatch dev
---backfill 400`, sampled with `ps -o rss`. Measured on the release build with the full embedded
-pipeline active - the run above sealed 16,986 rows across 11 tables of the three contracts (USDC,
-WETH, DAI; 23 tables total) and pruned the hot store, while the IVM view tracked 5,005 holders. The
-RAM budget is enforced in CI (a `footprint` job fails the build above 256 MB - generous headroom over
-the measured ~58 MB); the binary is large because DuckDB, DBSP, and wasmtime are statically bundled
-(still a single file - the embedded-mode non-negotiable). Hot layer stays bounded by pruning sealed
-rows to Parquet past finality.
-
-## Quickstart
-
 ```sh
-cargo build --release
+cargo install --git https://github.com/nuthatch-indexer/nuthatch nuthatch
 
-# Index USDC on mainnet (uses public RPC defaults; no key needed)
-./target/release/nuthatch init 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain mainnet
-./target/release/nuthatch dev
-
-# in another shell
-curl localhost:8288/
-curl localhost:8288/tables
-curl 'localhost:8288/table/c0__transfer?limit=5'
+nuthatch init 0xA0b86991c6218b36c1D19D4a2e9Eb0cE3606eB48 --chain mainnet   # USDC
+nuthatch dev            # backfills from deployment, follows the tip, serves an API
+nuthatch sql "SELECT count(*), sum(CAST(value AS DECIMAL(38,0))) FROM usdc__transfer"
 ```
 
-`init` writes `nuthatch.toml` (config), the resolved ABIs under `abis/`, and `schema.json` (the
-decoded tables + columns). `dev` polls logs, decodes every declared event of every contract into an
-embedded `nuthatch.redb`, and serves the API on `127.0.0.1:8288`. Pass several addresses to `init`
-(optionally with `--alias`) to index a multi-contract nest in one process.
+That's the whole thing. You had an address ninety seconds ago; now you're running `SELECT` over its
+on-chain activity, on your own machine.
 
-### AI-native, offline
+---
 
-`init` also scaffolds an `llms.txt` and a `.claude/skills/nuthatch/` skill so coding agents learn
-the real query surface. Expose a running index to an agent over the Model Context Protocol:
+## Why nuthatch
+
+Every other way to get your contract's data fails the solo dev *somewhere*:
+
+| | author a subgraph? | infra to run | query | yours? | pay? |
+|---|---|---|---|---|---|
+| **The Graph** | yes — schema + manifest + AS mappings | — (decentralised) | GraphQL | no | query fees |
+| **Goldsky / hosted** | no | — (their servers) | SQL/GraphQL | **no** | **monthly** |
+| **Ponder** | yes — TS handlers | Node + Postgres | SQL | yes | free |
+| **Subsquid** | yes | archive + Postgres | GraphQL | yes | free |
+| **nuthatch** | **no — init from an address** | **one static binary** | **SQL (DuckDB)** | **yes** | **free** |
+
+Nobody else hits all four of *zero authoring*, *zero infra*, *it's just SQL*, and *it's yours and it's
+tiny*. That combination is the point — not any single feature.
+
+- **Zero authoring.** `init 0xAddr` resolves the ABI (Sourcify → Etherscan), generates the schema and
+  decoders, and scaffolds the project. You write nothing.
+- **Zero infra.** A single static Rust binary. Embedded mode needs no Postgres, no Docker, no IPFS.
+- **It's just SQL.** Your contract's events become per-event tables you query with real analytical SQL —
+  the live tip *and* sealed history, one surface.
+- **It's yours, and it's tiny.** ≤2 GB RAM for single-chain tip-following, CI-enforced. No telemetry, no
+  phone-home, no mandatory API token, ever.
+
+---
+
+## Install
 
 ```sh
-nuthatch mcp                 # stdio MCP server: status, schema, tables, table, sql, entity, balance, top_balances
+# from source (any platform with a Rust toolchain)
+cargo install --git https://github.com/nuthatch-indexer/nuthatch nuthatch
 ```
 
-It bridges to the local `nuthatch dev` - no external calls, no telemetry, no gated data API.
+Prebuilt binaries are attached to CI builds; a `curl | sh` installer is on the roadmap
+(RFC-0015). Supported chains include Ethereum, Arbitrum One, Base, Optimism, Polygon, and more
+(`--chain`); point at your own node with `--rpc`.
 
-## Design principles (non-negotiable)
+---
 
-- **Single static binary**, zero external services in embedded mode.
-- **≤2 GB RAM** for single-chain tip-following + serving (a CI-enforced budget, not a hope).
-- **No phone-home** - no telemetry, no mandatory tokens. AI features are local-first (Ollama / BYO-key).
-- **Determinism in the core** - decode, reorg, and entity derivation are deterministic and
-  re-executable. LLMs write code and tests; they never sit in the runtime data path.
+## Querying your data — the whole point
 
-## Progress log
+Every declared event becomes a table named `{alias}__{event}` (e.g. `usdc__transfer`), carrying the
+event's fields plus `block_number`, `block_timestamp`, `tx_hash`, `log_index`, `address`.
 
-The per-push build log lives in [`docs/progress-log.md`](docs/progress-log.md) - one entry per push,
-newest first, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
+```sh
+# one-shot from the terminal (prints an aligned table; --json to pipe to jq)
+nuthatch sql 'SELECT "from" AS sender, count(*) AS n FROM usdc__transfer GROUP BY 1 ORDER BY n DESC LIMIT 5'
 
-## Licence
+# or over HTTP, against a running `nuthatch dev`
+curl 'localhost:8288/sql?q=SELECT%20count(*)%20FROM%20usdc__transfer'
+```
 
-[AGPL-3.0-only](LICENSE).
+- **`nuthatch sql`** queries the local store when `dev` is stopped, and transparently falls back to the
+  running instance's API when `dev` holds it — the same command works either way.
+- **Hot + cold in one surface.** Queries span the live unsealed tip (redb) *and* sealed history
+  (Parquet), transparently — you never think about the boundary.
+- **Big-int friendly.** `uint256` values are exact text; each also gets a `{col}_dec` DECIMAL view, so
+  `SUM(value_dec)` just works.
+- **AI-native.** A Model Context Protocol server is compiled in (`nuthatch mcp`) — point Claude (or any
+  MCP client) at your indexer and ask your contract's data in plain English, fully offline.
+
+---
+
+## How it works (the 30-second version)
+
+```
+RPC (or colocated reth ExEx)  →  deterministic decode  →  redb hot store (tip)
+                                                            │
+                                        past finality  →  content-addressed Parquet segments
+                                                            │
+                                        DuckDB attaches segments read-only  →  SQL (hot ∪ cold)
+```
+
+- **Deterministic core.** Decode, reorg handling, and entity derivation are deterministic and
+  re-executable — same inputs, same content-addressed output. No LLM ever sits in the data path.
+- **Reorg-safe by construction.** Reorgs only ever touch the mutable hot store; sealed segments are
+  strictly past finality and immutable.
+- **Single writer.** One ingestion thread writes; queries only ever attach read-only.
+
+---
+
+## Everything else it can do
+
+The core is "your contract → SQL." Beyond that, nuthatch has a full feature set for teams and operators
+who need more — none of it in the way of the happy path:
+
+- **Many contracts, one nest.** Declare several contracts in `nuthatch.toml`; index them together.
+- **Factory / dynamic contracts** (RFC-0009). Watch a factory (e.g. a pool factory); children are
+  discovered at runtime and indexed into shared `{template}__*` tables — no redeploy per child.
+- **Declarative + imperative derivation.** Incremental views maintained by DBSP (reorgs become
+  retractions), plus a WASM transform layer for custom pure-function pipelines.
+- **Compliance pack** (RFC-0008). Address labels, sanctions/watch-list screening, threshold & velocity
+  flags, counterparty-exposure views, and a signed, replayable audit manifest.
+- **Alerts & webhooks** (RFC-0010). HMAC-signed egress with a durable at-least-once outbox; a slow
+  endpoint never blocks indexing.
+- **Built-in admin UI.** A self-contained page at `/_admin/` — status, tables, view/nest inspector.
+  Localhost-open; off-localhost it requires a token per request.
+- **Roost — many nests, one runtime** (RFC-0012). Host many contracts/nests on the same chain in one
+  process, sharing a single cursor and one `getLogs` per window — N nests for roughly one nest's RPC
+  cost, with per-nest isolation and a per-runtime footprint budget.
+- **Nest blobs.** `nuthatch nest pack` turns a nest's authored inputs into a content-addressed,
+  reproducible deploy unit; `nest mount <blob>` verifies and installs it (regenerating the decode
+  registry and asserting it matches).
+- **Metrics.** Prometheus `/metrics` — tip lag, rows decoded/sealed, reorgs, query counts, RSS.
+
+---
+
+## Running it in production
+
+nuthatch is built to be **fronted**, not exposed raw — gateways, auth, and metering are the operator's
+layer; nuthatch ships the *guards* (query timeout, row cap, concurrency limit, a filesystem-access
+denylist on `/sql`) and *signals* (`/metrics`) that make fronting it safe. It binds `127.0.0.1` by
+default; `--listen` elsewhere and put a gateway in front. See [`docs/operators.md`](docs/operators.md).
+
+- **Footprint:** ≤2 GB RAM single-chain, single static binary, graceful SIGTERM shutdown with
+  checkpointed resume.
+- **Durability:** content-addressed segments are safe to copy while running; back up the nest directory.
+
+---
+
+## Project
+
+- **Design** lives in [RFCs](docs/rfcs/) (0001–0015); the north star and the CLI/UX direction are
+  [RFC-0015](docs/rfcs/0015-the-delightful-core.md). Deferred/leftover work is in
+  [`docs/backlog.md`](docs/backlog.md); the running log is [`docs/progress-log.md`](docs/progress-log.md).
+- **Governance:** a grant-funded public good (NLnet / EF-ESP), AGPL-3.0. No hosted service, no token, no
+  phone-home. See [`GOVERNANCE.md`](GOVERNANCE.md) and the standing design brief [`CLAUDE.md`](CLAUDE.md).
+- **Out of scope:** a hosted/metered service, non-EVM chains before EVM is airtight, or any deployment
+  story beyond binary + compose.
+
+---
+
+<p align="center"><i>be your own indexer.</i></p>

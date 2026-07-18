@@ -22,6 +22,7 @@ Statuses last reconciled against the [progress log](../progress-log.md) on 2026-
 | [0012](0012-multi-nest-runtime-and-nest-packaging.md) | Multi-nest runtime and content-addressed nest packaging | 0001, 0009, 0004 | **Implemented** (all 7 slices; verified live on Arbitrum) |
 | [0013](0013-storage-and-query-engine-direction.md) | Storage and query-engine direction (DataFusion convergence, Turso deferred) | 0001, 0004 | Accepted — §3 SQL-over-the-tip shipped (DuckDB union); DataFusion deferred/gated |
 | [0014](0014-firehose-class-extraction-traces-and-state.md) | Firehose-class extraction — traces and state diffs via ExEx | 0003, 0001, 0004 | Draft (deferred) |
+| [0015](0015-the-delightful-core.md) | The delightful core — CLI/UX for the solo dev (the 0.5 north star) | — (polish over 0.1–0.4) | Draft — `nuthatch sql` one-shot shipped in 0.4; REPL + magical init next |
 
 ## Conventions
 
