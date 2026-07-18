@@ -12,7 +12,9 @@ non-negotiables below, stop and flag it instead of proceeding.
 1. **Single static binary** is the primary deliverable. Embedded mode must run with zero
    external services: no Postgres, no Docker, no IPFS. `curl | sh` → `nuthatch init 0xAddr
    --chain mainnet` → `nuthatch dev` → live API. Target: <2 minutes to first indexed query.
-2. **Footprint budget: ≤2 GB RAM** for single-chain tip-following + serving in embedded mode.
+2. **Footprint budget: ≤2 GB RAM** for a single-chain **roost** (one runtime following one
+   chain, whether it hosts one nest or several) tip-following + serving in embedded mode. The
+   budget is per-runtime and shared across mounted nests — density is RAM-bounded, not free.
    Treat this as a CI-enforced budget, not an aspiration. If a design decision threatens it,
    surface the tradeoff before implementing.
 3. **No phone-home.** No telemetry, no mandatory API tokens, no gated data services. AI
@@ -37,6 +39,14 @@ DuckDB writers.
 **Scaled mode (docker-compose):** same crates, Postgres replaces redb for the hot store,
 DataFusion federates hot + cold behind one SQL surface. Feature-flag the storage backend
 behind a trait; no `#[cfg]` forks of business logic.
+
+**Multi-nest co-tenancy (a *roost*):** one runtime may host N nests an operator chose to
+co-locate on the same chain, sharing one same-chain cursor, one hot DB, one finality view.
+Cooperating tenants an operator picked — not paying strangers (that's the hosted-SaaS path,
+out of scope). Strict per-nest isolation of storage, reorg, and blast radius: one nest's bad
+view or runaway factory must not harm another. Still one cursor, one writer, one observable
+failure boundary — the single-cursor non-negotiable holds. A second chain means a second
+cursor means a second process; never multiplex chains behind one cursor. See RFC-0012.
 
 **Reorg strategy:** reorgs only ever touch the mutable hot store. Segments are sealed to
 Parquet strictly past finality, so the columnar layer is append-only and immutable. If a
@@ -123,7 +133,10 @@ Do not start slice N+1 while slice N has failing tests or an unmet budget.
 
 ## Out of scope — do not build, do not suggest
 
-- Hosted service, billing, metering, multi-tenancy.
+- Hosted service, billing, metering, **hosted-SaaS multi-tenancy** (per-tenant authz/quotas,
+  isolation between mutually-untrusting paying customers — that's the become-a-data-service-
+  company path, and the gateway's job regardless). Note: *multi-nest co-tenancy* (a roost) is
+  in scope — see Architecture; the two are different things.
 - Token, staking, decentralized network features (a possible future Graph Horizon data
   service is explicitly deferred).
 - Non-EVM chains before EVM is airtight.
