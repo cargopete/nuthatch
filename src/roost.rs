@@ -4,7 +4,8 @@
 //! `dev` now drives all nests from ONE `indexer::spawn_roost` task — one `getLogs` per window fanned
 //! out to the owning nests (see `indexer::roost_index_loop`), so N nests cost one nest's worth of RPC
 //! chatter. Per-nest tables stay byte-identical to running each nest solo (the same per-window code
-//! runs either way). Factory nests are refused for now (slice 2b); shared reorg fan-out is slice 3.
+//! runs either way). Static and factory nests can be co-mounted (slice 2b — a factory forces the union
+//! fetch topic0-only, demuxing by topic0 instead of address); shared reorg fan-out is slice 3.
 //!
 //! Isolation is by construction: each nest keeps its own directory (`nests/<name>/` — its own
 //! `nuthatch.redb`, `segments/`, views), so one nest's bad view or runaway factory can't touch
@@ -125,7 +126,7 @@ pub async fn dev(
     let roost = Roost::load(&dir)?;
     let meta = &roost.roost;
     tracing::info!(
-        "roost '{}' on {} (chain_id {}): mounting {} nest(s) — one shared cursor (slice 2a)",
+        "roost '{}' on {} (chain_id {}): mounting {} nest(s) — one shared cursor",
         meta.name,
         meta.chain,
         meta.chain_id,
@@ -145,8 +146,8 @@ pub async fn dev(
     let admin_enabled = indexer::admin_enabled(no_admin, &listen);
 
     // Load + chain-validate every mounted nest up front. A failure to mount any nest fails the whole
-    // roost — better a loud refusal at startup than a roost silently serving a subset. (Factory-nest
-    // refusal happens in `spawn_roost`, slice 2b.)
+    // roost — better a loud refusal at startup than a roost silently serving a subset. Static and
+    // factory nests may be co-mounted (slice 2b); the shared cursor handles the demux.
     let mut mounted = Vec::with_capacity(meta.nests.len());
     for name in &meta.nests {
         let (nest_path, config) = load_mounted_nest(&dir, meta, name)?;

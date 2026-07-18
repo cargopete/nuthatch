@@ -250,9 +250,17 @@ is the gateway's identity-shaped job, unchanged from the node-vs-gateway split.
      135 tests (+3), clippy `-D warnings` clean; two-nest boot smoke green (mounts both, one cursor,
      API live). The full **live** two-nest table-parity run over a chain is the remaining acceptance
      evidence (folds in with a live demo, as the RFC-0011 pilot proved delegation parity).
-   - **2b — factory nests (deferred).** A factory nest is topic0-only (no address to demux), which
-     would force the whole union fetch topic0-only and tangle the demux; `spawn_roost` refuses one with
-     a clear error for now. Route-by-decode + the topic0-flip under the shared cursor is 2b.
+   - **2b — factory nests. ✅ Done (2026-07-18).** Factory nests may now be co-mounted. `NestIngest::owns`
+     gained a second demux mode: a static nest (non-empty address filter) routes by **address**, a
+     factory nest (empty filter — topic0-only) routes by **topic0**, so it catches its factory-creation
+     events and runtime-discovered children regardless of their address. `union_filter` drops the address
+     filter entirely if *any* mounted nest is a factory (an empty `getLogs` address list = "any address",
+     which the factory needs); static co-tenants then over-fetch but demux back to exactly their own logs.
+     `decode_window`'s existing inline child discovery is unchanged — the roost feeds each factory nest
+     its topic0-matched logs and discovery proceeds per nest exactly as solo. `spawn_roost`'s refusal is
+     removed. Tests: `log_owned` in both modes, `union_filter` goes topic0-only with a factory present
+     (137 tests, +2); boot smoke with a factory + static nest co-mounted (both mount, one cursor, API
+     live). Live factory-in-roost child-discovery parity folds into the same live acceptance as 2a.
 3. **Reorg + finality fan-out.** One reorg → all nests converge; shared finality drives
    each nest's sealing. Extend the reorg proptest with a multi-nest dimension (random
    reorgs converge every mounted nest independently).

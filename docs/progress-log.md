@@ -2,6 +2,22 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-18 - RFC-0012 roost slice 2b: factory nests in a roost.** Lifts the slice-2a restriction —
+  factory/template nests (RFC-0009) can now be co-mounted with static nests under the shared cursor.
+  `NestIngest::owns` gained a second demux mode: a **static** nest (non-empty address filter) routes a
+  log by emitting **address**; a **factory** nest (empty filter — topic0-only, children discovered at
+  runtime) routes by **topic0**, so it catches its factory-creation events and its discovered children
+  regardless of their (arbitrary) addresses. `union_filter` now drops the address filter for the whole
+  fetch if *any* mounted nest is a factory — an empty `getLogs` address list means "any address", which
+  the factory needs; static co-tenants over-fetch but demux back to exactly their own logs, so per-nest
+  output stays byte-identical to solo. The decode + inline child-discovery path (`decode_window`/
+  `process_window`) is unchanged — each factory nest discovers its own children from its own routed logs
+  exactly as it does solo. The `spawn_roost` factory refusal is removed. **Gate met:** `log_owned`
+  both-modes test, `union_filter`-goes-topic0-only-with-a-factory test (137 tests, +2), clippy `-D
+  warnings` clean; boot smoke with a factory + static nest co-mounted (factory recognised — "1 template,
+  1 rule, topic0-only tip fetch" — both mount under one cursor, API live). Live factory-in-roost
+  child-discovery parity over a chain folds into the same live acceptance as 2a. Next: slice 3 — shared
+  reorg detection + fan-out (one detection → every nest converges), the last piece of the roost core.
 - **2026-07-18 - RFC-0012 roost slice 2a: the shared cursor (one `getLogs` feeds N nests).** The
   density win. `nuthatch roost dev` now drives every mounted nest from ONE cursor: `indexer::spawn_roost`
   builds each nest and spawns a single `roost_index_loop` that does one `source.tip()` + one **union

@@ -1,7 +1,7 @@
 //! `nuthatch dev` — the loop that makes it alive. Poll logs → decode → store, and serve the API
 //! concurrently. One process, one cursor, one failure boundary (per the standing brief).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -190,16 +190,40 @@ fn addr_in(addresses: &[String], addr: &str) -> bool {
     addresses.iter().any(|a| a.eq_ignore_ascii_case(addr))
 }
 
+/// The roost demux decision (RFC-0012 §2). A **static** nest (non-empty `addresses`) owns a log by
+/// emitting address; a **factory** nest (empty `addresses` — topic0-only) owns it by topic0, so it
+/// catches its factory-creation events and its runtime-discovered children regardless of their address.
+/// Pure so it's testable without a `NestIngest`.
+fn log_owned(addresses: &[String], topic0s: &[String], log: &crate::rpc::Log) -> bool {
+    if addresses.is_empty() {
+        log.topics.first().is_some_and(|t0| addr_in(topic0s, t0))
+    } else {
+        addr_in(addresses, &log.address)
+    }
+}
+
 /// The union `getLogs` filter across all mounted nests: the case-insensitively-deduped concatenation of
 /// every nest's address list and topic0 list. One fetch feeds them all (RFC-0012 §2 — the density win:
 /// N nests cost one nest's worth of RPC chatter, not N). Takes the raw `(addresses, topic0s)` of each
 /// nest so it's testable without constructing a `NestIngest`.
+///
+/// **Factory nests force topic0-only (RFC-0012 slice 2b).** A factory nest has an empty address filter
+/// (children are discovered at runtime, so it must see all addresses matching its topics). An empty
+/// address list in `getLogs` means "any address", so if *any* mounted nest is a factory the whole union
+/// fetch drops its address filter and goes topic0-only — the factory nest then sees every candidate,
+/// and static co-tenants over-fetch but demux back to exactly their own logs (`NestIngest::owns`),
+/// keeping per-nest output byte-identical to solo.
 fn union_filter<'a>(
     nests: impl Iterator<Item = (&'a [String], &'a [String])>,
 ) -> (Vec<String>, Vec<String>) {
     let mut addrs: Vec<String> = Vec::new();
     let mut topics: Vec<String> = Vec::new();
+    let mut any_factory = false;
     for (nest_addrs, nest_topics) in nests {
+        // An empty address list is the factory / topic0-only signal (see `build_nest`).
+        if nest_addrs.is_empty() {
+            any_factory = true;
+        }
         for a in nest_addrs {
             if !addr_in(&addrs, a) {
                 addrs.push(a.clone());
@@ -211,6 +235,10 @@ fn union_filter<'a>(
             }
         }
     }
+    // Any factory nest → topic0-only fetch (empty address filter = "any address").
+    if any_factory {
+        addrs.clear();
+    }
     (addrs, topics)
 }
 
@@ -219,7 +247,8 @@ fn union_filter<'a>(
 /// through the SAME [`NestIngest::process_window`] a solo `dev` uses — so per-nest tables are
 /// byte-identical to running that nest alone. Backfill stays per-nest (each `prepare`s its own history
 /// first); the cursor only couples nests at the tip. Reorg detection is still per-nest here (shared
-/// detection + fan-out is slice 3). Factory nests are refused before we get here (slice 2b).
+/// detection + fan-out is slice 3). Factory nests are supported (slice 2b): if any is mounted the union
+/// fetch goes topic0-only and each nest demuxes by `owns` — address for static, topic0 for factory.
 async fn roost_index_loop(
     source: Arc<dyn Source>,
     mut nests: Vec<NestIngest>,
@@ -319,9 +348,9 @@ async fn roost_index_loop(
 }
 
 /// Build every mounted nest and spawn ONE shared-cursor ingestion task driving them all (RFC-0012
-/// slice 2a). Returns the per-nest serve states (for `/<name>/…` routing), the single shared ingest
-/// handle, and the nests' alert-delivery workers. Refuses a factory nest for now (slice 2b): its
-/// topic0-only discovery would force the whole union fetch topic0-only and tangle the address demux.
+/// slice 2). Returns the per-nest serve states (for `/<name>/…` routing), the single shared ingest
+/// handle, and the nests' alert-delivery workers. Static and factory nests may be co-mounted (slice 2b):
+/// a factory nest forces the union fetch topic0-only and demuxes by topic0, static nests by address.
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn_roost(
     source: Arc<dyn Source>,
@@ -341,12 +370,6 @@ pub async fn spawn_roost(
     let mut alert_workers = Vec::new();
     let mut window = None;
     for (name, dir, config) in nests {
-        if !config.factories.is_empty() {
-            bail!(
-                "nest '{name}' is a factory nest — factory nests in a roost are not yet supported \
-                 (RFC-0012 slice 2b); run it solo with `nuthatch dev` for now"
-            );
-        }
         let (nest, state, worker, w) =
             build_nest(&source, dir, &config, window_override, admin_enabled).await?;
         window.get_or_insert(w);
@@ -1165,15 +1188,19 @@ impl NestIngest {
         Ok(next)
     }
 
-    /// Does this log belong to this nest? Static nests (the slice-2a roost case) demux by emitting
-    /// address: the roost fetches the union of every nest's addresses, and each log routes to the
-    /// nest(s) whose address set contains it. Case-insensitive because a provider may return
-    /// checksummed addresses while our filter is lowercase. Decode is the safety net — even an
-    /// over-fetched log routed here only yields rows this nest's registry knows, so per-nest output
-    /// stays byte-identical to solo. (Factory nests are topic0-only and are refused in a roost until
-    /// slice 2b; see `spawn_roost`.)
+    /// Does this log belong to this nest? Two demux modes, mirroring the two nest kinds:
+    /// - **Static nest** (non-empty address filter): by emitting address — the roost fetches the union
+    ///   of every nest's addresses and each log routes to the nest(s) whose set contains it.
+    /// - **Factory nest** (empty address filter — topic0-only, children discovered at runtime, RFC-0009):
+    ///   by **topic0** — a child contract has an arbitrary address but its events carry a *template*
+    ///   topic0 in this nest's set, so topic0 routing catches children (and factory-creation events)
+    ///   regardless of address; `process_window`'s inline discovery then adopts them.
+    ///
+    /// Case-insensitive throughout (a provider may return checksummed hex while our filter is lowercase).
+    /// Decode is the safety net either way — an over-routed log only yields rows this nest's registry
+    /// (or discovered children) actually know, so per-nest output stays byte-identical to solo.
     fn owns(&self, log: &crate::rpc::Log) -> bool {
-        addr_in(&self.addresses, &log.address)
+        log_owned(&self.addresses, &self.topic0s, log)
     }
 
     /// Detect and handle a reorg against the last committed block. Returns `Ok(Some(next))` — the
@@ -2665,6 +2692,52 @@ template = "pool"
         assert!(addr_in(&set, "0xdef456"));
         assert!(!addr_in(&set, "0x999999"));
         assert!(!addr_in(&[], "0xabc123")); // a topic0-only (factory) nest owns nothing by address
+    }
+
+    #[test]
+    fn log_owned_static_by_address_factory_by_topic0() {
+        let transfer = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+        let mut child_log = transfer_log(20, 0);
+        child_log.address = "0xchildaddress0000000000000000000000000000".into(); // some runtime child
+
+        // Static nest: owns by address. It watches a fixed set; the child's address isn't in it.
+        let static_addrs = vec!["0xAAA0000000000000000000000000000000000000".to_string()];
+        let static_topics = vec![transfer.to_string()];
+        assert!(!log_owned(&static_addrs, &static_topics, &child_log)); // wrong address → not owned
+        let mut own_log = transfer_log(20, 1);
+        own_log.address = "0xaaa0000000000000000000000000000000000000".into(); // checksum differs
+        assert!(log_owned(&static_addrs, &static_topics, &own_log)); // address match (case-insensitive)
+
+        // Factory nest: empty addresses → owns by topic0. It catches the child regardless of address,
+        // because the child's event carries a template topic0 in the nest's set.
+        let factory_addrs: Vec<String> = Vec::new();
+        let factory_topics = vec![transfer.to_string()];
+        assert!(log_owned(&factory_addrs, &factory_topics, &child_log)); // topic0 match → owned
+        let mut other_topic = transfer_log(20, 2);
+        other_topic.topics[0] = "0xdeadbeef".into();
+        assert!(!log_owned(&factory_addrs, &factory_topics, &other_topic)); // topic not watched → not owned
+    }
+
+    #[test]
+    fn union_filter_goes_topic0_only_when_a_factory_is_present() {
+        let transfer = "0xddf252...".to_string();
+        let created = "0xpaircreated...".to_string();
+        // A static nest (fixed addresses) co-mounted with a factory nest (empty addresses).
+        let static_addrs = vec!["0xAAA".to_string()];
+        let factory_addrs: Vec<String> = Vec::new();
+        let (addrs, topics) = union_filter(
+            [
+                (static_addrs.as_slice(), [transfer.clone()].as_slice()),
+                (factory_addrs.as_slice(), [created.clone()].as_slice()),
+            ]
+            .into_iter(),
+        );
+        // The factory forces the whole fetch topic0-only: no address filter, both topics unioned.
+        assert!(
+            addrs.is_empty(),
+            "a factory co-tenant must drop the address filter"
+        );
+        assert_eq!(topics, vec![transfer, created]);
     }
 
     #[test]
