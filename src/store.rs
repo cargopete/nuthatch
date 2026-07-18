@@ -195,6 +195,28 @@ impl Store {
         Ok(out)
     }
 
+    /// Every hot (unsealed) row, parsed and grouped by its logical `table` (RFC-0013). One full scan of
+    /// the hot store — bounded, since sealed rows are pruned from hot, so this holds only the tip past
+    /// the sealed watermark. Feeds the analytical `/sql` surface so the live tip is queryable alongside
+    /// the sealed segments (hot and cold are disjoint by block range, so a plain `UNION ALL` is exact).
+    pub fn hot_rows_by_table(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<serde_json::Value>>> {
+        let rtx = self.db.begin_read()?;
+        let t = rtx.open_table(ENTITIES)?;
+        let mut out: std::collections::HashMap<String, Vec<serde_json::Value>> =
+            std::collections::HashMap::new();
+        for row in t.iter()? {
+            let (_k, v) = row?;
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(v.value()) {
+                if let Some(table) = json.get("table").and_then(|t| t.as_str()) {
+                    out.entry(table.to_string()).or_default().push(json);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Entity JSON values whose block falls in `[from, to]`, chain-ordered. Used by sealing to
     /// gather a finalized block range for a Parquet segment.
     pub fn entities_in_range(&self, from: u64, to: u64) -> Result<Vec<String>> {

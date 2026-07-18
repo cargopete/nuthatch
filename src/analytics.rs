@@ -1,12 +1,15 @@
-//! Read-only analytical SQL over the sealed Parquet segments, via an embedded DuckDB. DuckDB is
-//! single-writer/OLAP: we only ever ATTACH the segments read-only here; the ingestion path never
-//! writes DuckDB. Queries see *finalized* data (what's been sealed); the hot tip lives in redb.
+//! Read-only analytical SQL over the sealed Parquet segments **and the hot tip**, via an embedded
+//! DuckDB. DuckDB is single-writer/OLAP: we only ever ATTACH the segments read-only here; the
+//! ingestion path never writes DuckDB. The sealed segments cover finalized history; the unsealed tip
+//! lives in redb. For `/sql` (RFC-0013) the hot rows are scanned into per-table temp tables and
+//! `UNION ALL`'d into each table's view — hot and cold are disjoint by block range (sealed rows are
+//! pruned from hot), so the union is exact with no dedup. Trusted point-reads pass no hot rows.
 //!
 //! The binary stays single-file: DuckDB is statically bundled. Memory is capped so an analytical
 //! query can't blow the embedded-mode RAM budget.
 
 use anyhow::{bail, Context, Result};
-use duckdb::types::ValueRef;
+use duckdb::types::{Value as DuckValue, ValueRef};
 use duckdb::Connection;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -37,20 +40,36 @@ pub struct QueryOutput {
     pub truncated: bool,
 }
 
+/// Hot (unsealed) rows grouped by logical table — from [`crate::store::Store::hot_rows_by_table`].
+/// Passed to the query path so the live tip is `UNION ALL`'d into each table's view (RFC-0013).
+pub type HotRows = std::collections::HashMap<String, Vec<Value>>;
+
 /// Run a read-only query to completion. Only SELECT/WITH statements are accepted — this is a query
 /// surface, not a mutation surface. Unguarded: for trusted, registry-built SQL that must finish.
 pub fn query(dir: &Path, sql: &str) -> Result<Vec<Value>> {
-    Ok(run(dir, sql, None)?.rows)
+    Ok(run(dir, sql, None, &HotRows::new())?.rows)
 }
 
-/// Run a read-only query under a resource guard — the entry point for the public `/sql` surface. A
-/// query that outlives `guard.timeout` is interrupted and surfaced as a timeout; a result larger
-/// than `guard.max_rows` is truncated and flagged. See [`QueryGuard`].
+/// Run a read-only query under a resource guard, over the **sealed segments only** — the cold path used
+/// by trusted callers and the `/table` endpoint's cold fill (which merges hot itself). See [`QueryGuard`].
 pub fn query_guarded(dir: &Path, sql: &str, guard: QueryGuard) -> Result<QueryOutput> {
-    run(dir, sql, Some(guard))
+    run(dir, sql, Some(guard), &HotRows::new())
 }
 
-fn run(dir: &Path, sql: &str, guard: Option<QueryGuard>) -> Result<QueryOutput> {
+/// Run a guarded read-only query over the sealed segments **and the hot tip** — the public `/sql`
+/// surface (RFC-0013). `hot` is the unsealed rows grouped by table; each is `UNION ALL`'d into its
+/// table's view. A query outliving `guard.timeout` is interrupted; a result past `guard.max_rows` is
+/// truncated and flagged.
+pub fn query_hot_cold(
+    dir: &Path,
+    sql: &str,
+    guard: QueryGuard,
+    hot: &HotRows,
+) -> Result<QueryOutput> {
+    run(dir, sql, Some(guard), hot)
+}
+
+fn run(dir: &Path, sql: &str, guard: Option<QueryGuard>, hot: &HotRows) -> Result<QueryOutput> {
     // Check the first *statement keyword*, past any leading whitespace and SQL comments — a query
     // that opens with `-- note` or `/* … */` is still a SELECT. DuckDB gets the original text.
     let head = strip_leading_sql_comments(sql).to_ascii_lowercase();
@@ -63,7 +82,7 @@ fn run(dir: &Path, sql: &str, guard: Option<QueryGuard>) -> Result<QueryOutput> 
         "SET memory_limit='{MEM_LIMIT}'; SET threads={MAX_THREADS};"
     ))
     .context("failed to configure DuckDB")?;
-    define_views(&conn, dir)?;
+    define_views(&conn, dir, hot)?;
     // A nest can ship derived-entity views (`views/*.sql`) that build on the per-event tables; the
     // analytical `/sql` surface sees them. Point-reads (`net_balances`, `get_row`) deliberately skip
     // this — they only touch the raw per-event tables.
@@ -389,7 +408,7 @@ pub fn get_row(dir: &Path, block: u64, log_index: u64) -> Result<Option<Value>> 
 /// SQL (RFC-0001 §2) each such column `c` gets two derived view columns: `c_dec` — the value as
 /// `DECIMAL(38,0)` when it fits, else NULL — and `c_overflow` — true when the exact value exceeds
 /// 38 digits (so `c_dec` is NULL but `c` isn't). Analytics can `SUM(c_dec)` without hand-casting.
-fn define_views(conn: &Connection, dir: &Path) -> Result<()> {
+fn define_views(conn: &Connection, dir: &Path, hot: &HotRows) -> Result<()> {
     let manifest = crate::seal::load_manifest(dir)?;
     let schema = schema_columns(dir);
     let cols_of = |table: &str| -> &[(String, String)] {
@@ -401,42 +420,132 @@ fn define_views(conn: &Connection, dir: &Path) -> Result<()> {
     };
     let seg_dir = dir.join(crate::seal::SEGMENTS_DIR);
 
-    // Real views over the sealed segments.
-    for (table, segments) in &manifest.tables {
-        if segments.is_empty() {
-            continue;
-        }
-        let files: Vec<String> = segments
-            .iter()
-            .map(|s| format!("'{}'", seg_dir.join(&s.file).display()))
-            .collect();
-        let ddl = format!(
-            "CREATE VIEW \"{table}\" AS SELECT *{} FROM read_parquet([{}])",
-            derived_bigint_cols(cols_of(table)),
-            files.join(", ")
-        );
-        conn.execute_batch(&ddl)
-            .with_context(|| format!("failed to define view {table}"))?;
-    }
+    // The full set of tables to define: declared (schema) ∪ sealed (manifest) ∪ hot. Each view is the
+    // `UNION ALL` of whichever of {sealed Parquet, hot tip} exist — hot and cold are disjoint by block
+    // (sealed rows are pruned from hot), so no dedup is needed.
+    let mut tables: std::collections::BTreeSet<String> =
+        schema.iter().map(|(t, _)| t.clone()).collect();
+    tables.extend(manifest.tables.keys().cloned());
+    tables.extend(hot.keys().cloned());
 
-    // Empty typed views for every *declared* table that hasn't sealed yet, so nest views over sparse
-    // data resolve to zero rows instead of cascade-failing (a table with no events is common early on
-    // and on a low-traffic contract). Best-effort — a bad schema entry just leaves that view absent.
-    let sealed: std::collections::HashSet<&str> = manifest
-        .tables
-        .iter()
-        .filter(|(_, s)| !s.is_empty())
-        .map(|(t, _)| t.as_str())
-        .collect();
-    for (table, cols) in &schema {
-        if sealed.contains(table.as_str()) || cols.is_empty() {
-            continue;
+    for table in &tables {
+        let cols = cols_of(table);
+        let sealed_files: Vec<String> = manifest
+            .tables
+            .get(table)
+            .map(|segs| {
+                segs.iter()
+                    .map(|s| format!("'{}'", seg_dir.join(&s.file).display()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let hot_rows = hot.get(table).map(Vec::as_slice).unwrap_or(&[]);
+
+        let mut parts: Vec<String> = Vec::new();
+        if !sealed_files.is_empty() {
+            parts.push(format!(
+                "SELECT *{} FROM read_parquet([{}])",
+                derived_bigint_cols(cols),
+                sealed_files.join(", ")
+            ));
         }
-        if let Err(e) = conn.execute_batch(&empty_view_ddl(table, cols)) {
-            tracing::debug!("empty view {table} skipped: {e}");
+        // The hot tip: load this table's unsealed rows into a temp table, then union it in. Columns are
+        // derived from the rows themselves (like the sealed Parquet, `seal::rows_to_batch`), so this
+        // works with or without a `schema.json`. The `*_dec` derived columns still come from the schema.
+        if !hot_rows.is_empty() {
+            let hot_tbl = format!("__hot_{table}");
+            match load_hot_temp(conn, &hot_tbl, hot_rows) {
+                Ok(()) => parts.push(format!(
+                    "SELECT *{} FROM \"{hot_tbl}\"",
+                    derived_bigint_cols(cols)
+                )),
+                Err(e) => tracing::debug!("hot rows for {table} skipped: {e:#}"),
+            }
+        }
+
+        let ddl = if parts.is_empty() {
+            // Nothing sealed and nothing hot: an empty typed view so nest views resolve to zero rows
+            // instead of cascade-failing (skip a table with no declared columns).
+            if cols.is_empty() {
+                continue;
+            }
+            empty_view_ddl(table, cols)
+        } else {
+            // `UNION ALL BY NAME` aligns columns by name and NULL-fills any a side lacks (a column all-
+            // null over the sealed range is dropped from its Parquet schema; hot may still carry it).
+            format!(
+                "CREATE VIEW \"{table}\" AS {}",
+                parts.join(" UNION ALL BY NAME ")
+            )
+        };
+        if let Err(e) = conn.execute_batch(&ddl) {
+            tracing::debug!("view {table} skipped: {e}");
         }
     }
     Ok(())
+}
+
+/// The DuckDB column type for a sealed/hot column, matching `seal::rows_to_batch`: the four counter
+/// columns are `UBIGINT`, everything else is stored as canonical text (`VARCHAR`).
+fn hot_col_type(name: &str) -> &'static str {
+    if matches!(
+        name,
+        "block_number" | "log_index" | "_seq" | "block_timestamp"
+    ) {
+        "UBIGINT"
+    } else {
+        "VARCHAR"
+    }
+}
+
+/// Create a temp table for one logical table's hot rows and append them, typed to match the sealed
+/// Parquet (so `UNION ALL BY NAME` lines up). Columns are the sorted union of the rows' JSON keys —
+/// exactly how `seal::rows_to_batch` derives the Parquet schema — so no `schema.json` is required.
+/// Value marshalling mirrors seal exactly: counter columns are `u64` (0 if absent), every other column
+/// is the JSON string as-is, or the JSON value stringified, or NULL when absent/null.
+fn load_hot_temp(conn: &Connection, name: &str, rows: &[Value]) -> Result<()> {
+    let mut columns: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for r in rows {
+        if let Some(obj) = r.as_object() {
+            columns.extend(obj.keys().cloned());
+        }
+    }
+    let columns: Vec<String> = columns.into_iter().collect();
+    if columns.is_empty() {
+        bail!("hot rows have no columns");
+    }
+    let coldefs: Vec<String> = columns
+        .iter()
+        .map(|c| format!("\"{c}\" {}", hot_col_type(c)))
+        .collect();
+    conn.execute_batch(&format!(
+        "CREATE TEMP TABLE \"{name}\" ({})",
+        coldefs.join(", ")
+    ))?;
+    let mut app = conn.appender(name)?;
+    for row in rows {
+        let vals: Vec<DuckValue> = columns
+            .iter()
+            .map(|c| json_to_duck(row.get(c), c))
+            .collect();
+        let refs: Vec<&dyn duckdb::ToSql> = vals.iter().map(|v| v as &dyn duckdb::ToSql).collect();
+        app.append_row(refs.as_slice())?;
+    }
+    app.flush()?;
+    Ok(())
+}
+
+/// One JSON cell → a DuckDB value, mirroring `seal::rows_to_batch`'s marshalling for a matching schema.
+fn json_to_duck(v: Option<&Value>, col: &str) -> DuckValue {
+    if hot_col_type(col) == "UBIGINT" {
+        DuckValue::UBigInt(v.and_then(Value::as_u64).unwrap_or(0))
+    } else {
+        match v {
+            Some(Value::String(s)) => DuckValue::Text(s.clone()),
+            None | Some(Value::Null) => DuckValue::Null,
+            Some(other) => DuckValue::Text(other.to_string()),
+        }
+    }
 }
 
 /// Load a nest's derived-entity views from `{dir}/views/*.sql` into the connection, in sorted
@@ -704,6 +813,84 @@ template="pool"
         assert_eq!(one["to"], Value::from("0xc"));
         let appr = get_row(dir.path(), 10, 2).unwrap().unwrap();
         assert_eq!(appr["spender"], Value::from("0xd"));
+    }
+
+    #[test]
+    fn hot_tip_is_queryable_without_any_segments() {
+        // RFC-0013: a nest with only unsealed tip data (no segments, no schema.json) is still SQL-
+        // queryable — the hot rows are loaded into a temp table with data-derived columns.
+        let dir = tempfile::tempdir().unwrap();
+        let mut hot = HotRows::new();
+        hot.insert(
+            "usdc__transfer".into(),
+            vec![
+                serde_json::json!({"table":"usdc__transfer","from":"0xa","to":"0xb","value":"5","block_number":100,"tx_hash":"0xt","log_index":0}),
+                serde_json::json!({"table":"usdc__transfer","from":"0xa","to":"0xc","value":"7","block_number":101,"tx_hash":"0xt","log_index":0}),
+            ],
+        );
+        let guard = QueryGuard {
+            timeout: Duration::from_secs(5),
+            max_rows: 1000,
+        };
+        let out = query_hot_cold(
+            dir.path(),
+            r#"SELECT count(*) AS n, SUM(CAST(value AS DECIMAL(38,0))) AS total FROM "usdc__transfer""#,
+            guard,
+            &hot,
+        )
+        .unwrap();
+        assert_eq!(out.rows[0]["n"], Value::from(2u64));
+        // Big-int text summed via DECIMAL; DuckDB returns decimals as strings.
+        assert_eq!(out.rows[0]["total"].as_str(), Some("12"));
+    }
+
+    #[test]
+    fn sql_unions_the_hot_tip_with_sealed_cold() {
+        // The federation: sealed history + unsealed tip, one SQL surface (RFC-0013). Hot and cold are
+        // disjoint by block, so a plain UNION ALL is exact.
+        let dir = tempfile::tempdir().unwrap();
+        let cold = vec![
+            r#"{"table":"usdc__transfer","from":"0xa","to":"0xb","value":"5","block_number":10,"tx_hash":"0xt","log_index":0}"#.to_string(),
+            r#"{"table":"usdc__transfer","from":"0xa","to":"0xc","value":"7","block_number":10,"tx_hash":"0xt","log_index":1}"#.to_string(),
+        ];
+        crate::seal::seal_range(dir.path(), &cold, 10, 10).unwrap();
+        let mut hot = HotRows::new();
+        hot.insert(
+            "usdc__transfer".into(),
+            vec![
+                serde_json::json!({"table":"usdc__transfer","from":"0xd","to":"0xe","value":"9","block_number":20,"tx_hash":"0xu","log_index":0}),
+            ],
+        );
+        let guard = QueryGuard {
+            timeout: Duration::from_secs(5),
+            max_rows: 1000,
+        };
+        // Cold-only sees the 2 sealed rows; hot+cold sees all 3.
+        let cold_only = query_guarded(
+            dir.path(),
+            r#"SELECT count(*) AS n FROM "usdc__transfer""#,
+            guard,
+        )
+        .unwrap();
+        assert_eq!(cold_only.rows[0]["n"], Value::from(2u64));
+        let both = query_hot_cold(
+            dir.path(),
+            r#"SELECT count(*) AS n FROM "usdc__transfer""#,
+            guard,
+            &hot,
+        )
+        .unwrap();
+        assert_eq!(both.rows[0]["n"], Value::from(3u64));
+        // The hot row is visible with its columns, filterable by block.
+        let tip = query_hot_cold(
+            dir.path(),
+            r#"SELECT "to" FROM "usdc__transfer" WHERE block_number = 20"#,
+            guard,
+            &hot,
+        )
+        .unwrap();
+        assert_eq!(tip.rows.len(), 1);
+        assert_eq!(tip.rows[0]["to"], Value::from("0xe"));
     }
 
     #[test]

@@ -2,6 +2,23 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-18 - RFC-0013 §3: the hot tip is now SQL-queryable.** `/sql` used to see only sealed
+  segments (DuckDB over Parquet) — the unsealed tip in redb was invisible to SQL, so a fresh-but-
+  unsealed table read "does not exist". Now each table's DuckDB view is `sealed Parquet UNION ALL
+  hot-tip`: the hot rows are scanned from redb (`Store::hot_rows_by_table`, one bounded scan — sealed
+  rows are pruned from hot) into a per-table temp table (`analytics::load_hot_temp`) typed to match the
+  Parquet exactly (four counter columns `UBIGINT`, the rest canonical-text `VARCHAR`; columns
+  data-derived from the rows like `seal::rows_to_batch`, so no `schema.json` needed). Hot and cold are
+  disjoint by block, so the union is exact — no dedup. `query_hot_cold` is the new `/sql` entry point;
+  the cold-only `query_guarded` stays for trusted point-reads and the `/table` cold fill (which merges
+  hot itself). **Chosen HOW — DuckDB, not DataFusion:** a dependency spike showed DataFusion is
+  premature (under MSRV 1.85 cargo picks DataFusion 48 → arrow 55, clashing with our arrow 56; +~100
+  crates atop a binary that already bundles DuckDB) — exactly the weight RFC-0013 §4 says to
+  benchmark-gate first. So the §3 goal shipped on the engine we already have; a DataFusion
+  `TableProvider` stays the documented, gated destination. **Gate met:** hot-only-queryable test,
+  hot∪cold federation test (cold-only sees 2 sealed rows, hot+cold sees 3), clippy `-D warnings` clean;
+  verified live on Arbitrum (`SELECT count(*)`, `GROUP BY` top-senders over unsealed `arb__transfer`).
+  141 tests (+2).
 - **2026-07-18 - RFC-0012 roost slice 7: example + operators docs — RFC-0012 COMPLETE.** A runnable
   two-nest roost example at `examples/roost/` (the ARB token + native USDC, both on Arbitrum One) with a
   README covering `roost dev`, the `/nests` roster + `/<name>/…` routing, footprint/`max_rss`, and the
