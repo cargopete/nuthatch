@@ -758,12 +758,11 @@ fn derived_bigint_cols(cols: &[(String, String)]) -> String {
 fn empty_view_ddl(table: &str, cols: &[(String, String)]) -> String {
     let mut sel: Vec<String> = Vec::new();
     for (name, storage) in cols {
-        // u64 implicit columns are UBIGINT in parquet; everything else is stored as text (VARCHAR).
-        let ty = if storage == "u64" {
-            "UBIGINT"
-        } else {
-            "VARCHAR"
-        };
+        // COR-4: type by column NAME (`hot_col_type`), exactly as `seal::rows_to_batch` and the hot temp
+        // table do — only the four counter columns are UBIGINT, everything else (incl. a `u64`-storage
+        // event field like a `uint24`) is VARCHAR. Typing by *storage* here made a column flip type the
+        // instant the first row sealed (`AVG(fee)` valid empty, erroring once populated).
+        let ty = hot_col_type(name);
         sel.push(format!("CAST(NULL AS {ty}) AS \"{name}\""));
         if is_bigint(storage) {
             sel.push(format!("CAST(NULL AS DECIMAL(38,0)) AS \"{name}_dec\""));
@@ -969,6 +968,21 @@ template="pool"
         )
         .unwrap();
         assert_eq!(out.rows[0]["n"], Value::from(2u64));
+    }
+
+    #[test]
+    fn empty_view_types_columns_by_name_not_storage() {
+        // COR-4: a `u64`-storage event field with a NON-counter name (e.g. a `uint24` fee) must be
+        // VARCHAR in the empty view — matching what `seal::rows_to_batch` writes — so the column's SQL
+        // type doesn't flip (valid empty, erroring once populated) the instant the first row seals.
+        let ddl = empty_view_ddl("pool__swap", &[("fee".to_string(), "u64".to_string())]);
+        assert!(
+            ddl.contains(r#"CAST(NULL AS VARCHAR) AS "fee""#),
+            "u64-storage non-counter column must be VARCHAR, got: {ddl}"
+        );
+        // The four counter columns stay UBIGINT (by name).
+        let ddl2 = empty_view_ddl("t__e", &[("block_number".to_string(), "u64".to_string())]);
+        assert!(ddl2.contains(r#"CAST(NULL AS UBIGINT) AS "block_number""#));
     }
 
     #[test]
