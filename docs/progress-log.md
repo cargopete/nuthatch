@@ -2,6 +2,23 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-18 - RFC-0012 slice 5: `nuthatch nest pack` (content-addressed nest blob).** First step of
+  nest packaging — the deploy unit. `nest pack <dir>` bundles a nest's *authored inputs* (config, ABIs,
+  views, labels, skills, schema, llms.txt) plus a canonical `manifest.json`, and prints the **blob
+  hash** = `sha256` over the canonical manifest (fixed field order, files sorted by path, compact
+  encoding — a Merkle root over the inputs). The manifest pins the *expected* `registry_hash`
+  (regenerated from the inputs, not a stored artifact) + the generator version, so a later `mount` can
+  reproduce the decode and assert it matches — extending determinism from the data path (RFC-0009's
+  content-addressed segments) to the *authoring* path. Derived/runtime files (`nuthatch.redb`,
+  `segments/`) are excluded; the blob hashes inputs only. New `src/blob.rs`, `nest` command group (kept
+  distinct from the RFC-0008 compliance `pack`). **Gate met:** determinism test (same inputs →
+  byte-identical canonical manifest + blob hash), registry-hash-pins-and-verifies test, changed-input-
+  changes-hash test, derived-files-excluded test; verified live packing the real graph-gns-nest (blob
+  `8572817d…`, reproducible). 125 tests (+3), clippy clean. Chosen HOW: blob is a content-addressed
+  *directory* (dep-free, trivially reproducible; identity is the manifest hash, so a single-file tar
+  container is a later wrapper). Next: slice 6 (`nest mount` — resolve + verify + install), then the
+  roost (§2, which needs the §0 CLAUDE.md amendment first).
+
 - **2026-07-18 - RFC-0011 pilot SHIPPED to production, then parked.** Two Lodestar panels now serve
   live from nuthatch instead of The Graph: the **delegation-activity feed** (HorizonStaking, byte-
   identical parity) and the **developer-activity chart** (L2GNS `SubgraphPublished`, ~0–1% documented

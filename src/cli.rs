@@ -38,6 +38,33 @@ pub enum Command {
     Pack(PackArgs),
     /// Audit the compliance annotations: `replay` re-proves them, `report` summarises them (C6).
     Audit(AuditArgs),
+    /// Package a nest as a content-addressed blob — the deploy unit (RFC-0012).
+    Nest(NestArgs),
+}
+
+#[derive(Args)]
+pub struct NestArgs {
+    #[command(subcommand)]
+    pub what: NestWhat,
+}
+
+#[derive(Subcommand)]
+pub enum NestWhat {
+    /// Pack a nest directory into a content-addressed blob: its authored inputs (config, ABIs, views,
+    /// labels, skills) plus a `manifest.json` pinning the expected decode-registry hash. Prints the
+    /// blob hash — the nest's content address.
+    Pack(NestPackArgs),
+}
+
+#[derive(Args)]
+pub struct NestPackArgs {
+    /// Nest directory to pack.
+    #[arg(default_value = ".")]
+    pub dir: String,
+
+    /// Output blob directory (default: `<nest-name>-<hash>.nest` beside the nest).
+    #[arg(long)]
+    pub out: Option<String>,
 }
 
 #[derive(Args)]

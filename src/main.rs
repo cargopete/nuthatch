@@ -9,8 +9,8 @@
 //! onto this spine — see docs/ROADMAP as it lands. What matters here is that it's *alive*.
 
 use nuthatch::{
-    audit, bench, check, cli, config, indexer, labels, lists, mcp, pack, project, screen, store,
-    transform,
+    audit, bench, blob, check, cli, config, indexer, labels, lists, mcp, pack, project, screen,
+    store, transform,
 };
 
 use anyhow::Result;
@@ -40,6 +40,12 @@ async fn main() -> Result<()> {
         cli::Command::Screen(args) => screen::backfill(args),
         cli::Command::Pack(args) => pack::run(args, &now_stamp()),
         cli::Command::Audit(args) => audit::run(args),
+        cli::Command::Nest(args) => match args.what {
+            cli::NestWhat::Pack(a) => blob::pack(
+                std::path::Path::new(&a.dir),
+                a.out.as_deref().map(std::path::Path::new),
+            ),
+        },
     }
 }
 

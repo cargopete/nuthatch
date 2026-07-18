@@ -234,9 +234,14 @@ is the gateway's identity-shaped job, unchanged from the node-vs-gateway split.
    reorgs converge every mounted nest independently).
 4. **Footprint model.** Pre-mount RSS estimate, `max_rss` refusal, per-nest `/metrics`
    attribution. Publish a 3-nest roost RSS number (the honesty rule).
-5. **`pack` + blob manifest.** Canonical manifest, blob hashing, `nuthatch pack <dir>`;
-   reproducible-hash assert on a round-trip (`pack` then regenerate registry → hashes
-   match). Byte-identical `pack` across machines (determinism test).
+5. **`pack` + blob manifest.** ✅ **Done (2026-07-18).** Shipped as `nuthatch nest pack <dir>` (the
+   `nest` command group — the RFC-0008 compliance `pack` already owns the bare verb). Canonical
+   manifest (`{blob_format_version, nest_name, schema_version, generator_version, registry_hash,
+   files:[{path,sha256}]}`, files sorted, compact encoding), blob hash = `sha256` of the canonical
+   manifest, `registry_hash` regenerated from inputs + `verify_registry_reproduces` (the check `mount`
+   will run). Blob is a content-addressed *directory* for now (identity is the manifest hash; a
+   single-file container is a later wrapper). Tests: determinism, registry-pin/verify, changed-input,
+   derived-file exclusion.
 6. **`mount` + local-first resolution.** Resolve chain (local CAS → BYO transport),
    verify manifest + registry_hash, install into a roost. Mount two nests from blobs.
 7. **Docs + example.** A runnable two-nest roost example (Lodestar + one more,
