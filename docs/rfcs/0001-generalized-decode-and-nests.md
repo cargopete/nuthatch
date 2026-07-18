@@ -1,6 +1,6 @@
 # RFC-0001: Generalized event decode and multi-contract nests
 
-- Status: Draft
+- Status: Implemented (2026-07-18)
 - Author: Pete (cargopete)
 - Date: 2026-07-14
 - Depends on: — (first post-skeleton slice)

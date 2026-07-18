@@ -1,6 +1,6 @@
 # RFC-0002: The Horizon nest — first real-world nest
 
-- Status: Draft
+- Status: Implemented (2026-07-18)
 - Author: Pete (cargopete)
 - Date: 2026-07-14
 - Depends on: RFC-0001

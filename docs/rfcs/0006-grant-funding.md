@@ -1,6 +1,6 @@
 # RFC-0006: Sustainability — grants (NLnet/NGI, EF ESP) alongside operator revshare
 
-- Status: Draft (v2)
+- Status: Accepted (2026-07-18) — grant drafts + governance shipped; submission/decision process ongoing
 - Author: Pete (cargopete)
 - Date: 2026-07-16 (v1: 2026-07-14)
 - Depends on: RFC-0002 (working demo — satisfied), RFC-0005 (roadmap milestones)

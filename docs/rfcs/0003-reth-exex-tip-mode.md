@@ -1,6 +1,6 @@
 # RFC-0003: reth ExEx tip mode — wiring and latency measurement
 
-- Status: Draft
+- Status: Accepted (2026-07-18) — groundwork landed (source-agnostic `run`, lib+bin, toolchain/dep gates cleared); the ExEx tip mode itself is deferred (build-order slice 6)
 - Author: Pete (cargopete)
 - Date: 2026-07-14
 - Depends on: — (parallel to RFC-0001/0002; ExExSource bridge already stubbed and tested)

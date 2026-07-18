@@ -43,7 +43,7 @@ The natural resumption is **step 2 (Indexer Directory)** — highest query volum
 folds, a clean top-N parity gate — or promoting the two ad-hoc nests into a real published
 `graph-network-nest` (which overlaps RFC-0012, nest packaging).
 
-- Status: Draft
+- Status: Parked after pilot (2026-07-18) — see the top-of-file note and "Implementation status"
 - Author: Pete (cargopete)
 - Date: 2026-07-16
 - Depends on: RFC-0001 (Implemented), RFC-0002 (Implemented — chain registry with

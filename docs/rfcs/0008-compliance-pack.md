@@ -1,6 +1,6 @@
 # RFC-0008: Compliance pack
 
-- Status: Draft (v2)
+- Status: Implemented (2026-07-18)
 - Author: Pete (cargopete)
 - Date: 2026-07-16 (v1: 2026-07-14)
 - Depends on: ~~P0 (i128/decimal balances)~~ **SATISFIED** (shipped 2026-07-15: i128

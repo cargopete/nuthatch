@@ -1,6 +1,6 @@
 # RFC-0004: Backfill throughput — measurement, then optimization
 
-- Status: Draft
+- Status: Implemented (2026-07-18)
 - Author: Pete (cargopete)
 - Date: 2026-07-14
 - Depends on: RFC-0001 (multi-event decode makes benchmarks representative)

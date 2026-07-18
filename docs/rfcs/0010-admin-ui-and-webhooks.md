@@ -1,6 +1,6 @@
 # RFC-0010: The admin UI and webhooks — ease-of-use parity
 
-- Status: Draft (v2)
+- Status: Implemented (2026-07-18) — Part A (admin UI) + Part B (HMAC-signed webhook egress)
 - Author: Pete (cargopete)
 - Date: 2026-07-16 (v1: 2026-07-14)
 - Depends on: RFC-0001 (Implemented — schema manifest drives the UI); RFC-0005 v2 §6

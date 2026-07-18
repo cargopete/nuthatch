@@ -1,6 +1,6 @@
 # RFC-0005: Release engineering — v0.1.0
 
-- Status: Draft (v2)
+- Status: Implemented (2026-07-18) — v0.3.0 shipped
 - Author: Pete (cargopete)
 - Date: 2026-07-16 (v1: 2026-07-14)
 - Depends on: RFC-0001 (Implemented), RFC-0002 (Implemented; Horizon parity fixtures

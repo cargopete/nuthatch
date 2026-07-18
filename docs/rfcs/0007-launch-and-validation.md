@@ -1,6 +1,6 @@
 # RFC-0007: Launch and validation
 
-- Status: Draft (v2)
+- Status: Accepted (2026-07-18) — launch kit shipped; launch/validation process ongoing (RFC-0011 pilot is partial validation)
 - Author: Pete (cargopete)
 - Date: 2026-07-16 (v1: 2026-07-14)
 - Depends on: RFC-0005 (installable release; the rc doubles as the GraphOps pilot

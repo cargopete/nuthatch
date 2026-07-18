@@ -1,6 +1,6 @@
 # RFC-0009: Factory and dynamic contract discovery
 
-- Status: Draft (v2)
+- Status: Implemented (2026-07-18)
 - Author: Pete (cargopete)
 - Date: 2026-07-16 (v1: 2026-07-14)
 - Depends on: RFC-0001 (Implemented — decode registry, nest toml), RFC-0004

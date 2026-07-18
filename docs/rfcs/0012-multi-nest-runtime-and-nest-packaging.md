@@ -1,6 +1,6 @@
 # RFC-0012: Multi-nest runtime and content-addressed nest packaging
 
-- Status: Draft (v1)
+- Status: Accepted — implementing (2026-07-18). §0 brief amendment merged; slices 5–6 (`nest pack`/`mount`) shipped; the roost (§1–4) is next.
 - Author: Pete (cargopete)
 - Date: 2026-07-17
 - Depends on: RFC-0001 (Implemented — decode registry, nest toml), RFC-0009
