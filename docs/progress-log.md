@@ -11,6 +11,17 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   (proxy/EIP-1967 introspection, child-`end` conditions, SSE push, the 0012 live-parity proof). Notes
   the one node-independent 0014 slice worth building without the node (calldata decoder + `[extract]`
   config + schemas + volume guard). Linked from the RFC index.
+- **2026-07-18 - 0.4.0 hardening: correctness fixes (COR-3 partial timestamps, COR-4 column-type flip).**
+  **COR-3:** `rpc::block_timestamps` returned a *partial* map when a load-balanced/archive-vs-full RPC
+  omitted a block's timestamp; the seal path then defaulted it to `block_timestamp=0` and sealed that
+  permanently — breaking determinism (a re-run against a healthy endpoint yields a different content
+  hash). Now a partial response is an error, so the window retries (like a total failure), never seals
+  0. **COR-4:** the empty-table view typed columns by *storage kind* (`u64` → UBIGINT) while seal + the
+  hot temp table type by *column name* (only the four counters are UBIGINT) — so a `u64`-storage event
+  field like a `uint24 fee` flipped from UBIGINT (empty) to VARCHAR (once a row sealed), making the same
+  `AVG(fee)` query valid then error (nasty for an AI writing SQL against the schema). Empty views now
+  type by name too. Tests: empty-view-types-by-name; 146 tests, clippy clean. (Sweep continues: admin-
+  token enforcement, factory tip-cap recovery, the low-severity list, benchmarks, README, the cut.)
 - **2026-07-18 - 0.4.0 hardening: e2e test harness + batch-write throughput.** Two more sweep items.
   **E2E harness** (new `tests/`, first integration tests): a `TapeSource` scripted-mutable-chain double
   that actually answers `block_hash` and gives non-zero timestamps (the existing doubles return

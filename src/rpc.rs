@@ -223,6 +223,19 @@ impl RpcClient {
                 out.insert(block, ts);
             }
         }
+        // COR-3: a *partial* response (endpoint answered but a load-balanced/archive-vs-full split
+        // returned `null` for some block) must be an error, not a partial map — else the caller defaults
+        // the missing block's `block_timestamp` to 0 and *seals it permanently*, breaking determinism
+        // (a re-run against a healthy endpoint yields a different timestamp → different content hash).
+        // Erroring makes the seal path retry the whole window, exactly like a total failure.
+        if out.len() != blocks.len() {
+            let missing = blocks.iter().filter(|b| !out.contains_key(b)).count();
+            bail!(
+                "block_timestamps: {missing}/{} block(s) missing from the RPC response — refusing a \
+                 partial map (would seal block_timestamp=0)",
+                blocks.len()
+            );
+        }
         Ok(out)
     }
 
