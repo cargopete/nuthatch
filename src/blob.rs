@@ -194,6 +194,88 @@ pub fn pack(dir: &Path, out: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// Read + parse a blob's `manifest.json`.
+pub fn load_manifest(blob_dir: &Path) -> Result<Manifest> {
+    let raw = std::fs::read_to_string(blob_dir.join("manifest.json"))
+        .with_context(|| format!("reading blob manifest in {}", blob_dir.display()))?;
+    serde_json::from_str(&raw).context("parsing blob manifest")
+}
+
+/// `nuthatch nest mount <blob> [--dir <target>] [--expect <hash>]`: resolve a blob, verify it, and
+/// install it as a runnable nest directory. Verification is three-fold, all local, no network
+/// (RFC-0012 §5): the manifest's format version is understood, every file's bytes hash to what the
+/// manifest claims (integrity), and — after install — the decode registry *regenerated from the
+/// installed inputs* equals the manifest's `registry_hash` (the blob decodes as promised). With
+/// `--expect`, the blob's own content address is asserted too, so you mount *that* blob and no other.
+pub fn mount(blob_dir: &Path, target: Option<&Path>, expect: Option<&str>) -> Result<()> {
+    let manifest = load_manifest(blob_dir)?;
+
+    // Format gate — reject a blob authored by a newer nuthatch, exactly as `config.rs` rejects a newer
+    // schema_version. A too-new manifest may hash/verify by rules this build doesn't know.
+    if manifest.blob_format_version > BLOB_FORMAT_VERSION {
+        bail!(
+            "blob needs manifest format v{} but this build understands up to v{} — upgrade nuthatch",
+            manifest.blob_format_version,
+            BLOB_FORMAT_VERSION
+        );
+    }
+
+    // Content-address check (optional): the blob you asked for is the blob you got.
+    let hash = manifest.blob_hash();
+    if let Some(want) = expect {
+        if hash != want {
+            bail!("blob hash mismatch: expected {want}, got {hash}");
+        }
+    }
+
+    // Integrity: every file's bytes hash to the manifest's claim.
+    for f in &manifest.files {
+        let bytes = std::fs::read(blob_dir.join(&f.path))
+            .with_context(|| format!("blob is missing declared file {}", f.path))?;
+        let got = hex::encode(Sha256::digest(&bytes));
+        if got != f.sha256 {
+            bail!(
+                "blob file {} is corrupt: manifest {}, actual {got}",
+                f.path,
+                f.sha256
+            );
+        }
+    }
+
+    let target = match target {
+        Some(t) => t.to_path_buf(),
+        None => PathBuf::from(&manifest.nest_name),
+    };
+    if target.exists() && std::fs::read_dir(&target)?.next().is_some() {
+        bail!("target {} exists and is not empty", target.display());
+    }
+    for f in &manifest.files {
+        let dst = target.join(&f.path);
+        if let Some(p) = dst.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        std::fs::copy(blob_dir.join(&f.path), &dst)
+            .with_context(|| format!("installing {}", f.path))?;
+    }
+
+    // The load-bearing check: regenerate the decode registry from the *installed* inputs and assert it
+    // matches the manifest. Same inputs + same generator → same decode, verifiably.
+    verify_registry_reproduces(&target, &manifest)?;
+
+    println!(
+        "mounted nest '{}' → {}",
+        manifest.nest_name,
+        target.display()
+    );
+    println!("  blob:     {hash}");
+    println!(
+        "  registry: {} (reproduced from inputs ✓)",
+        manifest.registry_hash
+    );
+    println!("  run:      nuthatch dev --dir {}", target.display());
+    Ok(())
+}
+
 /// Verify that a nest dir's inputs reproduce the `registry_hash` a manifest claims — the check `mount`
 /// will run. Kept here so `pack` and mount share one definition of "does this blob decode as promised".
 pub fn verify_registry_reproduces(dir: &Path, manifest: &Manifest) -> Result<()> {
@@ -273,6 +355,68 @@ abi = "abis/c.json"
             before, after,
             "the blob hash is content-addressed over its inputs"
         );
+    }
+
+    #[test]
+    fn pack_then_mount_round_trips_and_verifies() {
+        let src = tempfile::tempdir().unwrap();
+        write_nest(src.path());
+        let blob = tempfile::tempdir().unwrap();
+        pack(src.path(), Some(blob.path())).unwrap();
+
+        let manifest = load_manifest(blob.path()).unwrap();
+        let target = tempfile::tempdir().unwrap();
+        // Mount with the correct expected hash → installs a runnable nest whose registry reproduces.
+        mount(
+            blob.path(),
+            Some(target.path()),
+            Some(&manifest.blob_hash()),
+        )
+        .unwrap();
+        assert!(target.path().join(CONFIG_FILE).exists());
+        assert!(target.path().join("abis/c.json").exists());
+        verify_registry_reproduces(target.path(), &manifest).unwrap();
+    }
+
+    #[test]
+    fn mount_rejects_a_tampered_file_and_a_wrong_hash() {
+        let src = tempfile::tempdir().unwrap();
+        write_nest(src.path());
+        let blob = tempfile::tempdir().unwrap();
+        pack(src.path(), Some(blob.path())).unwrap();
+
+        // Wrong expected hash → refuse before touching disk.
+        let t0 = tempfile::tempdir().unwrap();
+        assert!(mount(blob.path(), Some(t0.path()), Some("deadbeef")).is_err());
+
+        // Tamper a file's bytes without updating the manifest → integrity check fails.
+        std::fs::write(blob.path().join("llms.txt"), "tampered\n").unwrap();
+        let t1 = tempfile::tempdir().unwrap();
+        let err = mount(blob.path(), Some(t1.path()), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("corrupt"), "got: {err}");
+    }
+
+    #[test]
+    fn mount_rejects_a_newer_blob_format() {
+        let src = tempfile::tempdir().unwrap();
+        write_nest(src.path());
+        let blob = tempfile::tempdir().unwrap();
+        pack(src.path(), Some(blob.path())).unwrap();
+        // Rewrite the manifest claiming a future format version.
+        let mut m = load_manifest(blob.path()).unwrap();
+        m.blob_format_version = BLOB_FORMAT_VERSION + 1;
+        std::fs::write(
+            blob.path().join("manifest.json"),
+            serde_json::to_string_pretty(&m).unwrap(),
+        )
+        .unwrap();
+        let t = tempfile::tempdir().unwrap();
+        let err = mount(blob.path(), Some(t.path()), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("format v"), "got: {err}");
     }
 
     #[test]

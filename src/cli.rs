@@ -54,6 +54,9 @@ pub enum NestWhat {
     /// labels, skills) plus a `manifest.json` pinning the expected decode-registry hash. Prints the
     /// blob hash — the nest's content address.
     Pack(NestPackArgs),
+    /// Verify a nest blob and install it as a runnable nest directory. Checks the manifest format, each
+    /// file's hash, and that the decode registry regenerated from the inputs matches the manifest.
+    Mount(NestMountArgs),
 }
 
 #[derive(Args)]
@@ -65,6 +68,20 @@ pub struct NestPackArgs {
     /// Output blob directory (default: `<nest-name>-<hash>.nest` beside the nest).
     #[arg(long)]
     pub out: Option<String>,
+}
+
+#[derive(Args)]
+pub struct NestMountArgs {
+    /// Blob directory to mount (a `nest pack` output).
+    pub blob: String,
+
+    /// Target directory to install the nest into (default: the nest's name).
+    #[arg(long)]
+    pub dir: Option<String>,
+
+    /// Assert the blob's content-address hash equals this value before installing.
+    #[arg(long)]
+    pub expect: Option<String>,
 }
 
 #[derive(Args)]

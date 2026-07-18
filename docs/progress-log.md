@@ -2,6 +2,20 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-18 - RFC-0012 slice 6: `nuthatch nest mount` (verify + install a nest blob).** The other half
+  of the pack/mount round-trip. `nest mount <blob> [--dir <target>] [--expect <hash>]` resolves a blob
+  from the **local** filesystem (no network — the no-phone-home line holds by construction; a BYO
+  transport stays a later wrapper), then verifies before installing: rejects a `blob_format_version`
+  this build doesn't understand, checks the optional `--expect` content address *before* touching disk,
+  and hashes every file against the manifest. It installs into `./<nest_name>/` (or `--dir`, refusing a
+  non-empty target), then runs `verify_registry_reproduces` — regenerating the decode registry from the
+  *installed* inputs and asserting it equals the manifest's pinned `registry_hash`. So a mount that
+  succeeds proves the nest decodes exactly as its author's did: determinism carried across the wire, not
+  just the disk. **Gate met:** pack→mount round-trip (registry reproduces from installed inputs),
+  wrong-`--expect` reject (fails before disk), tampered-file reject, newer-format reject. 128 tests
+  (+3), clippy clean. Chosen HOW: standalone verb installing a blob into a plain directory — the roost
+  half of RFC-0012 slice 6 (mount *into a roost*, two nests one cursor) waits on the roost runtime (§2),
+  itself gated on the §0 CLAUDE.md amendment. Next: the roost — starting with that amendment.
 - **2026-07-18 - RFC-0012 slice 5: `nuthatch nest pack` (content-addressed nest blob).** First step of
   nest packaging — the deploy unit. `nest pack <dir>` bundles a nest's *authored inputs* (config, ABIs,
   views, labels, skills, schema, llms.txt) plus a canonical `manifest.json`, and prints the **blob

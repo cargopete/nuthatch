@@ -45,6 +45,11 @@ async fn main() -> Result<()> {
                 std::path::Path::new(&a.dir),
                 a.out.as_deref().map(std::path::Path::new),
             ),
+            cli::NestWhat::Mount(a) => blob::mount(
+                std::path::Path::new(&a.blob),
+                a.dir.as_deref().map(std::path::Path::new),
+                a.expect.as_deref(),
+            ),
         },
     }
 }

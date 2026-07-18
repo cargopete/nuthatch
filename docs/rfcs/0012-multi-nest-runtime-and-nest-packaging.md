@@ -242,8 +242,17 @@ is the gateway's identity-shaped job, unchanged from the node-vs-gateway split.
    will run). Blob is a content-addressed *directory* for now (identity is the manifest hash; a
    single-file container is a later wrapper). Tests: determinism, registry-pin/verify, changed-input,
    derived-file exclusion.
-6. **`mount` + local-first resolution.** Resolve chain (local CAS → BYO transport),
-   verify manifest + registry_hash, install into a roost. Mount two nests from blobs.
+6. **`mount` + local-first resolution.** ✅ **Verb + verify + install done (2026-07-18).** Shipped as
+   `nuthatch nest mount <blob> [--dir <target>] [--expect <hash>]`: resolves a blob from the **local**
+   filesystem (no network — the no-phone-home line holds by construction; a BYO transport is a later
+   wrapper), rejects a newer `blob_format_version`, checks the optional `--expect` content address
+   *before* touching disk, verifies every file's `sha256` against the manifest, installs into the target
+   (defaults to `./<nest_name>/`, refuses a non-empty target), then runs `verify_registry_reproduces`
+   — regenerating the decode registry from the *installed* inputs and asserting it matches the manifest's
+   pinned `registry_hash`. Tests: pack→mount round-trip (+registry reproduces), wrong-`--expect` reject,
+   tampered-file reject, newer-format reject. **Deferred to the roost slices:** installing *into a roost*
+   and mounting two nests under one cursor (needs the roost runtime, §2, gated on the §0 CLAUDE.md
+   amendment).
 7. **Docs + example.** A runnable two-nest roost example (Lodestar + one more,
    same chain), mounted from blobs; operators page update.
 
