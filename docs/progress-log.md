@@ -2,6 +2,12 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-18 - Release v0.3.0.** Rolls up the whole robustness pass since v0.2.2 into a release the
+  Helsinki deployment can run: the resumable/fail-fast backfill (C1), timestamp-retry (H4), pipelined
+  shrink-retry + livelock floor (H2/H3), reorg-below-finality halt + detection fallback (M6/M7), atomic
+  manifest (M8), and lazy IVM views (L10). The one deferred finding, M5 (redb write batching + moving
+  seal/DuckDB off the async workers), is a benchmarked follow-up. Deployed to the box, replacing v0.2.1.
+
 - **2026-07-18 - Backfill review M6/M7/M8/L10: reorg halt, checkpoint blind spot, atomic manifest, lazy views.**
   The medium/low findings. **M6:** a reorg whose common ancestor is *below* the sealed watermark is a
   finality violation this model can't repair (the doomed blocks are already immutable and pruned from
