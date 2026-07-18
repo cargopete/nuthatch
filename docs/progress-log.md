@@ -2,6 +2,22 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-18 - RFC-0012 roost slice 2a groundwork: extract `NestIngest` from `index_loop`.** A
+  strictly behaviour-preserving refactor — the enabling step for the shared cursor. The single-nest
+  tip-following loop's per-nest state (store, decode registry, the three IVM views, labels/screener,
+  flags, alerts/webhooks, factory + discovered-child registry, finality, the getLogs filter) is grouped
+  into a `NestIngest` struct with two methods: `handle_reorg` (detect + retract views + drop children +
+  roll back the hot store) and `process_window` (decode → store → IVM-feed → screen → checkpoint → seal
+  → deliver webhooks). `index_loop` now builds one `NestIngest` and drives it; the `--seal-direct`
+  phase-0 backfill, warm-restart, cold-start cursor, adaptive chunker and getLogs fetch stay inline. The
+  point: the coming shared-cursor driver (slice 2a) will drive *N* `NestIngest`s through the **same**
+  per-window code, so "byte-identical vs solo" holds by construction rather than by re-implementation.
+  Zero behaviour change (so zero risk to the live Helsinki deploy): all 132 tests pass unchanged
+  (reorg property + golden-decode tests included), clippy `-D warnings` clean, fmt clean. The extraction
+  was done under a tight behaviour-preserving spec and every moved line reviewed against the original
+  (notably: the reorg/seal path, and the `next = to + 1` advance which moved to the caller — verified
+  nothing in the seal tail reads `next`). Next: the shared cursor itself — one poll, union filter,
+  demux each log to the owning nest's `NestIngest`, with path-equivalence as the gate.
 - **2026-07-18 - RFC-0012 roost slice 1: layout + serving (`nuthatch roost dev`).** The first slice of
   the multi-nest runtime — a **roost** hosting many nests on one chain. A `roost.toml` (`[roost]`
   chain/chain_id/rpc_urls + a `nests` list) at the roost root names the shared chain and the mounted

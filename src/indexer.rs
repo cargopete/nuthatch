@@ -730,6 +730,298 @@ pub async fn backfill_direct_factory(
     Ok(total)
 }
 
+/// All the per-nest state the tip-following loop owns and mutates, extracted from `index_loop`'s
+/// argument list so a later change can drive many nests from one cursor (RFC-0012). This is a pure
+/// mechanical grouping — the loop's behaviour is unchanged. The `Source` is deliberately NOT a field:
+/// it is shared (`Arc<dyn Source>`) and stays borrowed into the two methods below.
+struct NestIngest {
+    dir: PathBuf,
+    store: Store,
+    registry: Arc<DecodeRegistry>,
+    balances: BalanceView,
+    exposure: ExposureView,
+    velocity: VelocityView,
+    labels: Arc<LabelSet>,
+    screener: Arc<Option<LiveScreener>>,
+    threshold: Option<i128>,
+    velocity_cfg: Option<(i128, u64)>,
+    router: Arc<AlertRouter>,
+    webhooks: Arc<Vec<crate::config::Webhook>>,
+    factory: Option<Arc<FactorySet>>,
+    children: ChildRegistry,
+    finality: Finality,
+    addresses: Vec<String>,
+    topic0s: Vec<String>,
+}
+
+impl NestIngest {
+    /// Detect and handle a reorg against the last committed block. Returns `Ok(Some(next))` — the
+    /// block the caller should continue from — when a reorg was handled, `Ok(None)` when the chain
+    /// stayed canonical (or there is nothing to check yet), and propagates the finality-violation
+    /// `bail!` unchanged.
+    async fn handle_reorg(&mut self, source: &dyn Source, next: u64) -> Result<Option<u64>> {
+        // Reorg check: has the last block we committed against stayed canonical? If not, the
+        // mutable hot store rolls back to the deepest surviving checkpoint (the only place a
+        // reorg ever lands — sealed segments, once they exist, are strictly past finality).
+        if next > 0 {
+            match detect_reorg(source, &self.store, next - 1).await {
+                Ok(Some(ancestor)) => {
+                    // A reorg below the sealed watermark is a finality violation this model can't
+                    // repair: the doomed blocks are already in immutable sealed segments (and pruned
+                    // from hot), so the retraction below would be silently incomplete and the sealed
+                    // layer would permanently disagree with the canonical chain. Halt loudly instead
+                    // (deadlock-review finding M6). The `--seal-direct` finality depth / `finalized`
+                    // tag is the contract; if it's being violated, it needs raising for this chain.
+                    let sealed_through = self
+                        .store
+                        .get_meta(SEALED_THROUGH_KEY)?
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    if ancestor < sealed_through {
+                        anyhow::bail!(
+                            "reorg to block {ancestor} is below the sealed/finalized watermark \
+                             {sealed_through} — a finality violation this indexer cannot repair; \
+                             halting. Raise the chain's finality depth."
+                        );
+                    }
+                    // Retract the rolled-back transfers from the IVM view *before* dropping them
+                    // from the hot store — a reorg is just the same facts re-fed with weight −1.
+                    let last_indexed = self
+                        .store
+                        .get_meta(LAST_BLOCK_KEY)?
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(ancestor);
+                    let doomed = self.store.entities_in_range(ancestor + 1, last_indexed)?;
+                    self.balances.apply(retraction_batch(&doomed));
+                    self.exposure.apply(exposure_retraction_batch(
+                        &doomed,
+                        &self.registry,
+                        &self.labels,
+                    ));
+                    if let Some((_, w)) = self.velocity_cfg {
+                        self.velocity
+                            .apply(velocity_retraction_batch(&doomed, &self.registry, w));
+                    }
+                    // Drop children whose announcing factory event was rolled back (RFC-0009): the
+                    // registry state at B is a pure fold over factory events ≤ B.
+                    if self.factory.is_some() {
+                        let dropped = self.children.rollback_to(ancestor);
+                        if dropped > 0 {
+                            tracing::warn!("reorg: dropped {dropped} discovered child contract(s)");
+                        }
+                    }
+                    // Fire a `flag_retracted` alert for every rolled-back annotation a sink watches —
+                    // a consumer that acted on a flag learns the chain took it back (RFC-0008 C5).
+                    if !self.router.is_empty() {
+                        for j in &doomed {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(j) {
+                                if let Some(kind) = v.get("kind").and_then(|k| k.as_str()) {
+                                    if self.router.watches(kind) {
+                                        alerts::enqueue(
+                                            &self.store,
+                                            &self.router,
+                                            "flag_retracted",
+                                            kind,
+                                            &v,
+                                        )?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let removed = self.store.rollback_to(ancestor)?;
+                    self.store.set_meta(LAST_BLOCK_KEY, &ancestor.to_string())?;
+                    METRICS.inc_reorgs();
+                    METRICS.set_last_block(ancestor);
+                    tracing::warn!("reorg detected: rolled back to block {ancestor} (removed {removed} entities)");
+                    return Ok(Some(ancestor + 1));
+                }
+                Ok(None) => {}
+                Err(e) => tracing::debug!("reorg check skipped: {e:#}"),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Decode, store, IVM-feed, screen, checkpoint, seal and deliver webhooks for one fetched window
+    /// `[next, to]` (with `tip` the current chain tip, used for the finality ceiling). Returns
+    /// `Ok(Some(stored))` — the row count, caller advances the cursor — or `Ok(None)` when block
+    /// timestamps were unavailable and the window must be retried WITHOUT advancing (the cursor stays
+    /// put so a freshly-finalized window never seals `block_timestamp = 0`, deadlock-review H4).
+    async fn process_window(
+        &mut self,
+        source: &dyn Source,
+        logs: &[crate::rpc::Log],
+        next: u64,
+        to: u64,
+        tip: u64,
+    ) -> Result<Option<usize>> {
+        // Fetch timestamps for the blocks these logs touch, then decode in chain order so
+        // factory discovery is inline: a child created at log i is in the registry before its
+        // own activity at log j>i in the same window decodes (RFC-0009 same-block handling).
+        let mut blocks: Vec<u64> = logs.iter().map(|l| l.block_number).collect();
+        blocks.sort_unstable();
+        blocks.dedup();
+        let timestamps = match source.block_timestamps(&blocks).await {
+            Ok(t) => t,
+            Err(e) => {
+                // Don't store this window with zeroed timestamps — once it finalizes it would
+                // seal `block_timestamp = 0` permanently (deadlock-review finding H4). The
+                // cursor hasn't advanced, so skip and re-fetch the same window next poll.
+                tracing::warn!(
+                    "block timestamps unavailable for {next}..={to}: {e:#} — retrying window"
+                );
+                sleep_secs(2).await;
+                return Ok(None);
+            }
+        };
+        let mut rows = decode_window(
+            &self.registry,
+            self.factory.as_deref(),
+            &mut self.children,
+            logs,
+            &timestamps,
+        );
+
+        let mut stored = 0usize;
+        let mut deltas = Vec::new();
+        let mut exp_deltas = Vec::new();
+        let mut vel_deltas = Vec::new();
+        // Transfers to screen this window (only collected when screening is on).
+        let mut to_screen: Vec<TransferRow> = Vec::new();
+        for row in &mut rows {
+            let key = Store::entity_key(row.block_number, row.log_index);
+            // Feed the IVM balance + exposure views for transfer rows (extracted before storing).
+            if let Some((from, to_addr, value, _hex)) = row.erc20_transfer_fields() {
+                if let Some(v) = value.as_deref().and_then(|s| s.parse::<i128>().ok()) {
+                    deltas.extend(views::transfer_deltas(&from, &to_addr, v, 1));
+                    // Direct exposure to the labeled set (empty when neither side is labeled).
+                    exp_deltas.extend(exposure::exposure_deltas(
+                        &from,
+                        &to_addr,
+                        v,
+                        1,
+                        &self.labels,
+                    ));
+                    // Velocity: the sender's outbound volume in this block's window (C3).
+                    if let Some((_, w)) = self.velocity_cfg {
+                        vel_deltas.extend(velocity::velocity_deltas(
+                            &from,
+                            row.block_number,
+                            v,
+                            1,
+                            w,
+                        ));
+                    }
+                    // Threshold flag: a single transfer at/above the configured amount (C3).
+                    if let Some(t) = self.threshold {
+                        if let Some((fkey, ann)) = crate::flags::threshold_annotation(
+                            &from,
+                            &to_addr,
+                            v,
+                            row.block_number,
+                            row.log_index,
+                            &row.tx_hash,
+                            t,
+                        ) {
+                            self.store.put_entity(&fkey, &ann.to_string())?;
+                            alerts::enqueue(
+                                &self.store,
+                                &self.router,
+                                "flag",
+                                "threshold_flag",
+                                &ann,
+                            )?;
+                        }
+                    }
+                }
+                if self.screener.is_some() {
+                    to_screen.push(TransferRow {
+                        block_number: row.block_number,
+                        log_index: row.log_index,
+                        from: from.to_ascii_lowercase(),
+                        to: to_addr.to_ascii_lowercase(),
+                        value: value.unwrap_or_default(),
+                        tx_hash: row.tx_hash.clone(),
+                    });
+                }
+            }
+            // Every row is stored uniformly as typed JSON with a `table` field; per-table
+            // sealing groups by it.
+            self.store.put_entity(&key, &row.to_json().to_string())?;
+            stored += 1;
+        }
+        self.balances.apply(deltas);
+        self.exposure.apply(exp_deltas);
+        self.velocity.apply(vel_deltas);
+
+        // Live sanctions screening (RFC-0008 C2): screen this window's transfers against the
+        // configured list snapshots and store `sanction_hit` annotations. They share the
+        // transfers' block keys, so they seal and roll back with the same range. Stored before
+        // `maybe_seal` below so a freshly-finalized window seals its hits alongside its rows.
+        if let Some(s) = self.screener.as_ref() {
+            let hits = s.screen_window(&to_screen);
+            for (key, ann) in &hits {
+                self.store.put_entity(key, &ann.to_string())?;
+                alerts::enqueue(&self.store, &self.router, "flag", "sanction_hit", ann)?;
+            }
+            if !hits.is_empty() {
+                tracing::warn!(
+                    "sanctions screening: {} hit(s) in {next}..={to}",
+                    hits.len()
+                );
+            }
+        }
+        // Checkpoint the window boundary's canonical hash for future reorg detection.
+        if let Ok(Some(hash)) = source.block_hash(to).await {
+            self.store.set_block_hash(to, &hash)?;
+        }
+        self.store.set_meta(LAST_BLOCK_KEY, &to.to_string())?;
+        METRICS.set_last_block(to);
+        METRICS.add_rows_decoded(stored as u64);
+        if stored > 0 {
+            tracing::info!(
+                "blocks {next}..={to}: +{stored} rows (total {})",
+                self.store.count()?
+            );
+        }
+
+        // The highest block considered final under this chain's policy. For an L2 with the
+        // `finalized` tag we ask the node; otherwise (and on tag failure) it's a fixed depth.
+        let finalized_tag = match self.finality {
+            Finality::FinalizedTag { .. } => source.finalized().await.ok().flatten(),
+            Finality::Depth(_) => None,
+        };
+        let finalized_through = seal_ceiling(self.finality, tip, finalized_tag);
+
+        // Seal any newly-finalized range to an immutable Parquet segment, stamping the
+        // discovered-child registry snapshot for a factory nest (RFC-0009 step 4).
+        let snapshot = self.factory.as_ref().map(|_| self.children.hash());
+        if let Err(e) = maybe_seal(
+            &self.dir,
+            &self.store,
+            finalized_through,
+            snapshot.as_deref(),
+        ) {
+            tracing::warn!("sealing failed: {e:#}");
+        }
+        // Deliver user webhooks for whatever just sealed (RFC-0010 Part B) — enqueue only,
+        // the background worker POSTs; a slow endpoint never blocks the loop.
+        if !self.webhooks.is_empty() {
+            if let Err(e) = crate::webhooks::deliver_sealed(
+                &self.store,
+                &self.dir,
+                &self.webhooks,
+                finalized_through,
+            ) {
+                tracing::warn!("webhook delivery failed: {e:#}");
+            }
+        }
+        Ok(Some(stored))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn index_loop(
     source: Arc<dyn Source>,
@@ -910,6 +1202,28 @@ async fn index_loop(
         }
     };
 
+    // Group the per-nest state the loop owns and mutates into one struct, so a later change can drive
+    // many nests from one cursor (RFC-0012). `source` stays shared and borrowed, not owned.
+    let mut nest = NestIngest {
+        dir,
+        store,
+        registry,
+        balances,
+        exposure,
+        velocity,
+        labels,
+        screener,
+        threshold,
+        velocity_cfg,
+        router,
+        webhooks,
+        factory,
+        children,
+        finality,
+        addresses,
+        topic0s,
+    };
+
     // Adaptive getLogs sizing (RFC-0004 §2), seeded from the chain's default window.
     let mut chunker = AdaptiveWindow::for_window(window);
     loop {
@@ -923,80 +1237,9 @@ async fn index_loop(
         };
         METRICS.set_tip(tip);
 
-        // Reorg check: has the last block we committed against stayed canonical? If not, the
-        // mutable hot store rolls back to the deepest surviving checkpoint (the only place a
-        // reorg ever lands — sealed segments, once they exist, are strictly past finality).
-        if next > 0 {
-            match detect_reorg(source.as_ref(), &store, next - 1).await {
-                Ok(Some(ancestor)) => {
-                    // A reorg below the sealed watermark is a finality violation this model can't
-                    // repair: the doomed blocks are already in immutable sealed segments (and pruned
-                    // from hot), so the retraction below would be silently incomplete and the sealed
-                    // layer would permanently disagree with the canonical chain. Halt loudly instead
-                    // (deadlock-review finding M6). The `--seal-direct` finality depth / `finalized`
-                    // tag is the contract; if it's being violated, it needs raising for this chain.
-                    let sealed_through = store
-                        .get_meta(SEALED_THROUGH_KEY)?
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(0);
-                    if ancestor < sealed_through {
-                        anyhow::bail!(
-                            "reorg to block {ancestor} is below the sealed/finalized watermark \
-                             {sealed_through} — a finality violation this indexer cannot repair; \
-                             halting. Raise the chain's finality depth."
-                        );
-                    }
-                    // Retract the rolled-back transfers from the IVM view *before* dropping them
-                    // from the hot store — a reorg is just the same facts re-fed with weight −1.
-                    let last_indexed = store
-                        .get_meta(LAST_BLOCK_KEY)?
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(ancestor);
-                    let doomed = store.entities_in_range(ancestor + 1, last_indexed)?;
-                    balances.apply(retraction_batch(&doomed));
-                    exposure.apply(exposure_retraction_batch(&doomed, &registry, &labels));
-                    if let Some((_, w)) = velocity_cfg {
-                        velocity.apply(velocity_retraction_batch(&doomed, &registry, w));
-                    }
-                    // Drop children whose announcing factory event was rolled back (RFC-0009): the
-                    // registry state at B is a pure fold over factory events ≤ B.
-                    if factory.is_some() {
-                        let dropped = children.rollback_to(ancestor);
-                        if dropped > 0 {
-                            tracing::warn!("reorg: dropped {dropped} discovered child contract(s)");
-                        }
-                    }
-                    // Fire a `flag_retracted` alert for every rolled-back annotation a sink watches —
-                    // a consumer that acted on a flag learns the chain took it back (RFC-0008 C5).
-                    if !router.is_empty() {
-                        for j in &doomed {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(j) {
-                                if let Some(kind) = v.get("kind").and_then(|k| k.as_str()) {
-                                    if router.watches(kind) {
-                                        alerts::enqueue(
-                                            &store,
-                                            &router,
-                                            "flag_retracted",
-                                            kind,
-                                            &v,
-                                        )?;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    let removed = store.rollback_to(ancestor)?;
-                    store.set_meta(LAST_BLOCK_KEY, &ancestor.to_string())?;
-                    METRICS.inc_reorgs();
-                    METRICS.set_last_block(ancestor);
-                    tracing::warn!("reorg detected: rolled back to block {ancestor} (removed {removed} entities)");
-                    next = ancestor + 1;
-                    continue;
-                }
-                Ok(None) => {}
-                Err(e) => tracing::debug!("reorg check skipped: {e:#}"),
-            }
+        if let Some(new_next) = nest.handle_reorg(source.as_ref(), next).await? {
+            next = new_next;
+            continue;
         }
 
         if next > tip {
@@ -1006,157 +1249,17 @@ async fn index_loop(
         }
 
         let to = (next + chunker.window() - 1).min(tip);
-        match source.logs(&addresses, &topic0s, next, to).await {
+        match source.logs(&nest.addresses, &nest.topic0s, next, to).await {
             Ok(logs) => {
                 chunker.observed(logs.len() as u64);
-                // Fetch timestamps for the blocks these logs touch, then decode in chain order so
-                // factory discovery is inline: a child created at log i is in the registry before its
-                // own activity at log j>i in the same window decodes (RFC-0009 same-block handling).
-                let mut blocks: Vec<u64> = logs.iter().map(|l| l.block_number).collect();
-                blocks.sort_unstable();
-                blocks.dedup();
-                let timestamps = match source.block_timestamps(&blocks).await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        // Don't store this window with zeroed timestamps — once it finalizes it would
-                        // seal `block_timestamp = 0` permanently (deadlock-review finding H4). The
-                        // cursor hasn't advanced, so skip and re-fetch the same window next poll.
-                        tracing::warn!(
-                            "block timestamps unavailable for {next}..={to}: {e:#} — retrying window"
-                        );
-                        sleep_secs(2).await;
-                        continue;
-                    }
-                };
-                let mut rows = decode_window(
-                    &registry,
-                    factory.as_deref(),
-                    &mut children,
-                    &logs,
-                    &timestamps,
-                );
-
-                let mut stored = 0usize;
-                let mut deltas = Vec::new();
-                let mut exp_deltas = Vec::new();
-                let mut vel_deltas = Vec::new();
-                // Transfers to screen this window (only collected when screening is on).
-                let mut to_screen: Vec<TransferRow> = Vec::new();
-                for row in &mut rows {
-                    let key = Store::entity_key(row.block_number, row.log_index);
-                    // Feed the IVM balance + exposure views for transfer rows (extracted before storing).
-                    if let Some((from, to_addr, value, _hex)) = row.erc20_transfer_fields() {
-                        if let Some(v) = value.as_deref().and_then(|s| s.parse::<i128>().ok()) {
-                            deltas.extend(views::transfer_deltas(&from, &to_addr, v, 1));
-                            // Direct exposure to the labeled set (empty when neither side is labeled).
-                            exp_deltas
-                                .extend(exposure::exposure_deltas(&from, &to_addr, v, 1, &labels));
-                            // Velocity: the sender's outbound volume in this block's window (C3).
-                            if let Some((_, w)) = velocity_cfg {
-                                vel_deltas.extend(velocity::velocity_deltas(
-                                    &from,
-                                    row.block_number,
-                                    v,
-                                    1,
-                                    w,
-                                ));
-                            }
-                            // Threshold flag: a single transfer at/above the configured amount (C3).
-                            if let Some(t) = threshold {
-                                if let Some((fkey, ann)) = crate::flags::threshold_annotation(
-                                    &from,
-                                    &to_addr,
-                                    v,
-                                    row.block_number,
-                                    row.log_index,
-                                    &row.tx_hash,
-                                    t,
-                                ) {
-                                    store.put_entity(&fkey, &ann.to_string())?;
-                                    alerts::enqueue(
-                                        &store,
-                                        &router,
-                                        "flag",
-                                        "threshold_flag",
-                                        &ann,
-                                    )?;
-                                }
-                            }
-                        }
-                        if screener.is_some() {
-                            to_screen.push(TransferRow {
-                                block_number: row.block_number,
-                                log_index: row.log_index,
-                                from: from.to_ascii_lowercase(),
-                                to: to_addr.to_ascii_lowercase(),
-                                value: value.unwrap_or_default(),
-                                tx_hash: row.tx_hash.clone(),
-                            });
-                        }
-                    }
-                    // Every row is stored uniformly as typed JSON with a `table` field; per-table
-                    // sealing groups by it.
-                    store.put_entity(&key, &row.to_json().to_string())?;
-                    stored += 1;
-                }
-                balances.apply(deltas);
-                exposure.apply(exp_deltas);
-                velocity.apply(vel_deltas);
-
-                // Live sanctions screening (RFC-0008 C2): screen this window's transfers against the
-                // configured list snapshots and store `sanction_hit` annotations. They share the
-                // transfers' block keys, so they seal and roll back with the same range. Stored before
-                // `maybe_seal` below so a freshly-finalized window seals its hits alongside its rows.
-                if let Some(s) = screener.as_ref() {
-                    let hits = s.screen_window(&to_screen);
-                    for (key, ann) in &hits {
-                        store.put_entity(key, &ann.to_string())?;
-                        alerts::enqueue(&store, &router, "flag", "sanction_hit", ann)?;
-                    }
-                    if !hits.is_empty() {
-                        tracing::warn!(
-                            "sanctions screening: {} hit(s) in {next}..={to}",
-                            hits.len()
-                        );
-                    }
-                }
-                // Checkpoint the window boundary's canonical hash for future reorg detection.
-                if let Ok(Some(hash)) = source.block_hash(to).await {
-                    store.set_block_hash(to, &hash)?;
-                }
-                store.set_meta(LAST_BLOCK_KEY, &to.to_string())?;
-                METRICS.set_last_block(to);
-                METRICS.add_rows_decoded(stored as u64);
-                if stored > 0 {
-                    tracing::info!(
-                        "blocks {next}..={to}: +{stored} rows (total {})",
-                        store.count()?
-                    );
-                }
-                next = to + 1;
-
-                // The highest block considered final under this chain's policy. For an L2 with the
-                // `finalized` tag we ask the node; otherwise (and on tag failure) it's a fixed depth.
-                let finalized_tag = match finality {
-                    Finality::FinalizedTag { .. } => source.finalized().await.ok().flatten(),
-                    Finality::Depth(_) => None,
-                };
-                let finalized_through = seal_ceiling(finality, tip, finalized_tag);
-
-                // Seal any newly-finalized range to an immutable Parquet segment, stamping the
-                // discovered-child registry snapshot for a factory nest (RFC-0009 step 4).
-                let snapshot = factory.as_ref().map(|_| children.hash());
-                if let Err(e) = maybe_seal(&dir, &store, finalized_through, snapshot.as_deref()) {
-                    tracing::warn!("sealing failed: {e:#}");
-                }
-                // Deliver user webhooks for whatever just sealed (RFC-0010 Part B) — enqueue only,
-                // the background worker POSTs; a slow endpoint never blocks the loop.
-                if !webhooks.is_empty() {
-                    if let Err(e) =
-                        crate::webhooks::deliver_sealed(&store, &dir, &webhooks, finalized_through)
-                    {
-                        tracing::warn!("webhook delivery failed: {e:#}");
-                    }
+                match nest
+                    .process_window(source.as_ref(), &logs, next, to, tip)
+                    .await?
+                {
+                    // Window processed and committed — advance the cursor past it.
+                    Some(_stored) => next = to + 1,
+                    // Timestamps were unavailable; the cursor stayed put, retry the same window.
+                    None => continue,
                 }
             }
             Err(e) if chunker::is_result_too_large(&e) => {
