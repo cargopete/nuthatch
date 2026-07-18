@@ -2,6 +2,20 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-18 - RFC-0011 pilot SHIPPED to production, then parked.** Two Lodestar panels now serve
+  live from nuthatch instead of The Graph: the **delegation-activity feed** (HorizonStaking, byte-
+  identical parity) and the **developer-activity chart** (L2GNS `SubgraphPublished`, ~0–1% documented
+  divergence). Both on one Hetzner box (~86 MB RAM, two nests, Caddy TLS + basic-auth, path-routed to
+  one URL), flag-gated with automatic subgraph fallback, source-aware "⚡ Indexed by nuthatch" badges.
+  Verified in production + by an independent browser test. Writeups published on both the Lodestar blog
+  and the new nuthatch blog (`nuthatch-frontend` gained a content-collection `/blog`). **The wedge is
+  proven — a real dashboard with users, off The Graph, on an indexer we run.** Parked here: RFC-0011 as
+  written is much bigger (published `graph-network-nest` repo, ~6 more panel groups, GraphOps-primary +
+  Hetzner-shadow shape, env end-state, ingest-cron deletion, `checks/*.sql` parity harness, 30-day
+  soak). Full done/not-done ledger written into the RFC-0011 doc's new "Implementation status" section.
+  Natural resumption: step 2 (Indexer Directory) or promoting the ad-hoc nests into a published nest
+  (overlaps RFC-0012). Next focus: **RFC-0012 (multi-nest runtime + nest packaging).**
+
 - **2026-07-18 - Release v0.3.0.** Rolls up the whole robustness pass since v0.2.2 into a release the
   Helsinki deployment can run: the resumable/fail-fast backfill (C1), timestamp-retry (H4), pipelined
   shrink-retry + livelock floor (H2/H3), reorg-below-finality halt + detection fallback (M6/M7), atomic

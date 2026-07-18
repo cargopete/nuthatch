@@ -1,5 +1,48 @@
 # RFC-0011: The graph-network nest and the Lodestar migration
 
+- Status: **Parked after pilot (2026-07-18)** — the wedge is proven in production; the full migration is not done. See "Implementation status" below.
+
+## Implementation status (parked 2026-07-18)
+
+**The pilot shipped and the wedge is proven.** Two Lodestar panels serve live from nuthatch in
+production, each parity-checked and behind a per-panel flag with automatic subgraph fallback, on one
+Hetzner box (~86 MB RAM, both nests). Writeups: [Lodestar blog](https://www.lodestar-dashboard.com/blog/lodestar-runs-on-nuthatch)
+and the nuthatch blog. This validates the whole approach — but it is deliberately a *pilot*, not the
+RFC as written.
+
+**Done:**
+
+- The RFC-0001 blocking amendment — per-contract `events` allowlist (shipped, v0.2.x).
+- Two nests on the box: `staking` (HorizonStaking, 4 delegation events) and `gns` (L2GNS
+  `SubgraphPublished`), backfilled + tip-following, serving `/sql` behind Caddy TLS + basic-auth.
+- **Two panels migrated** (not from the numbered order below — we picked the two smallest/cleanest as a
+  proof): Lodestar's **delegation-activity feed** (byte-identical parity) and **developer-activity
+  chart** (weekly buckets, documented ~0–1% divergence). Both live, flag-gated, subgraph-fallback.
+- Ad-hoc parity validation (row/count diffs vs the gateway) for both.
+- The robustness this surfaced: the single-endpoint backfill deadlock + the whole `v0.3.0` review pass.
+
+**Not done (what "parked" means — pick up here):**
+
+1. **No published `graph-network-nest` repo.** Two ad-hoc nests live on the box; there is no
+   `init --from`-consumable published nest covering the §1 contract set. (Goal 1)
+2. **~6 of 8 panel groups unmigrated:** Horizon Activity feed (step 1), Indexer Directory + Profiles
+   (step 2 — the highest-value next target), full Delegator Portfolio + Flows incl. the thawing-fold
+   (step 3), Epochs + Overview (4), Payments + Disputes (5), Curation + full Subgraph directory (6),
+   APR/effective-cut (7).
+3. **Env end-state not reached** (Goal 3): `AMP_ENDPOINT`, `TOKEN_API_KEY` still present;
+   `GRAPH_API_KEY` still full-tier; `ARBITRUM_RPC_URL` still load-bearing.
+4. **Lodestar's `src/lib/ingest/` cron pipeline not deleted** (Goal 4).
+5. **Pilot *shape* not honored** (Goal 5): we ran **one Hetzner box**, not GraphOps-hosted primary +
+   Hetzner shadow. No cross-operator segment-hash equality check, no GraphOps involvement.
+6. **No committed `checks/*.sql` parity harness** — parity was ad-hoc, not the hermetic `nuthatch check`
+   gates per view the RFC calls for.
+7. **§4 IPFS metadata enrichment** (stretch) and the **30-day soak + full before/after-spend case study**
+   not done.
+
+The natural resumption is **step 2 (Indexer Directory)** — highest query volume, pure event-derived
+folds, a clean top-N parity gate — or promoting the two ad-hoc nests into a real published
+`graph-network-nest` (which overlaps RFC-0012, nest packaging).
+
 - Status: Draft
 - Author: Pete (cargopete)
 - Date: 2026-07-16
