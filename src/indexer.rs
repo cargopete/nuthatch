@@ -1,7 +1,7 @@
 //! `nuthatch dev` — the loop that makes it alive. Poll logs → decode → store, and serve the API
 //! concurrently. One process, one cursor, one failure boundary (per the standing brief).
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -166,10 +166,234 @@ pub async fn spawn_nest(
     window_override: Option<u64>,
     admin_enabled: bool,
 ) -> Result<NestRuntime> {
+    let (nest, state, alert_worker, window) =
+        build_nest(&source, dir, &config, window_override, admin_enabled).await?;
+    // Kick off the indexing loop in the background; serve the API on this task.
+    let ingest = tokio::spawn(index_loop(
+        source,
+        nest,
+        backfill,
+        seal_direct,
+        concurrency,
+        window,
+    ));
+    Ok(NestRuntime {
+        state,
+        ingest,
+        alert_worker,
+    })
+}
+
+/// Case-insensitive membership: is `addr` in `addresses`? The demux + dedup primitive — a provider may
+/// return checksummed addresses while our filter list is lowercase hex, so never compare raw.
+fn addr_in(addresses: &[String], addr: &str) -> bool {
+    addresses.iter().any(|a| a.eq_ignore_ascii_case(addr))
+}
+
+/// The union `getLogs` filter across all mounted nests: the case-insensitively-deduped concatenation of
+/// every nest's address list and topic0 list. One fetch feeds them all (RFC-0012 §2 — the density win:
+/// N nests cost one nest's worth of RPC chatter, not N). Takes the raw `(addresses, topic0s)` of each
+/// nest so it's testable without constructing a `NestIngest`.
+fn union_filter<'a>(
+    nests: impl Iterator<Item = (&'a [String], &'a [String])>,
+) -> (Vec<String>, Vec<String>) {
+    let mut addrs: Vec<String> = Vec::new();
+    let mut topics: Vec<String> = Vec::new();
+    for (nest_addrs, nest_topics) in nests {
+        for a in nest_addrs {
+            if !addr_in(&addrs, a) {
+                addrs.push(a.clone());
+            }
+        }
+        for t in nest_topics {
+            if !addr_in(&topics, t) {
+                topics.push(t.clone());
+            }
+        }
+    }
+    (addrs, topics)
+}
+
+/// The shared cursor (RFC-0012 slice 2a): one poll drives every mounted nest. One `source.tip()`, one
+/// union `getLogs` per window, then each returned log is demuxed to the nest(s) that own it and run
+/// through the SAME [`NestIngest::process_window`] a solo `dev` uses — so per-nest tables are
+/// byte-identical to running that nest alone. Backfill stays per-nest (each `prepare`s its own history
+/// first); the cursor only couples nests at the tip. Reorg detection is still per-nest here (shared
+/// detection + fan-out is slice 3). Factory nests are refused before we get here (slice 2b).
+async fn roost_index_loop(
+    source: Arc<dyn Source>,
+    mut nests: Vec<NestIngest>,
+    backfill: Option<u64>,
+    seal_direct: bool,
+    concurrency: usize,
+    window: u64,
+) -> Result<()> {
+    if nests.is_empty() {
+        return Ok(());
+    }
+    // Phase 0, per nest: each nest backfills its own history to near-tip independently (tip-only
+    // coupling — the shared cursor never entangles backfill windows). Each returns its own start cursor.
+    let mut nexts: Vec<u64> = Vec::with_capacity(nests.len());
+    for nest in &mut nests {
+        let next = nest
+            .prepare(source.as_ref(), backfill, seal_direct, concurrency, window)
+            .await?;
+        nexts.push(next);
+    }
+
+    let mut chunker = AdaptiveWindow::for_window(window);
+    loop {
+        let tip = match source.tip().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("tip lookup failed: {e:#}; retrying");
+                sleep_secs(3).await;
+                continue;
+            }
+        };
+        METRICS.set_tip(tip);
+
+        // Per-nest reorg check against each nest's own committed cursor. A reorg only ever lands in a
+        // nest's mutable hot store; each nest rolls back independently (shared detection is slice 3).
+        for (i, nest) in nests.iter_mut().enumerate() {
+            if let Some(new_next) = nest.handle_reorg(source.as_ref(), nexts[i]).await? {
+                nexts[i] = new_next;
+            }
+        }
+
+        // The shared cursor advances from the *least* caught-up nest, so no nest ever skips a block.
+        let global_next = *nexts.iter().min().unwrap();
+        if global_next > tip {
+            sleep_secs(2).await;
+            continue;
+        }
+        let to = (global_next + chunker.window() - 1).min(tip);
+
+        let (u_addrs, u_topics) = union_filter(
+            nests
+                .iter()
+                .map(|n| (n.addresses.as_slice(), n.topic0s.as_slice())),
+        );
+        match source.logs(&u_addrs, &u_topics, global_next, to).await {
+            Ok(logs) => {
+                chunker.observed(logs.len() as u64);
+                // Fan-out: hand each nest exactly the logs it owns within its own un-processed range,
+                // through the same per-window path a solo nest runs. A nest already past this window is
+                // skipped; a nest with zero owned logs still advances + checkpoints + seals (identical
+                // to solo — a window with no matching logs still moves the cursor).
+                for (i, nest) in nests.iter_mut().enumerate() {
+                    if nexts[i] > to {
+                        continue;
+                    }
+                    let nest_logs: Vec<crate::rpc::Log> = logs
+                        .iter()
+                        .filter(|l| l.block_number >= nexts[i] && nest.owns(l))
+                        .cloned()
+                        .collect();
+                    // `Some(_)` → committed, advance this nest past the window. `None` → timestamps were
+                    // unavailable, so leave its cursor put: `global_next` (the min) stays here, the next
+                    // iteration re-fetches, and this nest retries while nests that did advance simply
+                    // process the forward remainder — never re-processing.
+                    if nest
+                        .process_window(source.as_ref(), &nest_logs, nexts[i], to, tip)
+                        .await?
+                        .is_some()
+                    {
+                        nexts[i] = to + 1;
+                    }
+                }
+            }
+            Err(e) if chunker::is_result_too_large(&e) => {
+                if global_next >= to {
+                    return Err(e).with_context(|| single_block_over_cap(global_next));
+                }
+                chunker.too_large();
+                tracing::debug!("range {global_next}..={to} too large; shrinking and retrying");
+            }
+            Err(e) => {
+                tracing::warn!("get_logs {global_next}..={to} failed: {e:#}; retrying");
+                sleep_secs(3).await;
+            }
+        }
+    }
+}
+
+/// Build every mounted nest and spawn ONE shared-cursor ingestion task driving them all (RFC-0012
+/// slice 2a). Returns the per-nest serve states (for `/<name>/…` routing), the single shared ingest
+/// handle, and the nests' alert-delivery workers. Refuses a factory nest for now (slice 2b): its
+/// topic0-only discovery would force the whole union fetch topic0-only and tangle the address demux.
+#[allow(clippy::too_many_arguments)]
+pub async fn spawn_roost(
+    source: Arc<dyn Source>,
+    nests: Vec<(String, PathBuf, Config)>,
+    backfill: Option<u64>,
+    seal_direct: bool,
+    concurrency: usize,
+    window_override: Option<u64>,
+    admin_enabled: bool,
+) -> Result<(
+    Vec<(String, serve::AppState)>,
+    tokio::task::JoinHandle<Result<()>>,
+    Vec<tokio::task::JoinHandle<()>>,
+)> {
+    let mut ingests = Vec::new();
+    let mut states = Vec::new();
+    let mut alert_workers = Vec::new();
+    let mut window = None;
+    for (name, dir, config) in nests {
+        if !config.factories.is_empty() {
+            bail!(
+                "nest '{name}' is a factory nest — factory nests in a roost are not yet supported \
+                 (RFC-0012 slice 2b); run it solo with `nuthatch dev` for now"
+            );
+        }
+        let (nest, state, worker, w) =
+            build_nest(&source, dir, &config, window_override, admin_enabled).await?;
+        window.get_or_insert(w);
+        ingests.push(nest);
+        states.push((name, state));
+        if let Some(worker) = worker {
+            alert_workers.push(worker);
+        }
+    }
+    let window = window.unwrap_or(DEFAULT_WINDOW);
+    let ingest = tokio::spawn(roost_index_loop(
+        source,
+        ingests,
+        backfill,
+        seal_direct,
+        concurrency,
+        window,
+    ));
+    Ok((states, ingest, alert_workers))
+}
+
+/// Build one nest's runtime state *without* starting the tip loop: open its store, build its decode
+/// registry + IVM views, run the warm-restart rebuilds, and assemble both the [`NestIngest`] the
+/// ingestion loop drives and the [`serve::AppState`] the API serves — the two sharing the same view
+/// handles (the API must see the same views the loop feeds). Also spawns the optional alert/webhook
+/// delivery worker, and returns the effective `eth_getLogs` window. Spawning the ingestion loop is
+/// the caller's job ([`spawn_nest`] today; a roost driver tomorrow, RFC-0012). Per-nest isolation
+/// (own store, own segments, own views) is the CLAUDE.md non-negotiable a roost preserves by calling
+/// this once per nest.
+async fn build_nest(
+    // Unused by the single-nest build (which leaves spawning the tip loop to the caller); kept in the
+    // signature per the RFC-0012 contract so a roost driver can `build_nest` then `index_loop(source, …)`.
+    _source: &Arc<dyn Source>,
+    dir: PathBuf,
+    config: &Config,
+    window_override: Option<u64>,
+    admin_enabled: bool,
+) -> Result<(
+    NestIngest,
+    serve::AppState,
+    Option<tokio::task::JoinHandle<()>>,
+    u64,
+)> {
     let store = Store::open(&dir.join(DB_FILE))?;
     // The decode registry drives all contracts; the indexer decodes every declared event of every
     // contract in the nest into per-table rows.
-    let registry = Arc::new(DecodeRegistry::from_nest(&dir, &config)?);
+    let registry = Arc::new(DecodeRegistry::from_nest(&dir, config)?);
     let balances = BalanceView::start()?;
     // Labels (RFC-0008 C1) are the annotation substrate the exposure view joins against. Loaded before
     // the exposure view so it only spins up when there's actually something to track.
@@ -224,7 +448,7 @@ pub async fn spawn_nest(
     // runtime, so the tip loop fetches topic0-only (empty address filter) — a child created and
     // traded in the same block is then already in hand, no extra RPC.
     let factory = {
-        let fs = FactorySet::build(&config)?;
+        let fs = FactorySet::build(config)?;
         if fs.is_empty() {
             None
         } else {
@@ -297,31 +521,30 @@ pub async fn spawn_nest(
         )))
     };
 
-    // Kick off the indexing loop in the background; serve the API on this task.
-    let ingest = tokio::spawn(index_loop(
-        source.clone(),
-        store.clone(),
-        registry.clone(),
-        addresses,
-        topic0s,
-        backfill,
-        start_block,
-        dir.clone(),
-        balances.clone(),
-        exposure.clone(),
-        labels.clone(),
-        screener.clone(),
-        velocity.clone(),
+    // Group the per-nest state the loop owns and mutates into one struct, so a roost can drive many
+    // nests from one cursor (RFC-0012). `source` stays shared and borrowed, not owned; `children`
+    // starts empty (it is rebuilt/grown by `prepare`). The view handles are cloned here and shared
+    // with the `AppState` below — the API must see the same views the loop feeds.
+    let nest = NestIngest {
+        dir: dir.clone(),
+        store: store.clone(),
+        registry: registry.clone(),
+        balances: balances.clone(),
+        exposure: exposure.clone(),
+        velocity: velocity.clone(),
+        labels: labels.clone(),
+        screener: screener.clone(),
         threshold,
         velocity_cfg,
-        router.clone(),
-        webhooks.clone(),
-        factory.clone(),
+        router: router.clone(),
+        webhooks: webhooks.clone(),
+        factory: factory.clone(),
+        children: ChildRegistry::new(),
         finality,
-        window,
-        seal_direct,
-        concurrency,
-    ));
+        addresses,
+        topic0s,
+        start_block,
+    };
 
     let nest_info = serde_json::json!({
         "name": config.nest.name,
@@ -354,11 +577,7 @@ pub async fn spawn_nest(
         nest_info: Arc::new(nest_info),
     };
 
-    Ok(NestRuntime {
-        state: app_state,
-        ingest,
-        alert_worker,
-    })
+    Ok((nest, app_state, alert_worker, window))
 }
 
 /// Batch size (rows) at which `backfill_direct` flushes a sealed segment — bounds RSS during a
@@ -752,9 +971,211 @@ struct NestIngest {
     finality: Finality,
     addresses: Vec<String>,
     topic0s: Vec<String>,
+    /// The nest's earliest vendored deployment block (the min of the contracts' `start_block`s), or
+    /// `None`. Used only by [`prepare`]'s cold-start origin computation.
+    start_block: Option<u64>,
 }
 
 impl NestIngest {
+    /// Run the one-time preamble before the tip loop, then return the block to begin tip-following
+    /// from. Initialises webhook cursors, rebuilds the discovered-child registry on a warm restart,
+    /// runs the `--seal-direct` phase-0 backfill on a cold start, and computes the cold-start `next`.
+    /// Extracted verbatim from `index_loop` so a roost can build many `NestIngest`s and drive them
+    /// through the same code; `source` stays borrowed (not owned) and `window` is the chunker seed the
+    /// phase-0 backfill uses.
+    async fn prepare(
+        &mut self,
+        source: &dyn Source,
+        backfill: Option<u64>,
+        seal_direct: bool,
+        concurrency: usize,
+        window: u64,
+    ) -> Result<u64> {
+        // User webhooks (RFC-0010 Part B): initialise each subscription's cursor before any sealing, so a
+        // `since = "registration"` webhook starts at the tip and a `--seal-direct` backfill doesn't fire
+        // its history. Best-effort — a tip lookup failure just defers registration to the first live tip.
+        if !self.webhooks.is_empty() {
+            if let Ok(tip) = source.tip().await {
+                if let Err(e) = crate::webhooks::init_cursors(&self.store, &self.webhooks, tip) {
+                    tracing::warn!("webhook cursor init failed: {e:#}");
+                }
+            }
+        }
+
+        // The discovered-child registry (RFC-0009). Empty for a static nest; for a factory nest it is
+        // rebuilt from stored factory events on a warm restart (a pure fold — determinism preserved) and
+        // grown inline as the loop decodes new factory events.
+        if let Some(fs) = self.factory.as_deref() {
+            if self.store.get_meta(LAST_BLOCK_KEY)?.is_some() {
+                self.children = rebuild_children(&self.dir, &self.store, &self.registry, fs);
+                if !self.children.is_empty() {
+                    tracing::info!(
+                        "rebuilt child registry: {} discovered child contract(s)",
+                        self.children.len()
+                    );
+                }
+            }
+        }
+        // Phase 0 (cold start, `--seal-direct`): fast-seal the finalized history straight to Parquet,
+        // bypassing the hot store, then rebuild the IVM view from those segments. The tip-following loop
+        // below picks up from where this left off and handles the near-tip (un-finalized) window the
+        // normal way. Nothing here can reorg — it is all strictly past finality.
+        if seal_direct && self.store.get_meta(LAST_BLOCK_KEY)?.is_none() {
+            let tip = source.tip().await?;
+            let origin = cold_start_block(self.start_block, backfill, tip);
+            let finalized_tag = match self.finality {
+                Finality::FinalizedTag { .. } => source.finalized().await.ok().flatten(),
+                Finality::Depth(_) => None,
+            };
+            let finalized_through = seal_ceiling(self.finality, tip, finalized_tag);
+            // Resume a partial backfill instead of restarting from `origin`. A mid-backfill failure (a
+            // transient RPC error) leaves `SEALED_THROUGH` at the last durably-sealed block but `LAST_BLOCK`
+            // unset, so we re-enter here; resuming from the watermark re-fetches nothing already sealed —
+            // which on the adaptive factory path also avoids re-sealing overlapping ranges under fresh
+            // content hashes (duplicate, permanently double-counted segments). A fresh start has no
+            // watermark and resumes from `origin`.
+            let sealed_watermark = self
+                .store
+                .get_meta(SEALED_THROUGH_KEY)?
+                .and_then(|s| s.parse::<u64>().ok());
+            let resume_from = resume_from_watermark(sealed_watermark, origin);
+            if resume_from <= finalized_through {
+                // Record where the backfill *began* once; a resume keeps the original origin.
+                if self.store.get_meta(START_BLOCK_KEY)?.is_none() {
+                    self.store.set_meta(START_BLOCK_KEY, &origin.to_string())?;
+                }
+                if resume_from > origin {
+                    tracing::info!(
+                        "resuming seal-direct backfill from block {resume_from} (a prior run sealed through {})",
+                        resume_from - 1
+                    );
+                }
+                // Persist the sealed watermark after every segment, so the backfill is resumable rather
+                // than all-or-nothing (deadlock-review finding C1).
+                let on_seal = |sealed_to: u64| {
+                    self.store
+                        .set_meta(SEALED_THROUGH_KEY, &sealed_to.to_string())
+                };
+                // A factory nest backfills with the sequential two-pass (RFC-0009 §3, address-filtered,
+                // efficient, deterministic). Factory backfill is sequential regardless of `--concurrency`:
+                // the child-event bulk is inherently ordered until the step-5 topic0-flip makes filters
+                // version-independent, so pipelining below the flip buys little (RFC-0009 §3 risk note). A
+                // static nest uses the pipelined path as before.
+                let sealed = if let Some(fs) = self.factory.as_deref() {
+                    if concurrency > 1 {
+                        tracing::info!(
+                            "factory backfill runs sequentially (--concurrency {concurrency} ignored until the step-5 filter flip)"
+                        );
+                    }
+                    tracing::info!(
+                        "seal-direct factory backfill: {resume_from}..={finalized_through} (tip {tip}, sequential two-pass)…"
+                    );
+                    backfill_direct_factory(
+                        source,
+                        &self.registry,
+                        fs,
+                        &mut self.children,
+                        &self.dir,
+                        &self.topic0s,
+                        resume_from,
+                        finalized_through,
+                        window,
+                        fs.force_topic0(),
+                        on_seal,
+                    )
+                    .await?
+                } else {
+                    tracing::info!(
+                        "seal-direct backfill: {resume_from}..={finalized_through} (tip {tip}, {concurrency}-way)…"
+                    );
+                    backfill_direct_pipelined(
+                        source,
+                        &self.registry,
+                        &self.dir,
+                        &self.addresses,
+                        &self.topic0s,
+                        resume_from,
+                        finalized_through,
+                        window,
+                        concurrency,
+                        on_seal,
+                    )
+                    .await?
+                };
+                self.store
+                    .set_meta(SEALED_THROUGH_KEY, &finalized_through.to_string())?;
+                self.store
+                    .set_meta(LAST_BLOCK_KEY, &finalized_through.to_string())?;
+                tracing::info!(
+                    "seal-direct backfill done: {sealed} rows sealed over {resume_from}..={finalized_through}"
+                );
+                if let Err(e) =
+                    rebuild_balances(&self.dir, &self.store, &self.registry, &self.balances)
+                {
+                    tracing::warn!("balance rebuild after seal-direct failed: {e:#}");
+                }
+                if let Err(e) = rebuild_exposure(
+                    &self.dir,
+                    &self.store,
+                    &self.registry,
+                    &self.labels,
+                    &self.exposure,
+                ) {
+                    tracing::warn!("exposure rebuild after seal-direct failed: {e:#}");
+                }
+                if let Some((_, w)) = self.velocity_cfg {
+                    if let Err(e) =
+                        rebuild_velocity(&self.dir, &self.store, &self.registry, w, &self.velocity)
+                    {
+                        tracing::warn!("velocity rebuild after seal-direct failed: {e:#}");
+                    }
+                }
+                // Fire webhooks for the freshly-sealed history (a `since = "genesis"`/block webhook wants
+                // it; a `since = "registration"` one is cursored past it, so this is a no-op there).
+                if !self.webhooks.is_empty() {
+                    if let Err(e) = crate::webhooks::deliver_sealed(
+                        &self.store,
+                        &self.dir,
+                        &self.webhooks,
+                        finalized_through,
+                    ) {
+                        tracing::warn!("webhook delivery after seal-direct failed: {e:#}");
+                    }
+                }
+            }
+        }
+
+        // Resume from the last committed block; on a cold start, backfill from the nest's earliest
+        // vendored deployment block (full history) if it has one, else from `--backfill` behind the tip.
+        let next = match self.store.get_meta(LAST_BLOCK_KEY)? {
+            Some(v) => v.parse::<u64>().context("corrupt last_block")? + 1,
+            None => {
+                let tip = source.tip().await?;
+                let start = cold_start_block(self.start_block, backfill, tip);
+                self.store.set_meta(START_BLOCK_KEY, &start.to_string())?;
+                let src = if backfill.is_none() && self.start_block.is_some() {
+                    " (from deployment)"
+                } else {
+                    ""
+                };
+                tracing::info!("cold start: backfilling from block {start}{src} (tip {tip})");
+                start
+            }
+        };
+        Ok(next)
+    }
+
+    /// Does this log belong to this nest? Static nests (the slice-2a roost case) demux by emitting
+    /// address: the roost fetches the union of every nest's addresses, and each log routes to the
+    /// nest(s) whose address set contains it. Case-insensitive because a provider may return
+    /// checksummed addresses while our filter is lowercase. Decode is the safety net — even an
+    /// over-fetched log routed here only yields rows this nest's registry knows, so per-nest output
+    /// stays byte-identical to solo. (Factory nests are topic0-only and are refused in a roost until
+    /// slice 2b; see `spawn_roost`.)
+    fn owns(&self, log: &crate::rpc::Log) -> bool {
+        addr_in(&self.addresses, &log.address)
+    }
+
     /// Detect and handle a reorg against the last committed block. Returns `Ok(Some(next))` — the
     /// block the caller should continue from — when a reorg was handled, `Ok(None)` when the chain
     /// stayed canonical (or there is nothing to check yet), and propagates the finality-violation
@@ -1022,207 +1443,17 @@ impl NestIngest {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn index_loop(
     source: Arc<dyn Source>,
-    store: Store,
-    registry: Arc<DecodeRegistry>,
-    addresses: Vec<String>,
-    topic0s: Vec<String>,
+    mut nest: NestIngest,
     backfill: Option<u64>,
-    start_block: Option<u64>,
-    dir: PathBuf,
-    balances: BalanceView,
-    exposure: ExposureView,
-    labels: Arc<LabelSet>,
-    screener: Arc<Option<LiveScreener>>,
-    velocity: VelocityView,
-    threshold: Option<i128>,
-    velocity_cfg: Option<(i128, u64)>,
-    router: Arc<AlertRouter>,
-    webhooks: Arc<Vec<crate::config::Webhook>>,
-    factory: Option<Arc<FactorySet>>,
-    finality: Finality,
-    window: u64,
     seal_direct: bool,
     concurrency: usize,
+    window: u64,
 ) -> Result<()> {
-    // User webhooks (RFC-0010 Part B): initialise each subscription's cursor before any sealing, so a
-    // `since = "registration"` webhook starts at the tip and a `--seal-direct` backfill doesn't fire
-    // its history. Best-effort — a tip lookup failure just defers registration to the first live tip.
-    if !webhooks.is_empty() {
-        if let Ok(tip) = source.tip().await {
-            if let Err(e) = crate::webhooks::init_cursors(&store, &webhooks, tip) {
-                tracing::warn!("webhook cursor init failed: {e:#}");
-            }
-        }
-    }
-
-    // The discovered-child registry (RFC-0009). Empty for a static nest; for a factory nest it is
-    // rebuilt from stored factory events on a warm restart (a pure fold — determinism preserved) and
-    // grown inline as the loop decodes new factory events.
-    let mut children = ChildRegistry::new();
-    if let Some(fs) = factory.as_deref() {
-        if store.get_meta(LAST_BLOCK_KEY)?.is_some() {
-            children = rebuild_children(&dir, &store, &registry, fs);
-            if !children.is_empty() {
-                tracing::info!(
-                    "rebuilt child registry: {} discovered child contract(s)",
-                    children.len()
-                );
-            }
-        }
-    }
-    // Phase 0 (cold start, `--seal-direct`): fast-seal the finalized history straight to Parquet,
-    // bypassing the hot store, then rebuild the IVM view from those segments. The tip-following loop
-    // below picks up from where this left off and handles the near-tip (un-finalized) window the
-    // normal way. Nothing here can reorg — it is all strictly past finality.
-    if seal_direct && store.get_meta(LAST_BLOCK_KEY)?.is_none() {
-        let tip = source.tip().await?;
-        let origin = cold_start_block(start_block, backfill, tip);
-        let finalized_tag = match finality {
-            Finality::FinalizedTag { .. } => source.finalized().await.ok().flatten(),
-            Finality::Depth(_) => None,
-        };
-        let finalized_through = seal_ceiling(finality, tip, finalized_tag);
-        // Resume a partial backfill instead of restarting from `origin`. A mid-backfill failure (a
-        // transient RPC error) leaves `SEALED_THROUGH` at the last durably-sealed block but `LAST_BLOCK`
-        // unset, so we re-enter here; resuming from the watermark re-fetches nothing already sealed —
-        // which on the adaptive factory path also avoids re-sealing overlapping ranges under fresh
-        // content hashes (duplicate, permanently double-counted segments). A fresh start has no
-        // watermark and resumes from `origin`.
-        let sealed_watermark = store
-            .get_meta(SEALED_THROUGH_KEY)?
-            .and_then(|s| s.parse::<u64>().ok());
-        let resume_from = resume_from_watermark(sealed_watermark, origin);
-        if resume_from <= finalized_through {
-            // Record where the backfill *began* once; a resume keeps the original origin.
-            if store.get_meta(START_BLOCK_KEY)?.is_none() {
-                store.set_meta(START_BLOCK_KEY, &origin.to_string())?;
-            }
-            if resume_from > origin {
-                tracing::info!(
-                    "resuming seal-direct backfill from block {resume_from} (a prior run sealed through {})",
-                    resume_from - 1
-                );
-            }
-            // Persist the sealed watermark after every segment, so the backfill is resumable rather
-            // than all-or-nothing (deadlock-review finding C1).
-            let on_seal =
-                |sealed_to: u64| store.set_meta(SEALED_THROUGH_KEY, &sealed_to.to_string());
-            // A factory nest backfills with the sequential two-pass (RFC-0009 §3, address-filtered,
-            // efficient, deterministic). Factory backfill is sequential regardless of `--concurrency`:
-            // the child-event bulk is inherently ordered until the step-5 topic0-flip makes filters
-            // version-independent, so pipelining below the flip buys little (RFC-0009 §3 risk note). A
-            // static nest uses the pipelined path as before.
-            let sealed = if let Some(fs) = factory.as_deref() {
-                if concurrency > 1 {
-                    tracing::info!(
-                        "factory backfill runs sequentially (--concurrency {concurrency} ignored until the step-5 filter flip)"
-                    );
-                }
-                tracing::info!(
-                    "seal-direct factory backfill: {resume_from}..={finalized_through} (tip {tip}, sequential two-pass)…"
-                );
-                backfill_direct_factory(
-                    source.as_ref(),
-                    &registry,
-                    fs,
-                    &mut children,
-                    &dir,
-                    &topic0s,
-                    resume_from,
-                    finalized_through,
-                    window,
-                    fs.force_topic0(),
-                    on_seal,
-                )
-                .await?
-            } else {
-                tracing::info!(
-                    "seal-direct backfill: {resume_from}..={finalized_through} (tip {tip}, {concurrency}-way)…"
-                );
-                backfill_direct_pipelined(
-                    source.as_ref(),
-                    &registry,
-                    &dir,
-                    &addresses,
-                    &topic0s,
-                    resume_from,
-                    finalized_through,
-                    window,
-                    concurrency,
-                    on_seal,
-                )
-                .await?
-            };
-            store.set_meta(SEALED_THROUGH_KEY, &finalized_through.to_string())?;
-            store.set_meta(LAST_BLOCK_KEY, &finalized_through.to_string())?;
-            tracing::info!(
-                "seal-direct backfill done: {sealed} rows sealed over {resume_from}..={finalized_through}"
-            );
-            if let Err(e) = rebuild_balances(&dir, &store, &registry, &balances) {
-                tracing::warn!("balance rebuild after seal-direct failed: {e:#}");
-            }
-            if let Err(e) = rebuild_exposure(&dir, &store, &registry, &labels, &exposure) {
-                tracing::warn!("exposure rebuild after seal-direct failed: {e:#}");
-            }
-            if let Some((_, w)) = velocity_cfg {
-                if let Err(e) = rebuild_velocity(&dir, &store, &registry, w, &velocity) {
-                    tracing::warn!("velocity rebuild after seal-direct failed: {e:#}");
-                }
-            }
-            // Fire webhooks for the freshly-sealed history (a `since = "genesis"`/block webhook wants
-            // it; a `since = "registration"` one is cursored past it, so this is a no-op there).
-            if !webhooks.is_empty() {
-                if let Err(e) =
-                    crate::webhooks::deliver_sealed(&store, &dir, &webhooks, finalized_through)
-                {
-                    tracing::warn!("webhook delivery after seal-direct failed: {e:#}");
-                }
-            }
-        }
-    }
-
-    // Resume from the last committed block; on a cold start, backfill from the nest's earliest
-    // vendored deployment block (full history) if it has one, else from `--backfill` behind the tip.
-    let mut next = match store.get_meta(LAST_BLOCK_KEY)? {
-        Some(v) => v.parse::<u64>().context("corrupt last_block")? + 1,
-        None => {
-            let tip = source.tip().await?;
-            let start = cold_start_block(start_block, backfill, tip);
-            store.set_meta(START_BLOCK_KEY, &start.to_string())?;
-            let src = if backfill.is_none() && start_block.is_some() {
-                " (from deployment)"
-            } else {
-                ""
-            };
-            tracing::info!("cold start: backfilling from block {start}{src} (tip {tip})");
-            start
-        }
-    };
-
-    // Group the per-nest state the loop owns and mutates into one struct, so a later change can drive
-    // many nests from one cursor (RFC-0012). `source` stays shared and borrowed, not owned.
-    let mut nest = NestIngest {
-        dir,
-        store,
-        registry,
-        balances,
-        exposure,
-        velocity,
-        labels,
-        screener,
-        threshold,
-        velocity_cfg,
-        router,
-        webhooks,
-        factory,
-        children,
-        finality,
-        addresses,
-        topic0s,
-    };
+    let mut next = nest
+        .prepare(source.as_ref(), backfill, seal_direct, concurrency, window)
+        .await?;
 
     // Adaptive getLogs sizing (RFC-0004 §2), seeded from the chain's default window.
     let mut chunker = AdaptiveWindow::for_window(window);
@@ -2425,6 +2656,67 @@ template = "pool"
         assert_eq!(seal_ceiling(f, 10_000, Some(10_050)), 10_000);
         // Tag absent (endpoint doesn't serve it): fixed-depth fallback.
         assert_eq!(seal_ceiling(f, 10_000, None), 8_200);
+    }
+
+    #[test]
+    fn addr_in_is_case_insensitive() {
+        let set = vec!["0xabc123".to_string(), "0xdef456".to_string()];
+        assert!(addr_in(&set, "0xABC123")); // checksummed provider address matches lowercase filter
+        assert!(addr_in(&set, "0xdef456"));
+        assert!(!addr_in(&set, "0x999999"));
+        assert!(!addr_in(&[], "0xabc123")); // a topic0-only (factory) nest owns nothing by address
+    }
+
+    #[test]
+    fn union_filter_dedups_across_nests_case_insensitively() {
+        // Two nests, overlapping on one address ("0xAAA"/"0xaaa") and one topic (the Transfer sig).
+        let a_addrs = vec!["0xAAA".to_string(), "0xBBB".to_string()];
+        let a_topics = vec!["0xtransfer".to_string()];
+        let b_addrs = vec!["0xaaa".to_string(), "0xCCC".to_string()];
+        let b_topics = vec!["0xTRANSFER".to_string(), "0xapproval".to_string()];
+        let (addrs, topics) = union_filter(
+            [
+                (a_addrs.as_slice(), a_topics.as_slice()),
+                (b_addrs.as_slice(), b_topics.as_slice()),
+            ]
+            .into_iter(),
+        );
+        // 0xAAA and 0xaaa collapse to one; BBB and CCC distinct → 3 addresses, first-seen casing kept.
+        assert_eq!(addrs, vec!["0xAAA", "0xBBB", "0xCCC"]);
+        // The Transfer topic collapses across casing; Approval is B-only → 2 topics.
+        assert_eq!(topics, vec!["0xtransfer", "0xapproval"]);
+    }
+
+    #[test]
+    fn owns_demux_reproduces_the_solo_address_filter() {
+        // The core byte-identity claim of slice 2a: routing the union fetch through `owns` hands a nest
+        // exactly the logs a solo, address-filtered fetch would have — no more, no less. So its decode
+        // input is identical, and therefore its stored output is too.
+        let mut a = transfer_log(10, 0);
+        a.address = "0xAAA0000000000000000000000000000000000000".into();
+        let mut b = transfer_log(10, 1);
+        b.address = "0xBBB0000000000000000000000000000000000000".into();
+        let mut a2 = transfer_log(11, 0);
+        a2.address = "0xaaa0000000000000000000000000000000000000".into(); // same nest A, checksummed differently
+        let union = [a.clone(), b.clone(), a2.clone()];
+
+        let nest_a_addrs = vec!["0xAAA0000000000000000000000000000000000000".to_string()];
+        // Compare by a stable key (Log isn't PartialEq): (address-lowercased, block, log_index).
+        let key =
+            |l: &crate::rpc::Log| (l.address.to_ascii_lowercase(), l.block_number, l.log_index);
+        // What the roost feeds nest A: union filtered by A's ownership.
+        let roost_input: Vec<_> = union
+            .iter()
+            .filter(|l| addr_in(&nest_a_addrs, &l.address))
+            .map(key)
+            .collect();
+        // What a solo, address-filtered source would return for nest A: only A's own logs.
+        let solo_input: Vec<_> = [&a, &a2].into_iter().map(key).collect();
+        assert_eq!(roost_input, solo_input);
+        // Nest B's log is never routed to A.
+        assert!(!roost_input
+            .iter()
+            .any(|(addr, _, _)| addr.eq_ignore_ascii_case(&b.address)));
     }
 
     // A Source backed by canned logs — lets us drive both backfill paths deterministically, offline.

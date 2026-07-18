@@ -1,17 +1,18 @@
-//! The roost (RFC-0012 §1–3): one runtime hosting many nests on the same chain. This slice (§ plan 1)
-//! lands the **layout + serving surface** — a `roost.toml` naming the chain and the mounted nests, a
-//! `/nests` roster, and every nest's full API under a `/<name>/…` prefix — while each nest still runs
-//! its **own** cursor (the naive step). Collapsing to one shared cursor per chain is slice 2; doing
-//! routing + per-nest isolation first means slice 2 has a known-good baseline to prove byte-identity
-//! against.
+//! The roost (RFC-0012 §1–3): one runtime hosting many nests on the same chain. Slice 1 landed the
+//! **layout + serving surface** — a `roost.toml` naming the chain and the mounted nests, a `/nests`
+//! roster, and every nest's full API under a `/<name>/…` prefix. Slice 2a landed the **shared cursor**:
+//! `dev` now drives all nests from ONE `indexer::spawn_roost` task — one `getLogs` per window fanned
+//! out to the owning nests (see `indexer::roost_index_loop`), so N nests cost one nest's worth of RPC
+//! chatter. Per-nest tables stay byte-identical to running each nest solo (the same per-window code
+//! runs either way). Factory nests are refused for now (slice 2b); shared reorg fan-out is slice 3.
 //!
 //! Isolation is by construction: each nest keeps its own directory (`nests/<name>/` — its own
 //! `nuthatch.redb`, `segments/`, views), so one nest's bad view or runaway factory can't touch
-//! another's data (the CLAUDE.md non-negotiable). The roost only shares the *chain identity* and, from
-//! slice 2, the *cursor* — never the stores.
+//! another's data (the CLAUDE.md non-negotiable). The roost shares the *chain identity* and the
+//! *cursor* — never the stores.
 
 use crate::config::Config;
-use crate::indexer::{self, NestRuntime};
+use crate::indexer;
 use crate::rpc::{self, RpcClient};
 use crate::source::Source;
 use anyhow::{bail, Context, Result};
@@ -124,7 +125,7 @@ pub async fn dev(
     let roost = Roost::load(&dir)?;
     let meta = &roost.roost;
     tracing::info!(
-        "roost '{}' on {} (chain_id {}): mounting {} nest(s) — one cursor each (slice 1)",
+        "roost '{}' on {} (chain_id {}): mounting {} nest(s) — one shared cursor (slice 2a)",
         meta.name,
         meta.chain,
         meta.chain_id,
@@ -132,7 +133,7 @@ pub async fn dev(
     );
 
     // The roost owns the chain connection: `--rpc` overrides win, else the roost's configured
-    // endpoints. A per-nest source is built from the same URLs (slice 2 collapses these to one cursor).
+    // endpoints. ONE source (cursor) drives every nest (RFC-0012 §2 — the density win).
     let rpc_urls = rpc::merge_rpcs(&rpc_override, meta.rpc_urls.clone());
     if rpc_urls.is_empty() {
         bail!(
@@ -140,61 +141,60 @@ pub async fn dev(
             meta.name
         );
     }
-    let endpoint_count = rpc_urls.len();
-    let concurrency = indexer::safe_backfill_concurrency(endpoint_count, concurrency);
+    let concurrency = indexer::safe_backfill_concurrency(rpc_urls.len(), concurrency);
     let admin_enabled = indexer::admin_enabled(no_admin, &listen);
 
-    // Bring up each nest. A failure to mount any nest fails the whole roost — better a loud refusal at
-    // startup than a roost silently serving a subset of what the operator asked for.
-    let mut ingests = Vec::new();
-    let mut alert_workers = Vec::new();
-    let mut states = Vec::new();
-    let mut roster = Vec::new();
+    // Load + chain-validate every mounted nest up front. A failure to mount any nest fails the whole
+    // roost — better a loud refusal at startup than a roost silently serving a subset. (Factory-nest
+    // refusal happens in `spawn_roost`, slice 2b.)
+    let mut mounted = Vec::with_capacity(meta.nests.len());
     for name in &meta.nests {
         let (nest_path, config) = load_mounted_nest(&dir, meta, name)?;
-        let source: Arc<dyn Source> = Arc::new(RpcClient::new(rpc_urls.clone())?);
-        let rt: NestRuntime = indexer::spawn_nest(
-            source,
-            nest_path,
-            config,
-            backfill,
-            seal_direct,
-            concurrency,
-            window_override,
-            admin_enabled,
-        )
-        .await
-        .with_context(|| format!("bringing up nest '{name}'"))?;
-        roster.push(serde_json::json!({
-            "name": name,
-            "chain": rt.state.chain,
-            "registry_hash": rt.state.nest_info.get("registry_hash").cloned().unwrap_or_default(),
-            "table_count": rt.state.tables.len(),
-            "base_path": format!("/{name}"),
-        }));
-        ingests.push(rt.ingest);
-        if let Some(w) = rt.alert_worker {
-            alert_workers.push(w);
-        }
-        states.push((name.clone(), rt.state));
+        mounted.push((name.clone(), nest_path, config));
     }
 
-    let roster = serde_json::json!({ "roost": meta.name, "chain": meta.chain, "nests": roster });
+    // One shared source, one shared-cursor ingestion task driving all nests through the same per-window
+    // code a solo `dev` runs (so per-nest tables are byte-identical to running each nest alone).
+    let source: Arc<dyn Source> = Arc::new(RpcClient::new(rpc_urls)?);
+    let (states, mut ingest, alert_workers) = indexer::spawn_roost(
+        source,
+        mounted,
+        backfill,
+        seal_direct,
+        concurrency,
+        window_override,
+        admin_enabled,
+    )
+    .await
+    .with_context(|| format!("bringing up roost '{}'", meta.name))?;
 
-    // Fate-share the server with every nest's ingestion. `select_all` resolves as soon as the *first*
-    // ingest task ends — a clean shutdown returns Ok, an error/panic propagates as the process exit.
-    let mut ingest_set = ingests;
+    // Roster (`GET /nests`) built from the mounted states.
+    let roster_entries: Vec<_> = states
+        .iter()
+        .map(|(name, state)| {
+            serde_json::json!({
+                "name": name,
+                "chain": state.chain,
+                "registry_hash": state.nest_info.get("registry_hash").cloned().unwrap_or_default(),
+                "table_count": state.tables.len(),
+                "base_path": format!("/{name}"),
+            })
+        })
+        .collect();
+    let roster =
+        serde_json::json!({ "roost": meta.name, "chain": meta.chain, "nests": roster_entries });
+
+    // Fate-share the server with the single shared ingestion task: whichever ends first decides the
+    // exit, and an ingestion error/panic propagates out (never serve stale data as if healthy).
     let result = tokio::select! {
         r = crate::serve::run_roost(&listen, roster, states) => r,
-        (joined, idx, _rest) = futures::future::select_all(&mut ingest_set) => match joined {
+        joined = &mut ingest => match joined {
             Ok(inner) => inner,
-            Err(e) if e.is_panic() => Err(anyhow::anyhow!("nest ingestion loop #{idx} panicked")),
-            Err(e) => Err(anyhow::anyhow!("nest ingestion loop #{idx} failed: {e}")),
+            Err(e) if e.is_panic() => Err(anyhow::anyhow!("roost ingestion loop panicked")),
+            Err(e) => Err(anyhow::anyhow!("roost ingestion loop task failed: {e}")),
         },
     };
-    for h in &ingest_set {
-        h.abort();
-    }
+    ingest.abort();
     for w in &alert_workers {
         w.abort();
     }

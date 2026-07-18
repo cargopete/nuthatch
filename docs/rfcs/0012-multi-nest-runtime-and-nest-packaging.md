@@ -238,6 +238,21 @@ is the gateway's identity-shaped job, unchanged from the node-vs-gateway split.
    Acceptance: two nests, one `getLogs` stream, byte-identical per-nest tables vs
    running each nest solo over the same range (the RFC-0004/0009 path-equivalence
    discipline, roost edition).
+   - **2a — static nests. ✅ Done (2026-07-18).** Two behaviour-preserving extractions first
+     (`NestIngest`, then `index_loop` takes a `NestIngest` + a reusable `prepare`), so the shared
+     driver runs the *same* per-window code a solo `dev` runs. Then `indexer::roost_index_loop`:
+     each nest `prepare`s its own backfill (tip-only coupling — backfill stays per-nest), then one
+     shared loop does one `source.tip()` + one **union `getLogs`** per window and demuxes each log to
+     the owning nest by address (`NestIngest::owns`) through `process_window`. A `min`-based global
+     cursor lets nests at different heights self-heal; a nest with zero owned logs still advances +
+     seals (identical to solo). `roost dev` now drives one `spawn_roost` task. Byte-identity holds by
+     construction (shared code path) + demux unit tests (`owns`, `union_filter`, demux-reproduces-solo);
+     135 tests (+3), clippy `-D warnings` clean; two-nest boot smoke green (mounts both, one cursor,
+     API live). The full **live** two-nest table-parity run over a chain is the remaining acceptance
+     evidence (folds in with a live demo, as the RFC-0011 pilot proved delegation parity).
+   - **2b — factory nests (deferred).** A factory nest is topic0-only (no address to demux), which
+     would force the whole union fetch topic0-only and tangle the demux; `spawn_roost` refuses one with
+     a clear error for now. Route-by-decode + the topic0-flip under the shared cursor is 2b.
 3. **Reorg + finality fan-out.** One reorg → all nests converge; shared finality drives
    each nest's sealing. Extend the reorg proptest with a multi-nest dimension (random
    reorgs converge every mounted nest independently).

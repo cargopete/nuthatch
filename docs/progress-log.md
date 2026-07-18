@@ -2,6 +2,26 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-18 - RFC-0012 roost slice 2a: the shared cursor (one `getLogs` feeds N nests).** The
+  density win. `nuthatch roost dev` now drives every mounted nest from ONE cursor: `indexer::spawn_roost`
+  builds each nest and spawns a single `roost_index_loop` that does one `source.tip()` + one **union
+  `getLogs`** per window, then demuxes each returned log to the nest(s) that own it (by emitting address,
+  `NestIngest::owns`) and runs it through the **same** `process_window` a solo `dev` uses — so per-nest
+  tables are byte-identical to running each nest alone, by construction rather than re-implementation.
+  Backfill stays per-nest (each nest `prepare`s its own history; the cursor only couples at the tip); a
+  `min`-based global cursor lets nests mounted at different heights self-heal, and a nest with zero owned
+  logs in a window still advances + checkpoints + seals exactly as it would solo. Two behaviour-
+  preserving refactors set this up first (the `NestIngest` extraction, then `index_loop` taking a
+  `NestIngest` + a reusable `prepare` method) so the solo and roost paths literally share code — the live
+  Helsinki `dev` deploy runs the identical path, unchanged. **Gate met:** demux unit tests (`owns` case-
+  insensitive, `union_filter` dedups across nests, demux-reproduces-the-solo-address-filter), two-nest
+  boot smoke (mounts both nests, one shared cursor, API live, per-nest `/<name>/…` routing), bogus-RPC
+  behaviour identical to solo (no regression). 135 tests (+3), clippy `-D warnings` clean. The full
+  **live** two-nest table-parity run over a real chain is the remaining acceptance evidence (folds in
+  with a live demo, as the RFC-0011 pilot proved delegation parity byte-for-byte). Chosen HOW: static
+  nests only — **factory nests are refused in a roost** (`spawn_roost` bails with a clear message),
+  deferred to slice 2b, because their topic0-only discovery would force the whole union fetch topic0-only
+  and tangle the address demux. Reorg is still per-nest here; shared detection + fan-out is slice 3.
 - **2026-07-18 - RFC-0012 roost slice 2a groundwork: extract `NestIngest` from `index_loop`.** A
   strictly behaviour-preserving refactor — the enabling step for the shared cursor. The single-nest
   tip-following loop's per-nest state (store, decode registry, the three IVM views, labels/screener,
