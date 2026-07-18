@@ -19,6 +19,8 @@ pub enum Command {
     Init(InitArgs),
     /// Run the indexer: poll logs, store entities, and serve the API.
     Dev(DevArgs),
+    /// Query a nest's data with SQL — the live tip and sealed history, one surface. Prints a table.
+    Sql(SqlArgs),
     /// Run a WASM transform component over a project's stored transfers.
     Transform(TransformArgs),
     /// Serve the Model Context Protocol over stdio (bridges to a running `nuthatch dev`).
@@ -383,6 +385,24 @@ pub struct McpArgs {
     /// Base URL of the running `nuthatch dev` HTTP API to bridge to.
     #[arg(long, default_value = "http://127.0.0.1:8288")]
     pub url: String,
+}
+
+#[derive(Args)]
+pub struct SqlArgs {
+    /// The SQL query (SELECT/WITH). Tables are `{alias}__{event}`, e.g. `usdc__transfer`.
+    pub query: String,
+
+    /// Nest directory (queried directly when no `nuthatch dev` holds the store).
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+
+    /// The running instance's API, used when the local store is locked by `nuthatch dev`.
+    #[arg(long, default_value = "http://127.0.0.1:8288")]
+    pub url: String,
+
+    /// Emit newline-delimited JSON instead of a table (for piping to jq etc.).
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args)]

@@ -1,19 +1,21 @@
 //! nuthatch — be your own indexer.
 //!
-//! This is the *walking skeleton*: the thinnest end-to-end path that actually runs.
-//!   `nuthatch init 0xADDR --chain mainnet`  -> resolve ABI (Sourcify -> Etherscan) -> scaffold a project
-//!   `nuthatch dev`                          -> poll logs over RPC -> decode -> redb tip store -> serve HTTP
+//! Turn any contract into a local SQL database:
+//!   `nuthatch init 0xADDR --chain mainnet`  -> resolve ABI (Sourcify -> Etherscan) -> scaffold a nest
+//!   `nuthatch dev`                          -> backfill + follow the tip -> decode -> serve an API
+//!   `nuthatch sql "SELECT …"`               -> query the live tip + sealed history, as a table
 //!
-//! Deliberately minimal: one chain, ERC-20 `Transfer` decoding only, RPC polling (no ExEx yet),
-//! redb-only storage (no DuckDB/Parquet yet), no IVM, no MCP. Those are the next layers to grow
-//! onto this spine — see docs/ROADMAP as it lands. What matters here is that it's *alive*.
+//! Generalised event decode over many contracts, content-addressed Parquet sealing past finality with
+//! DuckDB analytics (hot ∪ cold SQL), DBSP incremental views, factories, a compliance pack, webhooks,
+//! a built-in admin UI, an MCP server, and multi-nest roosts — all from one static binary. This file is
+//! just the CLI front door; the engine lives in the library crate.
 
 use nuthatch::{
-    audit, bench, blob, check, cli, config, indexer, labels, lists, mcp, pack, project, roost,
-    screen, store, transform,
+    analytics, audit, bench, blob, check, cli, config, indexer, labels, lists, mcp, pack, project,
+    roost, screen, store, transform,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 
 #[tokio::main]
@@ -29,6 +31,7 @@ async fn main() -> Result<()> {
     match cli::Cli::parse().command {
         cli::Command::Init(args) => project::init(args).await,
         cli::Command::Dev(args) => indexer::dev(args).await,
+        cli::Command::Sql(args) => run_sql(args).await,
         cli::Command::Transform(args) => run_transform(args),
         cli::Command::Mcp(args) => mcp::serve(args.url).await,
         cli::Command::Check(args) => check::check(args),
@@ -136,6 +139,142 @@ fn run_labels(args: cli::LabelsArgs) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `nuthatch sql "<query>"` — one-shot read-only SQL over the nest's data (live tip ∪ sealed history),
+/// printed as a table. The terminal-native front door to querying, so a user never needs curl to poke
+/// at their own data. Same guarded engine as `/sql`.
+async fn run_sql(args: cli::SqlArgs) -> Result<()> {
+    let dir = std::path::PathBuf::from(&args.dir);
+    // Prefer the local files (works when `dev` is stopped). redb is single-writer, so if `dev` holds
+    // the store the open fails — then we query the *running* instance over its HTTP API instead, so the
+    // same command works whether or not the indexer is up.
+    let (rows, truncated) = match store::Store::open(&dir.join(config::DB_FILE)) {
+        Ok(store) => {
+            // Live tip ∪ sealed history, disjoint by the sealed watermark (COR-1).
+            let hot = store.hot_rows_by_table().unwrap_or_default();
+            let sealed_through = store.sealed_through();
+            let out = analytics::query_hot_cold(
+                &dir,
+                &args.query,
+                analytics::QueryGuard {
+                    timeout: std::time::Duration::from_secs(30),
+                    max_rows: 50_000,
+                },
+                &hot,
+                sealed_through,
+            )?;
+            (out.rows, out.truncated)
+        }
+        Err(_) => (
+            query_over_http(&args.url, &args.query)
+                .await
+                .with_context(|| {
+                    format!(
+                        "no nest at {} to query directly, and no running nuthatch at {} — start \
+                 `nuthatch dev` (or pass --url / --dir)",
+                        args.dir, args.url
+                    )
+                })?,
+            false,
+        ),
+    };
+    if args.json {
+        for row in &rows {
+            println!("{row}");
+        }
+    } else {
+        print_table(&rows);
+    }
+    if truncated {
+        eprintln!("(result truncated at 50000 rows)");
+    }
+    Ok(())
+}
+
+/// Query a running instance's `/sql` endpoint (the fallback when `dev` holds the local store).
+async fn query_over_http(url: &str, query: &str) -> Result<Vec<serde_json::Value>> {
+    let base = url.trim_end_matches('/');
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/sql"))
+        .query(&[("q", query)])
+        .send()
+        .await
+        .context("connecting to the running nuthatch API")?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.context("reading the API response")?;
+    if !status.is_success() {
+        anyhow::bail!(
+            "query failed: {}",
+            body.get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("unknown")
+        );
+    }
+    Ok(body
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// Render query rows as a simple aligned ASCII table.
+fn print_table(rows: &[serde_json::Value]) {
+    use serde_json::Value;
+    if rows.is_empty() {
+        println!("(0 rows)");
+        return;
+    }
+    // Column order: first-seen across rows (a query result's columns are consistent row to row).
+    let mut cols: Vec<String> = Vec::new();
+    for r in rows {
+        if let Some(o) = r.as_object() {
+            for k in o.keys() {
+                if !cols.iter().any(|c| c == k) {
+                    cols.push(k.clone());
+                }
+            }
+        }
+    }
+    let cell = |v: Option<&Value>| -> String {
+        match v {
+            Some(Value::String(s)) => s.clone(),
+            None | Some(Value::Null) => String::new(),
+            Some(other) => other.to_string(),
+        }
+    };
+    let table: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| cols.iter().map(|c| cell(r.get(c))).collect())
+        .collect();
+    let mut widths: Vec<usize> = cols.iter().map(|c| c.chars().count()).collect();
+    for row in &table {
+        for (i, s) in row.iter().enumerate() {
+            widths[i] = widths[i].max(s.chars().count());
+        }
+    }
+    let line = |cells: &[String]| -> String {
+        cells
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!(" {:<w$} ", s, w = widths[i]))
+            .collect::<Vec<_>>()
+            .join("|")
+    };
+    println!("{}", line(&cols));
+    println!(
+        "{}",
+        widths
+            .iter()
+            .map(|w| "-".repeat(w + 2))
+            .collect::<Vec<_>>()
+            .join("+")
+    );
+    for row in &table {
+        println!("{}", line(row));
+    }
+    let n = rows.len();
+    println!("({n} row{})", if n == 1 { "" } else { "s" });
 }
 
 /// `nuthatch transform` — run a WASM transform component over a project's stored transfers.

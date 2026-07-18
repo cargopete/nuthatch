@@ -11,6 +11,15 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   (proxy/EIP-1967 introspection, child-`end` conditions, SSE push, the 0012 live-parity proof). Notes
   the one node-independent 0014 slice worth building without the node (calldata decoder + `[extract]`
   config + schemas + volume guard). Linked from the RFC index.
+- **2026-07-18 - `nuthatch sql "<query>"` — terminal-native querying (the core delight).** The core user
+  wants their contract's data; until now that meant HTTP `/sql` + curl. New one-shot `nuthatch sql`
+  runs read-only SQL over the live tip ∪ sealed history and prints an aligned table (`--json` for
+  piping). It's redb-lock-aware: queries the local files when `dev` is stopped, and transparently falls
+  back to the running instance's HTTP `/sql` when `dev` holds the store — so the same command works
+  whether or not the indexer is up. Same guarded engine as `/sql` (timeout, row cap, the SEC-2 file-read
+  denylist). This is the 0.4 down-payment on the RFC-0015 "delightful core" direction — the full REPL is
+  0.5. Also refreshed the badly-stale `main.rs` "walking skeleton" module doc. Verified live on Arbitrum
+  (both the local-files and HTTP-fallback paths, table + json). 147 tests, clippy clean.
 - **2026-07-18 - 0.4.0 hardening: SEC-5 admin token actually enforced.** `NUTHATCH_ADMIN_TOKEN` merely
   *enabled* the `/_admin` route off-localhost — it was never checked per request, so setting it to
   anything served the admin UI to the internet unauthenticated (security theater). Now off-localhost the
