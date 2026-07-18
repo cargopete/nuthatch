@@ -144,6 +144,35 @@ impl Store {
         Ok(())
     }
 
+    /// Commit a whole window's writes in ONE transaction (PERF-2): every decoded row + annotation, the
+    /// window-boundary block-hash checkpoint, and the `last_block` watermark. The tip loop previously
+    /// did a separate `begin_write`/`commit` (an fsync) *per row* — 2,000 logs meant 2,000 fsyncs, which
+    /// capped tip-follow throughput far below the decode rate. One txn per window is also *more*
+    /// crash-consistent: the window is the atomic unit (its watermark already advances once), so a crash
+    /// leaves the store at a clean window boundary, never mid-window.
+    pub fn commit_window(
+        &self,
+        entities: &[(String, String)],
+        checkpoint: Option<(u64, &str)>,
+        last_block: u64,
+    ) -> Result<()> {
+        let wtx = self.db.begin_write()?;
+        {
+            let mut t = wtx.open_table(ENTITIES)?;
+            for (k, v) in entities {
+                t.insert(k.as_str(), v.as_str())?;
+            }
+            if let Some((block, hash)) = checkpoint {
+                let mut b = wtx.open_table(BLOCKS)?;
+                b.insert(Self::block_key(block).as_str(), hash)?;
+            }
+            let mut m = wtx.open_table(META)?;
+            m.insert("last_block", last_block.to_string().as_str())?;
+        }
+        wtx.commit()?;
+        Ok(())
+    }
+
     pub fn get_entity(&self, key: &str) -> Result<Option<String>> {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(ENTITIES)?;

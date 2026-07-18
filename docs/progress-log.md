@@ -11,6 +11,21 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   (proxy/EIP-1967 introspection, child-`end` conditions, SSE push, the 0012 live-parity proof). Notes
   the one node-independent 0014 slice worth building without the node (calldata decoder + `[extract]`
   config + schemas + volume guard). Linked from the RFC index.
+- **2026-07-18 - 0.4.0 hardening: e2e test harness + batch-write throughput.** Two more sweep items.
+  **E2E harness** (new `tests/`, first integration tests): a `TapeSource` scripted-mutable-chain double
+  that actually answers `block_hash` and gives non-zero timestamps (the existing doubles return
+  `block_hash → None`, making `detect_reorg` a no-op — the C1 gap), driving the full init→seal→serve→
+  reorg pipeline offline + deterministically. Tests: land→seal→query golden (content-hashes byte-
+  identical across runs), real-HTTP serve, **reorg convergence proptest** (reorged nest == a clean run
+  over the post-reorg chain — closes C1), reorg-below-finality-halts (C3), **roost==solo byte-identical
+  parity** (closes RFC-0012's open acceptance item), seal idempotence (COR-1). **PERF-2:** the tip loop
+  committed one redb txn (an fsync) *per row* — 2,000 logs = 2,000 fsyncs, capping tip-follow far below
+  the decode rate; now the whole window (rows + annotations + checkpoint + watermark) commits in ONE
+  atomic txn (`Store::commit_window`), which is also *more* crash-consistent (a crash lands on a clean
+  window boundary, never mid-window). 151 tests (145 unit + 6 integration), clippy `-D warnings` clean;
+  the e2e reorg/crash-safety suite guarded the hot-path refactor. Sweep so far: security + data-
+  corruption + e2e + write-throughput; still to come: bound the `/sql` hot scan, medium/low correctness,
+  benchmarks, README, the 0.4.0 cut.
 - **2026-07-18 - 0.4.0 hardening (audit-driven): security + data-corruption fixes.** A five-dimension
   audit of the codebase (coverage, core correctness, serving/security, performance, e2e) surfaced two
   critical security bugs and two data-corruption bugs, now fixed. **SEC-1:** `nest mount` trusted

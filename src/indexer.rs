@@ -1369,6 +1369,9 @@ impl NestIngest {
         let mut vel_deltas = Vec::new();
         // Transfers to screen this window (only collected when screening is on).
         let mut to_screen: Vec<TransferRow> = Vec::new();
+        // PERF-2: accumulate every write and commit the whole window in ONE redb txn at the end,
+        // instead of a `begin_write`/`commit` (fsync) per row. `(key, json)` for rows + annotations.
+        let mut to_store: Vec<(String, String)> = Vec::with_capacity(rows.len());
         for row in &mut rows {
             let key = Store::entity_key(row.block_number, row.log_index);
             // Feed the IVM balance + exposure views for transfer rows (extracted before storing).
@@ -1404,7 +1407,7 @@ impl NestIngest {
                             &row.tx_hash,
                             t,
                         ) {
-                            self.store.put_entity(&fkey, &ann.to_string())?;
+                            to_store.push((fkey, ann.to_string()));
                             alerts::enqueue(
                                 &self.store,
                                 &self.router,
@@ -1428,7 +1431,7 @@ impl NestIngest {
             }
             // Every row is stored uniformly as typed JSON with a `table` field; per-table
             // sealing groups by it.
-            self.store.put_entity(&key, &row.to_json().to_string())?;
+            to_store.push((key, row.to_json().to_string()));
             stored += 1;
         }
         self.balances.apply(deltas);
@@ -1442,7 +1445,7 @@ impl NestIngest {
         if let Some(s) = self.screener.as_ref() {
             let hits = s.screen_window(&to_screen);
             for (key, ann) in &hits {
-                self.store.put_entity(key, &ann.to_string())?;
+                to_store.push((key.clone(), ann.to_string()));
                 alerts::enqueue(&self.store, &self.router, "flag", "sanction_hit", ann)?;
             }
             if !hits.is_empty() {
@@ -1452,11 +1455,17 @@ impl NestIngest {
                 );
             }
         }
-        // Checkpoint the window boundary's canonical hash for future reorg detection.
-        if let Ok(Some(hash)) = source.block_hash(to).await {
-            self.store.set_block_hash(to, &hash)?;
-        }
-        self.store.set_meta(LAST_BLOCK_KEY, &to.to_string())?;
+        // Fetch the window boundary's canonical hash for future reorg detection, then commit the whole
+        // window — rows + annotations + the checkpoint + the `last_block` watermark — in one atomic txn.
+        let checkpoint = match source.block_hash(to).await {
+            Ok(Some(hash)) => Some((to, hash)),
+            _ => None,
+        };
+        self.store.commit_window(
+            &to_store,
+            checkpoint.as_ref().map(|(b, h)| (*b, h.as_str())),
+            to,
+        )?;
         METRICS.set_last_block(to);
         METRICS.add_rows_decoded(stored as u64);
         if stored > 0 {
