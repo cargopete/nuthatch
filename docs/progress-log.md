@@ -11,6 +11,12 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   (proxy/EIP-1967 introspection, child-`end` conditions, SSE push, the 0012 live-parity proof). Notes
   the one node-independent 0014 slice worth building without the node (calldata decoder + `[extract]`
   config + schemas + volume guard). Linked from the RFC index.
+- **2026-07-18 - 0.4.0 hardening: SEC-5 admin token actually enforced.** `NUTHATCH_ADMIN_TOKEN` merely
+  *enabled* the `/_admin` route off-localhost — it was never checked per request, so setting it to
+  anything served the admin UI to the internet unauthenticated (security theater). Now off-localhost the
+  route requires the token as `?token=…` on each request (401 otherwise); localhost stays open. Threaded
+  a new `admin_token: Option<String>` through `build_nest`/`spawn_nest`/`spawn_roost` into `AppState`.
+  Tests: token missing/wrong → 401, correct → 200; localhost open. 147 lib + 6 e2e tests, clippy clean.
 - **2026-07-18 - 0.4.0 hardening: correctness fixes (COR-3 partial timestamps, COR-4 column-type flip).**
   **COR-3:** `rpc::block_timestamps` returned a *partial* map when a load-balanced/archive-vs-full RPC
   omitted a block's timestamp; the seal path then defaulted it to `block_timestamp=0` and sealed that

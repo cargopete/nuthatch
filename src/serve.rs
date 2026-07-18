@@ -54,6 +54,10 @@ pub struct AppState {
     pub velocity_threshold: Option<i128>,
     /// Whether the built-in admin UI (`/_admin/`) is served (RFC-0010 Part A).
     pub admin_enabled: bool,
+    /// When the bind is off-localhost, the token a request must present (`?token=…`) to reach the admin
+    /// UI (SEC-5). `None` on a localhost bind (open) — the env var merely *enabling* the route off-
+    /// localhost, without checking it per request, was security theater.
+    pub admin_token: Option<String>,
     /// Static nest metadata for the admin UI's Nest tab (`/nest`): contracts, templates, factories,
     /// webhooks, registry hash. Computed once at startup.
     pub nest_info: Arc<serde_json::Value>,
@@ -152,9 +156,25 @@ const ADMIN_HTML: &str = include_str!("admin.html");
 
 /// `GET /_admin/` — serve the admin UI when enabled, else 404 (it's off, or the bind is public with
 /// no token). The page is read-only and talks only to this same-origin API; no external requests.
-async fn admin_index(State(s): State<AppState>) -> impl IntoResponse {
+#[derive(Deserialize)]
+struct AdminQuery {
+    token: Option<String>,
+}
+
+async fn admin_index(State(s): State<AppState>, Query(q): Query<AdminQuery>) -> impl IntoResponse {
     if !s.admin_enabled {
         return (StatusCode::NOT_FOUND, "admin UI disabled").into_response();
+    }
+    // SEC-5: off-localhost the route requires the token per request (constant-time-ish compare on a
+    // short secret). On localhost `admin_token` is `None` and the page is open.
+    if let Some(required) = &s.admin_token {
+        if q.token.as_deref() != Some(required.as_str()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "admin UI requires a valid ?token=",
+            )
+                .into_response();
+        }
     }
     (
         [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -611,6 +631,7 @@ mod tests {
             tables: Arc::new(vec![]),
             sql_gate: Arc::new(Semaphore::new(permits)),
             admin_enabled: true,
+            admin_token: None,
             nest_info: Arc::new(json!({ "name": "t" })),
         }
     }
@@ -668,16 +689,18 @@ mod tests {
     async fn admin_ui_gated_and_nest_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         let mut state = test_state(tmp.path(), SQL_MAX_CONCURRENCY);
+        let no_tok = || Query(AdminQuery { token: None });
 
-        let resp = admin_index(State(state.clone())).await.into_response();
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "admin UI served when enabled"
-        );
+        // Localhost (admin_token None): open.
+        let resp = admin_index(State(state.clone()), no_tok())
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "admin UI open on localhost");
 
         state.admin_enabled = false;
-        let resp = admin_index(State(state.clone())).await.into_response();
+        let resp = admin_index(State(state.clone()), no_tok())
+            .await
+            .into_response();
         assert_eq!(
             resp.status(),
             StatusCode::NOT_FOUND,
@@ -686,6 +709,45 @@ mod tests {
 
         let resp = nest(State(state)).await.into_response();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_token_enforced_off_localhost() {
+        // SEC-5: with a required token set (off-localhost), the route must actually CHECK it per
+        // request — not merely be enabled by the env var's presence.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path(), SQL_MAX_CONCURRENCY);
+        state.admin_token = Some("s3cret".into());
+
+        let tok = |t: Option<&str>| {
+            Query(AdminQuery {
+                token: t.map(str::to_string),
+            })
+        };
+        // No token → 401.
+        assert_eq!(
+            admin_index(State(state.clone()), tok(None))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // Wrong token → 401.
+        assert_eq!(
+            admin_index(State(state.clone()), tok(Some("nope")))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // Correct token → 200.
+        assert_eq!(
+            admin_index(State(state), tok(Some("s3cret")))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::OK
+        );
     }
 
     #[test]

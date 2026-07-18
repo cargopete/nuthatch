@@ -47,9 +47,19 @@ async fn spawn_indexed(
     tip: u64,
 ) -> (indexer::NestRuntime, nuthatch::store::Store) {
     let cfg = scaffold_nest(dir, "usdc", USDC);
-    let rt = indexer::spawn_nest(tape, dir.to_path_buf(), cfg, None, false, 1, Some(2), false)
-        .await
-        .expect("spawn_nest");
+    let rt = indexer::spawn_nest(
+        tape,
+        dir.to_path_buf(),
+        cfg,
+        None,
+        false,
+        1,
+        Some(2),
+        false,
+        None,
+    )
+    .await
+    .expect("spawn_nest");
     let store = rt.state.store.clone();
     let tip_str = tip.to_string();
     let landed = wait_until(POLL_TIMEOUT, || {
@@ -163,6 +173,7 @@ async fn reorg_below_finality_halts() {
         1,
         Some(2),
         false,
+        None,
     )
     .await
     .expect("spawn_nest");

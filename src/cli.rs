@@ -471,8 +471,8 @@ pub struct DevArgs {
     pub window: Option<u64>,
 
     /// Disable the built-in admin UI (`/_admin/`) entirely — no routes, for hosted deployments that
-    /// front their own dashboard (RFC-0010 Part A). Off-localhost the UI also requires
-    /// `NUTHATCH_ADMIN_TOKEN` to be set, or it self-disables with a log line.
+    /// front their own dashboard (RFC-0010 Part A). Off-localhost the UI requires `NUTHATCH_ADMIN_TOKEN`
+    /// to be set AND each request to present it as `?token=…` (or it self-disables with a log line).
     #[arg(long)]
     pub no_admin: bool,
 }

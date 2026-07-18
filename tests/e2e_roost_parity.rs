@@ -101,6 +101,7 @@ async fn roost_is_byte_identical_to_solo() {
         1,
         Some(2),
         false,
+        None,
     )
     .await
     .expect("spawn_nest usdc");
@@ -113,6 +114,7 @@ async fn roost_is_byte_identical_to_solo() {
         1,
         Some(2),
         false,
+        None,
     )
     .await
     .expect("spawn_nest arb");
@@ -141,6 +143,7 @@ async fn roost_is_byte_identical_to_solo() {
         1,
         Some(2),
         false,
+        None,
     )
     .await
     .expect("spawn_roost");

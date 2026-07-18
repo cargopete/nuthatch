@@ -103,6 +103,7 @@ pub async fn run(
     // (auth is the operator's gateway's job, but the local UI should never appear unguarded on a public
     // bind); `--no-admin` removes it entirely. Computed here since it depends on the process's `listen`.
     let admin_enabled = admin_enabled(no_admin, &listen);
+    let admin_token = admin_required_token(admin_enabled, &listen);
     let NestRuntime {
         state,
         mut ingest,
@@ -116,6 +117,7 @@ pub async fn run(
         concurrency,
         window_override,
         admin_enabled,
+        admin_token,
     )
     .await?;
 
@@ -150,6 +152,17 @@ pub fn admin_enabled(no_admin: bool, listen: &str) -> bool {
     enabled
 }
 
+/// The token an admin-UI request must present, given the bind (SEC-5). `None` on a localhost bind (the
+/// UI is open there); `Some(token)` off-localhost (the request must carry `?token=…`) — actually
+/// checking it per request, rather than the env var merely *enabling* the route.
+pub fn admin_required_token(admin_enabled: bool, listen: &str) -> Option<String> {
+    if admin_enabled && !serve::is_localhost(listen) {
+        std::env::var("NUTHATCH_ADMIN_TOKEN").ok()
+    } else {
+        None
+    }
+}
+
 /// Build one nest's runtime: open its store, build its decode registry + IVM views, spawn its
 /// ingestion loop and delivery worker, and assemble its serve state — everything *except* binding a
 /// listener. The serving decision (root vs a `/<name>/…` prefix, one nest vs many) belongs to the
@@ -165,9 +178,17 @@ pub async fn spawn_nest(
     concurrency: usize,
     window_override: Option<u64>,
     admin_enabled: bool,
+    admin_token: Option<String>,
 ) -> Result<NestRuntime> {
-    let (nest, state, alert_worker, window) =
-        build_nest(&source, dir, &config, window_override, admin_enabled).await?;
+    let (nest, state, alert_worker, window) = build_nest(
+        &source,
+        dir,
+        &config,
+        window_override,
+        admin_enabled,
+        admin_token,
+    )
+    .await?;
     // Kick off the indexing loop in the background; serve the API on this task.
     let ingest = tokio::spawn(index_loop(
         source,
@@ -378,6 +399,7 @@ pub async fn spawn_roost(
     concurrency: usize,
     window_override: Option<u64>,
     admin_enabled: bool,
+    admin_token: Option<String>,
 ) -> Result<(
     Vec<(String, serve::AppState)>,
     tokio::task::JoinHandle<Result<()>>,
@@ -388,8 +410,15 @@ pub async fn spawn_roost(
     let mut alert_workers = Vec::new();
     let mut window = None;
     for (name, dir, config) in nests {
-        let (nest, state, worker, w) =
-            build_nest(&source, dir, &config, window_override, admin_enabled).await?;
+        let (nest, state, worker, w) = build_nest(
+            &source,
+            dir,
+            &config,
+            window_override,
+            admin_enabled,
+            admin_token.clone(),
+        )
+        .await?;
         window.get_or_insert(w);
         ingests.push(nest);
         states.push((name, state));
@@ -425,6 +454,7 @@ async fn build_nest(
     config: &Config,
     window_override: Option<u64>,
     admin_enabled: bool,
+    admin_token: Option<String>,
 ) -> Result<(
     NestIngest,
     serve::AppState,
@@ -615,6 +645,7 @@ async fn build_nest(
         tables: Arc::new(registry.schema()),
         sql_gate: Arc::new(tokio::sync::Semaphore::new(serve::SQL_MAX_CONCURRENCY)),
         admin_enabled,
+        admin_token,
         nest_info: Arc::new(nest_info),
     };
 
@@ -2808,7 +2839,7 @@ template = "pool"
         let config = Config::load(dir).unwrap();
         let source: Arc<dyn Source> = Arc::new(MockSource { logs: Vec::new() });
         let (nest, _state, worker, _w) =
-            build_nest(&source, dir.to_path_buf(), &config, None, false)
+            build_nest(&source, dir.to_path_buf(), &config, None, false, None)
                 .await
                 .unwrap();
         if let Some(w) = worker {

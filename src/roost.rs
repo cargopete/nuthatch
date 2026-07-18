@@ -178,6 +178,7 @@ pub async fn dev(
     }
     let concurrency = indexer::safe_backfill_concurrency(rpc_urls.len(), concurrency);
     let admin_enabled = indexer::admin_enabled(no_admin, &listen);
+    let admin_token = indexer::admin_required_token(admin_enabled, &listen);
 
     // Load + chain-validate every mounted nest up front, and estimate each one's footprint. A failure
     // to mount any nest fails the whole roost — better a loud refusal at startup than a roost silently
@@ -220,6 +221,7 @@ pub async fn dev(
         concurrency,
         window_override,
         admin_enabled,
+        admin_token,
     )
     .await
     .with_context(|| format!("bringing up roost '{}'", meta.name))?;
