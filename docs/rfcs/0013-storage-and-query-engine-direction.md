@@ -1,6 +1,8 @@
 # RFC-0013: Storage and query-engine direction — DataFusion convergence, Turso deferred
 
-- Status: Draft (v1)
+- Status: Accepted (2026-07-18) — direction recorded; **§3 (SQL-over-the-tip) shipped**, but via a
+  DuckDB hot+cold `UNION` rather than a DataFusion `TableProvider` (see the §3 note below). DataFusion
+  convergence (§2) stays the deferred, benchmark-gated destination.
 - Author: Pete (cargopete)
 - Date: 2026-07-17
 - Depends on: RFC-0001 (Implemented — decode registry, per-table model), RFC-0004
@@ -93,6 +95,18 @@ DataFusion `TableProvider` over redb: the tip becomes queryable through the same
 federated SQL surface, the store stays redb. This is the linchpin — it means the
 DataFusion decision (§2) *also* satisfies the wish that motivated Turso-for-embedded
 (§1), so there is one decision to make, not two.
+
+> **Shipped (2026-07-18) — via DuckDB, not DataFusion.** A dependency spike found DataFusion
+> premature to adopt *now*: under the project MSRV (Rust 1.85) cargo resolves DataFusion 48, which
+> pulls **arrow 55** and clashes with our **arrow 56** seal/parquet stack (aligning would need an MSRV
+> bump to 1.88 or an arrow downgrade), and it adds ~100 crates to a binary that already bundles
+> DuckDB — exactly the weight §2/§4 say to benchmark-gate first. So the §3 *goal* was delivered with
+> the engine already shipped: for `/sql`, each table's DuckDB view becomes `sealed Parquet UNION ALL
+> hot-tip`, where the hot rows are scanned from redb (`Store::hot_rows_by_table`) into a per-table temp
+> table typed to match the Parquet (`analytics::load_hot_temp`). Hot and cold are disjoint by block
+> (sealed rows are pruned from hot), so the union is exact with no dedup. The tip is now SQL-queryable
+> — verified live on Arbitrum (`SELECT … FROM arb__transfer` over unsealed rows) and by hot-only +
+> hot∪cold unit tests. A DataFusion `TableProvider` remains the destination when §4's gate is run.
 
 ### §4 — Sequencing and the gate (the discipline)
 

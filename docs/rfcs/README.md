@@ -18,7 +18,7 @@ Statuses last reconciled against the [progress log](../progress-log.md) on 2026-
 | [0010](0010-admin-ui-and-webhooks.md) | The admin UI and webhooks — ease-of-use parity | 0001, 0005 | **Implemented** |
 | [0011](0011-graph-network-nest-lodestar-migration.md) | The graph-network nest and the Lodestar migration | 0001, 0002, 0004, 0005 | **Parked after pilot** — wedge proven in prod; full migration not done |
 | [0012](0012-multi-nest-runtime-and-nest-packaging.md) | Multi-nest runtime and content-addressed nest packaging | 0001, 0009, 0004 | **Implemented** (all 7 slices; verified live on Arbitrum) |
-| [0013](0013-storage-and-query-engine-direction.md) | Storage and query-engine direction (DataFusion convergence, Turso deferred) | 0001, 0004 | Draft |
+| [0013](0013-storage-and-query-engine-direction.md) | Storage and query-engine direction (DataFusion convergence, Turso deferred) | 0001, 0004 | Accepted — §3 SQL-over-the-tip shipped (DuckDB union); DataFusion deferred/gated |
 | [0014](0014-firehose-class-extraction-traces-and-state.md) | Firehose-class extraction — traces and state diffs via ExEx | 0003, 0001, 0004 | Draft (deferred) |
 
 ## Conventions

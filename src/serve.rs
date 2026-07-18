@@ -415,15 +415,20 @@ async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl IntoR
     METRICS.inc_sql();
     let dir = s.dir.clone();
     let sql = q.q.clone();
+    let store = s.store.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit; // held for the whole blocking query, released on return
-        analytics::query_guarded(
+                              // Scan the hot tip (redb, blocking) inside the same blocking task, so `/sql` sees the unsealed
+                              // rows alongside the sealed segments (RFC-0013). A scan failure degrades to cold-only.
+        let hot = store.hot_rows_by_table().unwrap_or_default();
+        analytics::query_hot_cold(
             &dir,
             &sql,
             analytics::QueryGuard {
                 timeout: SQL_TIMEOUT,
                 max_rows: SQL_MAX_ROWS,
             },
+            &hot,
         )
     })
     .await;
