@@ -261,9 +261,20 @@ is the gateway's identity-shaped job, unchanged from the node-vs-gateway split.
      removed. Tests: `log_owned` in both modes, `union_filter` goes topic0-only with a factory present
      (137 tests, +2); boot smoke with a factory + static nest co-mounted (both mount, one cursor, API
      live). Live factory-in-roost child-discovery parity folds into the same live acceptance as 2a.
-3. **Reorg + finality fan-out.** One reorg → all nests converge; shared finality drives
-   each nest's sealing. Extend the reorg proptest with a multi-nest dimension (random
-   reorgs converge every mounted nest independently).
+3. **Reorg + finality fan-out. ✅ Done (2026-07-18).** `handle_reorg` was split into detection
+   (`detect_reorg`, unchanged) + a sync `rollback_reorg(ancestor)` (retract views, drop children,
+   roll back the hot store). A solo nest still detects on its own cursor; the roost detects **once**
+   at the most-caught-up nest's boundary (all tip nests share checkpoints) and fans `rollback_reorg`
+   out to every nest — one detection (a handful of block-hash calls) instead of N, one observable reorg
+   boundary. `rollback_reorg` guards the different-height case: a nest already at/below the fork is a
+   no-op and its cursor is **not** bumped up to the ancestor (which would claim blocks it never
+   indexed) — the bug a naive fan-out would introduce. Finality is already shared (one finality height
+   per chain drives every nest's sealing via `process_window`). Behaviour-preserving for solo `dev`
+   (the guard never triggers when a nest detects on its own cursor; all reorg proptests pass unchanged).
+   Tests: the existing store-level reorg property tests (+ golden), plus a fan-out test (caught-up nest
+   rolls back to the fork; a still-backfilling behind nest is spared, cursor uncorrupted). 138 tests
+   (+1), clippy `-D warnings` clean. Live multi-nest reorg convergence over a chain folds into the same
+   live acceptance as 2a.
 4. **Footprint model.** Pre-mount RSS estimate, `max_rss` refusal, per-nest `/metrics`
    attribution. Publish a 3-nest roost RSS number (the honesty rule).
 5. **`pack` + blob manifest.** ✅ **Done (2026-07-18).** Shipped as `nuthatch nest pack <dir>` (the

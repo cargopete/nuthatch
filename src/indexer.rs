@@ -246,9 +246,9 @@ fn union_filter<'a>(
 /// union `getLogs` per window, then each returned log is demuxed to the nest(s) that own it and run
 /// through the SAME [`NestIngest::process_window`] a solo `dev` uses — so per-nest tables are
 /// byte-identical to running that nest alone. Backfill stays per-nest (each `prepare`s its own history
-/// first); the cursor only couples nests at the tip. Reorg detection is still per-nest here (shared
-/// detection + fan-out is slice 3). Factory nests are supported (slice 2b): if any is mounted the union
-/// fetch goes topic0-only and each nest demuxes by `owns` — address for static, topic0 for factory.
+/// first); the cursor only couples nests at the tip. Reorg is detected ONCE at the shared boundary and
+/// fanned out to every nest (slice 3). Factory nests are supported (slice 2b): if any is mounted the
+/// union fetch goes topic0-only and each nest demuxes by `owns` — address for static, topic0 for factory.
 async fn roost_index_loop(
     source: Arc<dyn Source>,
     mut nests: Vec<NestIngest>,
@@ -282,11 +282,29 @@ async fn roost_index_loop(
         };
         METRICS.set_tip(tip);
 
-        // Per-nest reorg check against each nest's own committed cursor. A reorg only ever lands in a
-        // nest's mutable hot store; each nest rolls back independently (shared detection is slice 3).
-        for (i, nest) in nests.iter_mut().enumerate() {
-            if let Some(new_next) = nest.handle_reorg(source.as_ref(), nexts[i]).await? {
-                nexts[i] = new_next;
+        // Shared reorg detection + fan-out (RFC-0012 slice 3). A reorg is a chain event every nest at
+        // the tip is exposed to identically, and all caught-up nests checkpoint the same boundaries with
+        // the same hashes — so detect ONCE, at the most-caught-up nest's boundary, then fan the rollback
+        // out to every nest. This is one detection (a handful of block-hash calls) instead of N, and one
+        // observable reorg boundary. `rollback_reorg` is a no-op for any nest already at/below the fork
+        // (a still-backfilling nest below finality can't be affected), so fanning to all is safe.
+        let max_next = *nexts.iter().max().unwrap();
+        if max_next > 0 {
+            // Any caught-up nest is a valid checkpoint reference; use one at the max height.
+            let reference = nexts.iter().position(|&n| n == max_next).unwrap();
+            match detect_reorg(source.as_ref(), &nests[reference].store, max_next - 1).await {
+                Ok(Some(ancestor)) => {
+                    tracing::warn!(
+                        "roost reorg to block {ancestor}: rolling back every mounted nest",
+                    );
+                    for (i, nest) in nests.iter_mut().enumerate() {
+                        nest.rollback_reorg(ancestor)?;
+                        nexts[i] = nexts[i].min(ancestor + 1);
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::debug!("roost reorg check skipped: {e:#}"),
             }
         }
 
@@ -1211,85 +1229,98 @@ impl NestIngest {
         // Reorg check: has the last block we committed against stayed canonical? If not, the
         // mutable hot store rolls back to the deepest surviving checkpoint (the only place a
         // reorg ever lands — sealed segments, once they exist, are strictly past finality).
-        if next > 0 {
-            match detect_reorg(source, &self.store, next - 1).await {
-                Ok(Some(ancestor)) => {
-                    // A reorg below the sealed watermark is a finality violation this model can't
-                    // repair: the doomed blocks are already in immutable sealed segments (and pruned
-                    // from hot), so the retraction below would be silently incomplete and the sealed
-                    // layer would permanently disagree with the canonical chain. Halt loudly instead
-                    // (deadlock-review finding M6). The `--seal-direct` finality depth / `finalized`
-                    // tag is the contract; if it's being violated, it needs raising for this chain.
-                    let sealed_through = self
-                        .store
-                        .get_meta(SEALED_THROUGH_KEY)?
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(0);
-                    if ancestor < sealed_through {
-                        anyhow::bail!(
-                            "reorg to block {ancestor} is below the sealed/finalized watermark \
-                             {sealed_through} — a finality violation this indexer cannot repair; \
-                             halting. Raise the chain's finality depth."
-                        );
-                    }
-                    // Retract the rolled-back transfers from the IVM view *before* dropping them
-                    // from the hot store — a reorg is just the same facts re-fed with weight −1.
-                    let last_indexed = self
-                        .store
-                        .get_meta(LAST_BLOCK_KEY)?
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(ancestor);
-                    let doomed = self.store.entities_in_range(ancestor + 1, last_indexed)?;
-                    self.balances.apply(retraction_batch(&doomed));
-                    self.exposure.apply(exposure_retraction_batch(
-                        &doomed,
-                        &self.registry,
-                        &self.labels,
-                    ));
-                    if let Some((_, w)) = self.velocity_cfg {
-                        self.velocity
-                            .apply(velocity_retraction_batch(&doomed, &self.registry, w));
-                    }
-                    // Drop children whose announcing factory event was rolled back (RFC-0009): the
-                    // registry state at B is a pure fold over factory events ≤ B.
-                    if self.factory.is_some() {
-                        let dropped = self.children.rollback_to(ancestor);
-                        if dropped > 0 {
-                            tracing::warn!("reorg: dropped {dropped} discovered child contract(s)");
-                        }
-                    }
-                    // Fire a `flag_retracted` alert for every rolled-back annotation a sink watches —
-                    // a consumer that acted on a flag learns the chain took it back (RFC-0008 C5).
-                    if !self.router.is_empty() {
-                        for j in &doomed {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(j) {
-                                if let Some(kind) = v.get("kind").and_then(|k| k.as_str()) {
-                                    if self.router.watches(kind) {
-                                        alerts::enqueue(
-                                            &self.store,
-                                            &self.router,
-                                            "flag_retracted",
-                                            kind,
-                                            &v,
-                                        )?;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    let removed = self.store.rollback_to(ancestor)?;
-                    self.store.set_meta(LAST_BLOCK_KEY, &ancestor.to_string())?;
-                    METRICS.inc_reorgs();
-                    METRICS.set_last_block(ancestor);
-                    tracing::warn!("reorg detected: rolled back to block {ancestor} (removed {removed} entities)");
-                    return Ok(Some(ancestor + 1));
-                }
-                Ok(None) => {}
-                Err(e) => tracing::debug!("reorg check skipped: {e:#}"),
+        if next == 0 {
+            return Ok(None);
+        }
+        match detect_reorg(source, &self.store, next - 1).await {
+            Ok(Some(ancestor)) => {
+                self.rollback_reorg(ancestor)?;
+                Ok(Some(ancestor + 1))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => {
+                tracing::debug!("reorg check skipped: {e:#}");
+                Ok(None)
             }
         }
-        Ok(None)
+    }
+
+    /// Roll this nest's mutable hot store + IVM views back to `ancestor` (the deepest reorg-survivor
+    /// block). Detection is the *caller's* job: a solo nest detects on its own cursor (`handle_reorg`);
+    /// a roost detects **once** at the shared boundary and fans this out to every nest (slice 3). A
+    /// nest already at or below `ancestor` (e.g. a still-backfilling nest in a roost while the tip
+    /// reorgs) is a no-op — nothing above `ancestor` to undo, and its cursor must NOT be bumped up to
+    /// `ancestor` (that would claim blocks it never indexed). Propagates the finality-violation bail.
+    fn rollback_reorg(&mut self, ancestor: u64) -> Result<()> {
+        // Retract the rolled-back transfers from the IVM view *before* dropping them from the hot
+        // store — a reorg is just the same facts re-fed with weight −1.
+        let last_indexed = self
+            .store
+            .get_meta(LAST_BLOCK_KEY)?
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(ancestor);
+        // This nest hasn't reached past the fork: nothing to undo, and don't advance its cursor.
+        if last_indexed <= ancestor {
+            return Ok(());
+        }
+        // A reorg below the sealed watermark is a finality violation this model can't repair: the
+        // doomed blocks are already in immutable sealed segments (and pruned from hot), so the
+        // retraction below would be silently incomplete and the sealed layer would permanently disagree
+        // with the canonical chain. Halt loudly instead (deadlock-review finding M6). The `--seal-direct`
+        // finality depth / `finalized` tag is the contract; if it's being violated, it needs raising.
+        let sealed_through = self
+            .store
+            .get_meta(SEALED_THROUGH_KEY)?
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        if ancestor < sealed_through {
+            anyhow::bail!(
+                "reorg to block {ancestor} is below the sealed/finalized watermark \
+                 {sealed_through} — a finality violation this indexer cannot repair; \
+                 halting. Raise the chain's finality depth."
+            );
+        }
+        let doomed = self.store.entities_in_range(ancestor + 1, last_indexed)?;
+        self.balances.apply(retraction_batch(&doomed));
+        self.exposure.apply(exposure_retraction_batch(
+            &doomed,
+            &self.registry,
+            &self.labels,
+        ));
+        if let Some((_, w)) = self.velocity_cfg {
+            self.velocity
+                .apply(velocity_retraction_batch(&doomed, &self.registry, w));
+        }
+        // Drop children whose announcing factory event was rolled back (RFC-0009): the registry state
+        // at B is a pure fold over factory events ≤ B.
+        if self.factory.is_some() {
+            let dropped = self.children.rollback_to(ancestor);
+            if dropped > 0 {
+                tracing::warn!("reorg: dropped {dropped} discovered child contract(s)");
+            }
+        }
+        // Fire a `flag_retracted` alert for every rolled-back annotation a sink watches — a consumer
+        // that acted on a flag learns the chain took it back (RFC-0008 C5).
+        if !self.router.is_empty() {
+            for j in &doomed {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(j) {
+                    if let Some(kind) = v.get("kind").and_then(|k| k.as_str()) {
+                        if self.router.watches(kind) {
+                            alerts::enqueue(&self.store, &self.router, "flag_retracted", kind, &v)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        let removed = self.store.rollback_to(ancestor)?;
+        self.store.set_meta(LAST_BLOCK_KEY, &ancestor.to_string())?;
+        METRICS.inc_reorgs();
+        METRICS.set_last_block(ancestor);
+        tracing::warn!(
+            "reorg detected: rolled back to block {ancestor} (removed {removed} entities)"
+        );
+        Ok(())
     }
 
     /// Decode, store, IVM-feed, screen, checkpoint, seal and deliver webhooks for one fetched window
@@ -2738,6 +2769,88 @@ template = "pool"
             "a factory co-tenant must drop the address filter"
         );
         assert_eq!(topics, vec![transfer, created]);
+    }
+
+    /// Build a minimal static ERC20 `NestIngest` on disk through the real `build_nest` path.
+    async fn build_test_nest(dir: &std::path::Path, addr: &str) -> NestIngest {
+        std::fs::create_dir_all(dir.join("abis")).unwrap();
+        std::fs::write(
+            dir.join(crate::config::CONFIG_FILE),
+            format!(
+                "[nest]\nname = \"n\"\nchain = \"arbitrum-one\"\nchain_id = 42161\nrpc_urls = []\n\n\
+                 [[contracts]]\nalias = \"tok\"\naddress = \"{addr}\"\nabi = \"abis/tok.json\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("abis/tok.json"),
+            r#"[{"type":"event","name":"Transfer","inputs":[{"name":"from","type":"address","indexed":true},{"name":"to","type":"address","indexed":true},{"name":"value","type":"uint256","indexed":false}],"anonymous":false}]"#,
+        )
+        .unwrap();
+        let config = Config::load(dir).unwrap();
+        let source: Arc<dyn Source> = Arc::new(MockSource { logs: Vec::new() });
+        let (nest, _state, worker, _w) =
+            build_nest(&source, dir.to_path_buf(), &config, None, false)
+                .await
+                .unwrap();
+        if let Some(w) = worker {
+            w.abort();
+        }
+        nest
+    }
+
+    /// Seed a nest's hot store with one row per block and set `LAST_BLOCK` to the max.
+    fn seed_blocks(nest: &NestIngest, blocks: &[u64]) {
+        for &b in blocks {
+            let key = Store::entity_key(b, 0);
+            nest.store
+                .put_entity(&key, &format!(r#"{{"table":"t","block_number":{b}}}"#))
+                .unwrap();
+        }
+        let last = *blocks.iter().max().unwrap();
+        nest.store
+            .set_meta(LAST_BLOCK_KEY, &last.to_string())
+            .unwrap();
+    }
+
+    /// RFC-0012 slice 3: one shared reorg fans out to every nest. A caught-up nest rolls back to the
+    /// fork; a still-backfilling nest below the fork is spared and — crucially — its cursor is NOT
+    /// bumped up to the ancestor (that would claim blocks it never indexed).
+    #[tokio::test]
+    async fn roost_reorg_fans_out_and_spares_behind_nests() {
+        let da = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let mut caught_up =
+            build_test_nest(da.path(), "0x0000000000000000000000000000000000000001").await;
+        let mut behind =
+            build_test_nest(db.path(), "0x0000000000000000000000000000000000000002").await;
+
+        // caught_up is at the tip (block 100); behind is still backfilling (block 30, below the fork).
+        seed_blocks(&caught_up, &[10, 20, 30, 40, 50, 60, 80, 100]);
+        seed_blocks(&behind, &[10, 20, 30]);
+
+        // One shared reorg to ancestor 50, fanned to both nests (as `roost_index_loop` does).
+        caught_up.rollback_reorg(50).unwrap();
+        behind.rollback_reorg(50).unwrap();
+
+        // Caught-up nest: rolled back to 50 — nothing above survives, cursor at 50.
+        assert!(caught_up
+            .store
+            .entities_in_range(51, 1_000)
+            .unwrap()
+            .is_empty());
+        assert_eq!(caught_up.store.entities_in_range(10, 50).unwrap().len(), 5); // 10,20,30,40,50
+        assert_eq!(
+            caught_up.store.get_meta(LAST_BLOCK_KEY).unwrap().as_deref(),
+            Some("50")
+        );
+
+        // Behind nest: below the fork → untouched; cursor stays at 30 (NOT bumped to 50).
+        assert_eq!(behind.store.entities_in_range(10, 1_000).unwrap().len(), 3);
+        assert_eq!(
+            behind.store.get_meta(LAST_BLOCK_KEY).unwrap().as_deref(),
+            Some("30")
+        );
     }
 
     #[test]

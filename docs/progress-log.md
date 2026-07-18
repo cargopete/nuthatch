@@ -2,6 +2,25 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-18 - RFC-0012 roost slice 3: shared reorg detection + fan-out.** The last piece of the roost
+  core. `handle_reorg` was split into detection (`detect_reorg`, unchanged) and a sync
+  `rollback_reorg(ancestor)` (retract the three IVM views, drop reorged children, roll back the hot
+  store). A solo nest still detects on its own cursor; the roost now detects a reorg **once** — at the
+  most-caught-up nest's boundary (every tip nest checkpoints the same blocks with the same hashes, so
+  any is a valid reference) — and fans `rollback_reorg` out to every mounted nest. One detection (a
+  handful of block-hash calls) instead of N, one observable reorg boundary. The subtle bug a naive
+  fan-out would introduce: bumping a *behind* (still-backfilling) nest's `LAST_BLOCK` up to the ancestor,
+  claiming blocks it never indexed — so `rollback_reorg` no-ops for any nest already at/below the fork,
+  leaving its cursor put. Finality was already shared (one finality height per chain drives every nest's
+  sealing). Behaviour-preserving for solo `dev`: the split is transparent (the guard can't trigger when
+  a nest detects on its own cursor), and every reorg property test passes unchanged. **Gate met:** the
+  existing store-level reorg proptests + golden, plus a fan-out test — two nests at different heights,
+  one shared reorg: the caught-up nest rolls back to the fork, the behind nest is spared with its cursor
+  uncorrupted. 138 tests (+1), clippy `-D warnings` clean. Live multi-nest reorg convergence over a
+  chain folds into the same live acceptance as 2a. **The roost core (slices 1–3) is complete** — layout,
+  serving, shared cursor, factory support, shared reorg. Remaining RFC-0012 work is slice 4 (footprint
+  model: pre-mount RSS estimate + `max_rss` refusal + per-nest `/metrics`) and slice 7 (a runnable
+  two-nest example + operators docs).
 - **2026-07-18 - RFC-0012 roost slice 2b: factory nests in a roost.** Lifts the slice-2a restriction —
   factory/template nests (RFC-0009) can now be co-mounted with static nests under the shared cursor.
   `NestIngest::owns` gained a second demux mode: a **static** nest (non-empty address filter) routes a
