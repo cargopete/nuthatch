@@ -433,6 +433,11 @@ async fn entity(State(s): State<AppState>, Path(id): Path<String>) -> impl IntoR
 #[derive(Deserialize)]
 struct SqlQuery {
     q: String,
+    /// Optional row cap for this request, clamped to `[1, SQL_MAX_ROWS]`. The MCP bridge passes a
+    /// small value (default 200) so an agent's context isn't flooded (RFC-0016 §4); curl gets the
+    /// full cap. Absent → the node cap.
+    #[serde(default)]
+    max_rows: Option<usize>,
 }
 
 /// Read-only analytical SQL over the sealed segments; one view per `{alias}__{event}` table.
@@ -469,6 +474,9 @@ async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl IntoR
     let dir = s.dir.clone();
     let sql = q.q.clone();
     let store = s.store.clone();
+    // Per-request row cap (RFC-0016 §4): the MCP bridge asks for a small number so an agent's context
+    // isn't flooded; curl omits it and gets the node cap. Clamped so it can only ever tighten.
+    let max_rows = q.max_rows.unwrap_or(SQL_MAX_ROWS).clamp(1, SQL_MAX_ROWS);
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit; // held for the whole blocking query, released on return
                               // Scan the hot tip (redb, blocking) inside the same blocking task, so `/sql` sees the unsealed
@@ -480,7 +488,7 @@ async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl IntoR
             &sql,
             analytics::QueryGuard {
                 timeout: SQL_TIMEOUT,
-                max_rows: SQL_MAX_ROWS,
+                max_rows,
             },
             &hot,
             sealed_through,
@@ -488,10 +496,19 @@ async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl IntoR
     })
     .await;
     match result {
+        // Provenance stamp (RFC-0016 §4): an agent can cite its answer against content-addressed data —
+        // as of which block, what's sealed, and the registry it decoded with.
         Ok(Ok(out)) => Json(json!({
             "count": out.rows.len(),
             "truncated": out.truncated,
             "rows": out.rows,
+            "provenance": {
+                "as_of": s.store.get_meta("last_block").ok().flatten()
+                    .and_then(|v| v.parse::<u64>().ok()),
+                "sealed_through": s.store.sealed_through(),
+                "source": "hot+sealed",
+                "registry_hash": s.nest_info.get("registry_hash").and_then(Value::as_str),
+            },
         }))
         .into_response(),
         Ok(Err(e)) => {
@@ -753,6 +770,7 @@ mod tests {
             State(state.clone()),
             Query(SqlQuery {
                 q: "SELECT 1".into(),
+                max_rows: None,
             }),
         )
         .await
@@ -767,9 +785,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(tmp.path(), SQL_MAX_CONCURRENCY);
         let long = format!("SELECT {}", "1,".repeat(SQL_MAX_QUERY_LEN)); // well past the cap
-        let resp = sql(State(state), Query(SqlQuery { q: long }))
-            .await
-            .into_response();
+        let resp = sql(
+            State(state),
+            Query(SqlQuery {
+                q: long,
+                max_rows: None,
+            }),
+        )
+        .await
+        .into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -782,6 +806,7 @@ mod tests {
             State(state),
             Query(SqlQuery {
                 q: "SELECT 1 AS n".into(),
+                max_rows: None,
             }),
         )
         .await

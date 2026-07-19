@@ -2,6 +2,17 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-19 - RFC-0016 S4: result shaping + provenance.** MCP responses now diverge from HTTP
+  responses deliberately — curl and agents are different consumers. `/sql` gains an optional
+  `max_rows` (clamped to the node cap) and a **provenance** block on every result (`as_of` block,
+  `sealed_through`, `source`, `registry_hash`). The MCP `sql` tool passes a small default cap (200,
+  agent-overridable via `limit`) and reshapes the JSON into a **compact aligned table** (measured
+  smaller than the verbose per-row JSON — the density win for a context window), with **truncation as
+  guidance** (`… truncated at N rows — aggregate (GROUP BY), tighten the WHERE, or raise \`limit\``)
+  rather than silent cutoff, and a one-line **provenance stamp** (`— as of block N, sealed_through M,
+  source hot+sealed, registry <hash8>`) so an agent can cite its answer against content-addressed
+  data. Verified live: `/sql?…&max_rows=2` caps + stamps; the compact formatter is unit-tested for
+  density, truncation guidance, and verbatim error relay. 169 lib tests; clippy `-D warnings` clean.
 - **2026-07-19 - RFC-0016 S3: errors as prompts + `explain`.** A failed query is now a teaching
   opportunity instead of a round-trip tax. New `src/sql_errors.rs` classifies a DuckDB failure against
   the nest schema and appends a one-line fix hint (raw engine message always preserved): **unknown
