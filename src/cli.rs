@@ -387,6 +387,11 @@ pub struct McpArgs {
     /// Base URL of the running `nuthatch dev` HTTP API to bridge to.
     #[arg(long, default_value = "http://127.0.0.1:8288")]
     pub url: String,
+
+    /// Print a copy-paste MCP client config (Claude Code `.mcp.json` + the `claude mcp add` one-liner)
+    /// and exit, instead of running the stdio server. This is the "wire it up in one step" helper.
+    #[arg(long)]
+    pub print_config: bool,
 }
 
 #[derive(Args)]

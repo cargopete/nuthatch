@@ -90,6 +90,87 @@ match the roost's — a mismatch is refused at startup (a different chain needs 
 - **Mixed nests.** Static and factory nests co-exist in one roost; nests may mount at different heights
   and each backfills its own history — the cursor only couples them at the tip.
 
+## Deploy recipes (copy-paste)
+
+`nuthatch dev` **is** the serve command — it backfills, follows the tip, and serves the API in one
+process. "I tried it locally" → "it's running on my box" is just running that under a supervisor.
+
+### systemd
+
+```ini
+# /etc/systemd/system/nuthatch.service
+[Unit]
+Description=nuthatch indexer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nuthatch
+WorkingDirectory=/var/lib/nuthatch/mynest        # the nest directory (holds nuthatch.toml)
+ExecStart=/usr/local/bin/nuthatch dev --listen 127.0.0.1:8288 --seal-direct --concurrency 8
+Restart=on-failure
+RestartSec=5
+# Off-localhost the admin UI requires this; unset it and bind 127.0.0.1 to disable remote admin.
+Environment=NUTHATCH_ADMIN_TOKEN=change-me
+# Keep it inside the footprint budget; the box needs headroom for DuckDB queries.
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo systemctl daemon-reload && sudo systemctl enable --now nuthatch
+journalctl -u nuthatch -f          # a clean progress line during backfill, then quiet tip-following
+```
+
+### Docker
+
+No image is published yet; build the binary into a slim runtime and mount the nest directory:
+
+```dockerfile
+# Dockerfile
+FROM rust:1.85 AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+COPY --from=build /src/target/release/nuthatch /usr/local/bin/nuthatch
+ENTRYPOINT ["nuthatch"]
+```
+
+```sh
+docker build -t nuthatch .
+# The nest directory is the only state; mount it and expose the API on localhost.
+docker run -d --name nuthatch --restart unless-stopped \
+  -v "$PWD/mynest:/nest" -p 127.0.0.1:8288:8288 \
+  -e NUTHATCH_ADMIN_TOKEN=change-me \
+  nuthatch dev --dir /nest --listen 0.0.0.0:8288 --seal-direct --concurrency 8
+```
+
+Bind `0.0.0.0` **inside** the container but publish only to `127.0.0.1` on the host, and put a reverse
+proxy (TLS + auth) in front — same posture as the bare-metal case. `docker stop` sends SIGTERM, which
+drains and checkpoints cleanly (see Lifecycle).
+
+## AI: point a coding agent at your data
+
+The MCP server is compiled in. Wire a client to a running nest in one step — `nuthatch mcp
+--print-config` prints exactly what to paste:
+
+```sh
+nuthatch dev &                       # the index the agent will query
+nuthatch mcp --print-config          # copy-paste config for Claude Code / any MCP client
+# Claude Code, directly:
+claude mcp add nuthatch -- nuthatch mcp --url http://127.0.0.1:8288
+```
+
+`nuthatch mcp` is a thin, fully-offline stdio bridge to the local `dev` HTTP API — it never contends
+with the single writer and nothing phones home. The client launches it; you ask your contract's data
+in plain English and it writes the SQL. (The semantic layer that makes that first-try-correct is
+RFC-0016.)
+
 ## Stability contract (0.x)
 
 - **Config**: `nuthatch.toml` keys and the nest `schema_version` follow a deprecation policy — a key

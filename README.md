@@ -100,6 +100,27 @@ RPC (or colocated reth ExEx)  →  deterministic decode  →  redb hot store (ti
 
 ---
 
+## Point an AI at it
+
+nuthatch has a Model Context Protocol server compiled in, so a coding agent can query your contract's
+data in plain English — offline, no phone-home. Wiring it is one step:
+
+```sh
+nuthatch dev &                  # the index the agent will query
+nuthatch mcp --print-config     # prints a copy-paste config for Claude Code / any MCP client
+```
+
+Or add it to Claude Code directly:
+
+```sh
+claude mcp add nuthatch -- nuthatch mcp --url http://127.0.0.1:8288
+```
+
+Then just ask: *"what are the top USDC holders?"* — the agent writes the SQL and runs it against your
+nest. (Making that correct on the first try is the [semantic-layer work](docs/rfcs/0016-governed-semantic-layer-and-agent-grade-mcp.md).)
+
+---
+
 ## Everything else it can do
 
 The core is "your contract → SQL." Beyond that, nuthatch has a full feature set for teams and operators
@@ -136,6 +157,8 @@ default; `--listen` elsewhere and put a gateway in front. See [`docs/operators.m
 - **Footprint:** ≤2 GB RAM single-chain, single static binary, graceful SIGTERM shutdown with
   checkpointed resume.
 - **Durability:** content-addressed segments are safe to copy while running; back up the nest directory.
+- **`dev` is the serve command** — it backfills, follows the tip, and serves in one process.
+  Copy-paste **systemd** and **Docker** recipes are in [`docs/operators.md`](docs/operators.md#deploy-recipes-copy-paste).
 
 ---
 

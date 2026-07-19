@@ -14,6 +14,18 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   `write_nest_artifacts` so `init` and `add` regenerate schema.json/llms.txt/skill from one code path
   (no drift). Verified live: USDC (17 tables) → `add` WETH → 2 contracts / 21 tables; dup/missing/alias
   errors all fire. 153 lib tests, clippy `-D warnings` clean.
+- **2026-07-19 - RFC-0015 slices 5+6: the AI one-liner and a dead-simple prod story.** **Slice 5** —
+  wiring a coding agent to a nest is now one documented step: `nuthatch mcp --print-config` emits a
+  copy-paste MCP client config (the `.mcp.json` block **and** the `claude mcp add nuthatch -- …`
+  one-liner), pointing at this exact binary (absolute path via `current_exe`, so it works off `PATH`).
+  And a human who runs bare `nuthatch mcp` in a terminal no longer hits a silent stdin block — when
+  stdin is a TTY (no client driving it) it prints the same wiring guidance and exits, instead of
+  hanging. **Slice 6** — the "I tried it locally → it's on my VPS" gap: `dev` *is* the serve command,
+  and `docs/operators.md` now carries copy-paste **systemd** (unit + `MemoryMax=2G` + admin-token env)
+  and **Docker** (multi-stage build + `docker run` with the nest dir mounted) recipes, plus the AI
+  wiring. README gains a "Point an AI at it" section and links the deploy recipes. No new data
+  capability — pure DX, honouring the binary+compose-only deployment scope. 154 lib tests, clippy
+  `-D warnings` clean.
 - **2026-07-19 - RFC-0015 slice 2: magical `init` — chain auto-detect.** `--chain` is now optional.
   Omit it and `init` probes every registered chain (mainnet → arbitrum-one → base) in parallel for the
   contract's `eth_getCode` and picks, in registry order, the first chain with bytecode there — so the

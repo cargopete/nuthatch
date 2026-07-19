@@ -34,7 +34,14 @@ async fn main() -> Result<()> {
         cli::Command::Dev(args) => indexer::dev(args).await,
         cli::Command::Sql(args) => run_sql(args).await,
         cli::Command::Transform(args) => run_transform(args),
-        cli::Command::Mcp(args) => mcp::serve(args.url).await,
+        cli::Command::Mcp(args) => {
+            if args.print_config {
+                mcp::print_client_config(&args.url);
+                Ok(())
+            } else {
+                mcp::serve(args.url).await
+            }
+        }
         cli::Command::Check(args) => check::check(args),
         cli::Command::Bench(args) => match args.what {
             cli::BenchWhat::Backfill(a) => bench::backfill(a).await,

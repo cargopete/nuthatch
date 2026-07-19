@@ -12,8 +12,65 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// The MCP server is meant to be launched by an MCP *client* (Claude Code, Cursor, …) as a stdio
+/// subprocess. When a human runs `nuthatch mcp` in a terminal, stdin is a TTY and no client is
+/// driving it — so instead of silently blocking on a read that never comes, show how to wire it up.
+/// Returns true if we short-circuited (printed guidance and should exit).
+fn guide_if_interactive(base: &str) -> bool {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return false; // a client is piping JSON-RPC in — run the server.
+    }
+    eprintln!("`nuthatch mcp` is a stdio server for an AI client to launch, not to run by hand.\n");
+    print_client_config(base);
+    true
+}
+
+/// Emit a copy-paste MCP client configuration for this binary bridging to `base`. One documented
+/// command wires a coding agent to a running nest (RFC-0015 slice 5): print it, paste it, ask your
+/// contract's data in plain English — fully offline, nothing phones home.
+pub fn print_client_config(base: &str) {
+    // Prefer this binary's absolute path so the snippet works even off `PATH`; fall back to the bare
+    // command name.
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_owned))
+        .unwrap_or_else(|| "nuthatch".to_string());
+
+    let snippet = client_config_json(&exe, base);
+
+    println!("First run your index:   nuthatch dev");
+    println!("Then point an AI client at it — either way is one step:\n");
+    println!("  Claude Code (one-liner):");
+    println!("    claude mcp add nuthatch -- {exe} mcp --url {base}\n");
+    println!("  Or add to .mcp.json / your client's MCP config:");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&snippet).unwrap_or_default()
+    );
+    println!(
+        "\nThen ask your agent: \"what are the top USDC holders?\" — it queries the nest over MCP."
+    );
+}
+
+/// The MCP-client server entry for this binary bridging to `base` — the value that goes under
+/// `mcpServers.nuthatch` in a client's config.
+fn client_config_json(exe: &str, base: &str) -> Value {
+    json!({
+        "mcpServers": {
+            "nuthatch": {
+                "command": exe,
+                "args": ["mcp", "--url", base]
+            }
+        }
+    })
+}
+
 /// Run the stdio MCP loop, bridging tool calls to `base` (a running `nuthatch dev` HTTP API).
 pub async fn serve(base: String) -> Result<()> {
+    if guide_if_interactive(&base) {
+        return Ok(());
+    }
     let client = reqwest::Client::new();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
@@ -233,6 +290,18 @@ fn content(text: &str, is_error: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_config_launches_this_binary_and_bridges_to_base() {
+        let cfg = client_config_json("/usr/local/bin/nuthatch", "http://127.0.0.1:8288");
+        let srv = &cfg["mcpServers"]["nuthatch"];
+        assert_eq!(srv["command"], "/usr/local/bin/nuthatch");
+        // The client launches `nuthatch mcp --url <base>` as a stdio subprocess.
+        assert_eq!(
+            srv["args"],
+            json!(["mcp", "--url", "http://127.0.0.1:8288"])
+        );
+    }
 
     #[tokio::test]
     async fn initialize_and_tools_list_need_no_network() {
