@@ -186,6 +186,57 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest> {
     }
 }
 
+/// Startup integrity pass: verify every manifest segment's file exists and its bytes hash to the
+/// recorded content address. A file that's missing, unreadable, or hash-mismatched is corrupt or
+/// tampered with — quarantine it (move to a sibling `quarantine/` dir so `define_views` skips it) and
+/// log loudly, then continue. A corrupt segment must *reduce* a table's cold data, never crash-loop the
+/// node. Sealed data is immutable and content-addressed, so a hash mismatch is unambiguous corruption.
+/// Returns the number of segments quarantined. Best-effort — never fatal (an IO error just logs).
+pub fn verify_and_quarantine(dir: &Path) -> Result<usize> {
+    let manifest = load_manifest(dir)?;
+    let seg_dir = dir.join(SEGMENTS_DIR);
+    // Sibling of `segments/`, deliberately *outside* it — nothing globs or SQL-reads the quarantine.
+    let quarantine = dir.join("quarantine");
+    let mut quarantined = 0usize;
+
+    for (table, segs) in &manifest.tables {
+        for s in segs {
+            let path = seg_dir.join(&s.file);
+            let reason = match std::fs::read(&path) {
+                Ok(bytes) if hex::encode(Sha256::digest(&bytes)) == s.hash => continue, // intact
+                Ok(_) => "hash mismatch (corrupt or tampered)",
+                // Already gone from disk — nothing to move; `define_views` skips it. Not counted.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => "unreadable",
+            };
+            std::fs::create_dir_all(&quarantine).ok();
+            let dest = quarantine.join(&s.file);
+            match std::fs::rename(&path, &dest) {
+                Ok(()) => {
+                    tracing::error!(
+                        "quarantined segment {} for table {table} ({reason}) → {} — cold data for this \
+                         table is reduced; re-seal the range to restore it",
+                        s.file,
+                        dest.display()
+                    );
+                    quarantined += 1;
+                }
+                Err(e) => tracing::error!(
+                    "segment {} for {table} is {reason} but could not be quarantined: {e}",
+                    s.file
+                ),
+            }
+        }
+    }
+    if quarantined > 0 {
+        tracing::error!(
+            "startup integrity: quarantined {quarantined} corrupt segment(s) — data is reduced, node \
+             continues; investigate disk health and re-seal the affected ranges"
+        );
+    }
+    Ok(quarantined)
+}
+
 fn save_manifest(dir: &Path, manifest: &Manifest) -> Result<()> {
     let raw = serde_json::to_string_pretty(manifest)?;
     // The manifest is the segment catalogue — the crown jewels of a `kill -9`-survivable single binary
@@ -231,6 +282,37 @@ mod tests {
         format!(
             r#"{{"table":"usdc__approval","owner":"0xaaaa","spender":"0xdddd","value":"1","block_number":{block},"tx_hash":"0xcc","log_index":{li}}}"#
         )
+    }
+
+    #[test]
+    fn verify_quarantines_a_corrupt_segment_and_leaves_intact_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        seal_range(dir.path(), &[transfer(100, 0, "5")], 100, 100).unwrap();
+        seal_range(dir.path(), &[transfer(101, 0, "7")], 101, 101).unwrap();
+        let manifest = load_manifest(dir.path()).unwrap();
+        let segs = &manifest.tables["usdc__transfer"];
+        assert_eq!(segs.len(), 2);
+
+        // A clean tree quarantines nothing.
+        assert_eq!(verify_and_quarantine(dir.path()).unwrap(), 0);
+
+        // Corrupt the first segment's bytes (simulate disk rot / tampering).
+        let bad = dir.path().join(SEGMENTS_DIR).join(&segs[0].file);
+        std::fs::write(&bad, b"not a parquet file anymore").unwrap();
+
+        // Verify quarantines exactly the corrupt one; the intact one stays put.
+        assert_eq!(verify_and_quarantine(dir.path()).unwrap(), 1);
+        assert!(!bad.exists(), "corrupt file moved out of segments/");
+        assert!(
+            dir.path().join("quarantine").join(&segs[0].file).exists(),
+            "corrupt file is in quarantine/"
+        );
+        assert!(
+            dir.path().join(SEGMENTS_DIR).join(&segs[1].file).exists(),
+            "intact segment untouched"
+        );
+        // Idempotent: the already-quarantined (now-missing) segment isn't re-counted.
+        assert_eq!(verify_and_quarantine(dir.path()).unwrap(), 0);
     }
 
     #[test]

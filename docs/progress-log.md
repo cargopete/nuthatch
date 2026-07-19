@@ -2,6 +2,20 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+
+- **2026-07-19 - 0.5.x hardening 3/N: corrupt/missing-segment recovery.** A sealed segment whose file was
+  missing or corrupt broke *every* `/sql` query for its table — `read_parquet([…])` over the manifest's
+  file list throws if any one file is unreadable, and the whole view fails. Two fixes make a corrupt
+  segment reduce a table's cold data instead of crash-looping the node: (1) `analytics::define_views`
+  now skips a manifest segment whose file is gone from disk (logs it, keeps the survivors) — so a
+  missing/quarantined file never fails the query; (2) new `seal::verify_and_quarantine` runs once at
+  `dev` startup (before the view rebuild scans segments): each manifest segment is hash-verified against
+  its recorded content address, and a corrupt/tampered (`sha256` mismatch) or unreadable one is moved to
+  a sibling `quarantine/` dir with a loud error, then indexing continues. Sealed data is immutable +
+  content-addressed, so a hash mismatch is unambiguous corruption. Idempotent (an already-quarantined,
+  now-missing segment isn't re-counted). Tests: `seal.rs` quarantines a corrupted segment and leaves the
+  intact one; `analytics.rs` proves a query survives a deleted segment file. 177 lib tests, clippy
+  `-D warnings` clean.
 - **2026-07-19 - 0.5.x hardening 2/N: health-aware RPC failover.** The RPC client had round-robin
   failover but no memory of which endpoints were down — so a dead provider cost a full 20 s request
   timeout on every call that round-robined onto it (~1/N of calls), dragging tip-follow latency during a

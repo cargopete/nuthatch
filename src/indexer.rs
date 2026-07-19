@@ -465,6 +465,14 @@ async fn build_nest(
     // The decode registry drives all contracts; the indexer decodes every declared event of every
     // contract in the nest into per-table rows.
     let registry = Arc::new(DecodeRegistry::from_nest(&dir, config)?);
+
+    // Startup integrity pass (0.5.x hardening): quarantine any sealed segment whose bytes no longer
+    // hash to their content address (disk corruption / tampering) before the view rebuild below scans
+    // them. A corrupt segment reduces a table's cold data, loudly — it never crash-loops the node.
+    if let Err(e) = seal::verify_and_quarantine(&dir) {
+        tracing::warn!("segment integrity check failed (continuing): {e:#}");
+    }
+
     let balances = BalanceView::start()?;
     // Labels (RFC-0008 C1) are the annotation substrate the exposure view joins against. Loaded before
     // the exposure view so it only spins up when there's actually something to track.
