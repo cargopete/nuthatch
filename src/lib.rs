@@ -26,6 +26,7 @@ pub mod lists;
 pub mod mcp;
 pub mod metrics;
 pub mod pack;
+pub mod progress;
 pub mod project;
 pub mod registry;
 pub mod roost;
