@@ -23,10 +23,19 @@ pub fn merge_rpcs(preferred: &[String], fallback: impl IntoIterator<Item = Strin
     out
 }
 
+/// After an endpoint fails, skip it for this long (unless every endpoint is unhealthy) — so one dead
+/// provider doesn't cost a full request-timeout on every call that round-robins onto it. A partial
+/// outage fails over fast instead of stalling the tip loop.
+const ENDPOINT_COOLDOWN_MS: u64 = 30_000;
+
 pub struct RpcClient {
     http: reqwest::Client,
     urls: Vec<String>,
     cursor: AtomicUsize,
+    /// Per-endpoint health: the millis-since-epoch until which the endpoint is considered unhealthy
+    /// (`0` = healthy). Set on a failed call, cleared on a successful one. Endpoints past their cooldown
+    /// are tried first; still-unhealthy ones are the fallback of last resort (soonest-to-recover first).
+    health: Vec<AtomicU64>,
     /// Total HTTP requests attempted (incl. failover retries) — a benchmark/observability metric.
     requests: AtomicU64,
 }
@@ -54,10 +63,12 @@ impl RpcClient {
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .context("failed to build HTTP client")?;
+        let health = urls.iter().map(|_| AtomicU64::new(0)).collect();
         Ok(Self {
             http,
             urls,
             cursor: AtomicUsize::new(0),
+            health,
             requests: AtomicU64::new(0),
         })
     }
@@ -67,18 +78,54 @@ impl RpcClient {
         self.requests.load(Ordering::Relaxed)
     }
 
-    /// Try each endpoint once, starting from the round-robin cursor, until one answers.
-    async fn call(&self, method: &str, params: Value) -> Result<Value> {
+    /// The order to try endpoints for this call: healthy ones first (round-robin from the cursor for
+    /// fairness), then any still in cooldown as a last resort (soonest-to-recover first). Advances the
+    /// round-robin cursor once per call.
+    fn endpoint_order(&self) -> Vec<usize> {
         let n = self.urls.len();
-        let start = self.cursor.fetch_add(1, Ordering::Relaxed);
-        let mut last_err = anyhow!("all RPC endpoints failed");
+        let start = self.cursor.fetch_add(1, Ordering::Relaxed) % n;
+        let now = now_millis();
+        let mut healthy = Vec::with_capacity(n);
+        let mut cooling = Vec::with_capacity(n);
         for i in 0..n {
-            let url = &self.urls[(start + i) % n];
+            let j = (start + i) % n;
+            let until = self.health[j].load(Ordering::Relaxed);
+            if until <= now {
+                healthy.push(j);
+            } else {
+                cooling.push((until, j));
+            }
+        }
+        cooling.sort_by_key(|(until, _)| *until);
+        healthy
+            .into_iter()
+            .chain(cooling.into_iter().map(|(_, j)| j))
+            .collect()
+    }
+
+    fn mark_healthy(&self, j: usize) {
+        self.health[j].store(0, Ordering::Relaxed);
+    }
+
+    fn mark_unhealthy(&self, j: usize) {
+        self.health[j].store(now_millis() + ENDPOINT_COOLDOWN_MS, Ordering::Relaxed);
+    }
+
+    /// Try endpoints in health order until one answers; a failed endpoint is put into cooldown, a
+    /// successful one is cleared.
+    async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        let mut last_err = anyhow!("all RPC endpoints failed");
+        for j in self.endpoint_order() {
+            let url = &self.urls[j];
             self.requests.fetch_add(1, Ordering::Relaxed);
             crate::metrics::METRICS.inc_rpc();
             match self.call_one(url, method, &params).await {
-                Ok(v) => return Ok(v),
+                Ok(v) => {
+                    self.mark_healthy(j);
+                    return Ok(v);
+                }
                 Err(e) => {
+                    self.mark_unhealthy(j);
                     tracing::debug!("rpc {url} failed for {method}: {e:#}");
                     last_err = e;
                 }
@@ -87,19 +134,21 @@ impl RpcClient {
         Err(last_err)
     }
 
-    /// POST a raw JSON-RPC body (single object or a batch array) with the same round-robin failover
+    /// POST a raw JSON-RPC body (single object or a batch array) with the same health-ordered failover
     /// as `call`, returning the parsed response. Used for batch requests `call` can't express.
     async fn post_with_failover(&self, body: &Value) -> Result<Value> {
-        let n = self.urls.len();
-        let start = self.cursor.fetch_add(1, Ordering::Relaxed);
         let mut last_err = anyhow!("all RPC endpoints failed");
-        for i in 0..n {
-            let url = &self.urls[(start + i) % n];
+        for j in self.endpoint_order() {
+            let url = &self.urls[j];
             self.requests.fetch_add(1, Ordering::Relaxed);
             crate::metrics::METRICS.inc_rpc();
             match self.post_one(url, body).await {
-                Ok(v) => return Ok(v),
+                Ok(v) => {
+                    self.mark_healthy(j);
+                    return Ok(v);
+                }
                 Err(e) => {
+                    self.mark_unhealthy(j);
                     tracing::debug!("rpc {url} failed for batch: {e:#}");
                     last_err = e;
                 }
@@ -325,12 +374,48 @@ fn parse_hex_u64(s: &str) -> Result<u64> {
     u64::from_str_radix(s, 16).with_context(|| format!("bad hex number '{s}'"))
 }
 
+/// Wall-clock millis since the epoch — used only for endpoint-health cooldowns (a coarse "try again
+/// after" timer), never for anything in the deterministic data path.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::merge_rpcs;
+    use super::{merge_rpcs, RpcClient};
 
     fn v<const N: usize>(xs: [&str; N]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_failed_endpoint_is_tried_last_until_it_cools_down() {
+        let c = RpcClient::new(v(["http://a", "http://b", "http://c"])).unwrap();
+        // Endpoint 1 (b) just failed → it must sink to the back of the try order.
+        c.mark_unhealthy(1);
+        for _ in 0..5 {
+            let order = c.endpoint_order();
+            assert_eq!(order.len(), 3);
+            assert_eq!(
+                *order.last().unwrap(),
+                1,
+                "unhealthy endpoint is tried last"
+            );
+            // The two healthy endpoints lead, in some round-robin order.
+            assert!(order[..2].contains(&0) && order[..2].contains(&2));
+        }
+        // A success clears it — back into normal rotation, no longer forced last.
+        c.mark_healthy(1);
+        let mut seen_first = false;
+        for _ in 0..3 {
+            if c.endpoint_order()[0] == 1 {
+                seen_first = true;
+            }
+        }
+        assert!(seen_first, "a recovered endpoint rejoins the round-robin");
     }
 
     #[test]

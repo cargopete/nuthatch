@@ -26,6 +26,7 @@ Statuses last reconciled against the [progress log](../progress-log.md) on 2026-
 | [0015](0015-the-delightful-core.md) | The delightful core — CLI/UX for the solo dev (the 0.5 north star) | — (polish over 0.1–0.4) | **Implemented** (all 6 slices: REPL, magical init, live feedback, `add`, MCP one-liner, prod recipes) |
 | [0016](0016-governed-semantic-layer-and-agent-grade-mcp.md) | The governed semantic layer and the agent-grade MCP experience | 0001, 0012, 0015 | **Implemented** (S1 eval harness → S2 semantic layer → S3 errors-as-prompts + explain → S4 result shaping → S5 resources/prompts; Tier-B baseline pending a keyed run) |
 | [0017](0017-builder-skill.md) | The builder skill — teaching coding agents to drive nuthatch | 0016, 0015 | **Implemented** (generated CLI ref + drift-checked authored skill; authoring eval pending a keyed run) |
+| [0018](0018-what-a-nest-is-authored-logic-and-composable-nests.md) | What a nest is — first-class authored logic (SQL views) and composable, parameterized nests (Starlark) | 0001, 0012, 0013, 0016, 0017 | Draft (v1) — §1 cold views (promote existing hook), §2 Starlark front-end (gated), §3 hot incremental views deferred |
 
 ## Conventions
 
