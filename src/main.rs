@@ -213,7 +213,7 @@ impl SqlBackend {
                 // Live tip ∪ sealed history, disjoint by the sealed watermark (COR-1).
                 let hot = store.hot_rows_by_table().unwrap_or_default();
                 let sealed_through = store.sealed_through();
-                let out = analytics::query_hot_cold(
+                match analytics::query_hot_cold(
                     dir,
                     sql,
                     analytics::QueryGuard {
@@ -222,8 +222,24 @@ impl SqlBackend {
                     },
                     &hot,
                     sealed_through,
-                )?;
-                Ok((out.rows, out.truncated))
+                ) {
+                    Ok(out) => Ok((out.rows, out.truncated)),
+                    Err(e) => {
+                        // Errors as prompts (RFC-0016 §3), same as the HTTP path: classify against the
+                        // nest's schema and append a fix hint. Schema is loaded only on the error path.
+                        let raw = format!("{e:#}");
+                        let hint = config::Config::load(dir)
+                            .ok()
+                            .and_then(|cfg| {
+                                nuthatch::registry::DecodeRegistry::from_nest(dir, &cfg).ok()
+                            })
+                            .and_then(|reg| nuthatch::sql_errors::enrich(&raw, sql, &reg.schema()));
+                        match hint {
+                            Some(h) => anyhow::bail!("{raw}\n\nhint: {h}"),
+                            None => anyhow::bail!("{raw}"),
+                        }
+                    }
+                }
             }
             SqlBackend::Http { url, client } => {
                 let resp = client

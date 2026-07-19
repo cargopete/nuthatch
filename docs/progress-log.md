@@ -2,6 +2,20 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-19 - RFC-0016 S3: errors as prompts + `explain`.** A failed query is now a teaching
+  opportunity instead of a round-trip tax. New `src/sql_errors.rs` classifies a DuckDB failure against
+  the nest schema and appends a one-line fix hint (raw engine message always preserved): **unknown
+  table** → fuzzy suggestion (`no table \`transfers\`; the closest is \`c0__transfer\``), **unknown
+  column** → nearest real column, **reserved word** → `\`from\` is a reserved word and a column — double-
+  quote it`, **big-int arithmetic** → `use \`value_dec\` for SUM/AVG`. Matching is off DuckDB's real
+  message strings; suggestions come from a containment-then-Levenshtein matcher that only ever names
+  real schema identifiers (never hallucinates) — the common agent slip (dropping the `{alias}__` prefix,
+  pluralising) is caught by containment, genuine typos by edit distance. Wired into `GET /sql`, the MCP
+  `sql` tool, and the `nuthatch sql` REPL's local path alike. New **`explain`** tool + `GET /explain`:
+  validate a query WITHOUT executing it (binds tables/columns/types via a `LIMIT 0` wrapper, scans
+  nothing) → `{valid:true}` or the same enriched error, so an agent checks a query's shape before
+  spending a concurrency slot. Verified live on USDC across all four classes + explain valid/invalid. 8
+  new unit tests; 166 lib tests + 6 e2e; clippy `-D warnings` clean.
 
 - **2026-07-19 - RFC-0016 S2: the governed semantic layer + enriched `schema`.** The MCP `schema` tool
   was a static string, identical for every nest — it described the *shape* of the model, never *this*

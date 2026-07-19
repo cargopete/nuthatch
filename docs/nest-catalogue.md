@@ -84,6 +84,78 @@ Before the tiers, the rubric that produced them. This is the reusable filter for
 
 ---
 
+## Tier 0 — the beachhead: Graph Protocol infrastructure
+
+**A different axis from the tiers below.** Tiers 1–3 rank on *aggregate* indexing demand across the
+whole ecosystem. Tier 0 ranks on *acute* demand from the audience nuthatch can reach first: **Graph
+Protocol indexers and operators** (the GraphOps / Lodestar orbit —
+[RFC-0002](rfcs/0002-horizon-nest.md), [RFC-0011](rfcs/0011-graph-network-nest-lodestar-migration.md)).
+Smaller headcount than "everyone who wants a Uniswap dashboard", but the pain is on the operational
+critical path and — the crux — **indexers pay real GRT query fees to read this data off the
+decentralized network today.** A self-hosted, deterministic, GRT-free equivalent is a "shut up and
+take my money" pitch to exactly the people nuthatch is already talking to. This is the beachhead; the
+DeFi tiers are the broad market that comes after.
+
+Post-Horizon this got *easier*, not harder: Horizon upgraded staking **in place** (same proxy
+address), so the protocol is now a **stable, defined contract set on Arbitrum One** — the textbook
+"good candidate" shape.
+
+### 0.1 The network subgraph — the crown jewel
+- **Why:** every indexer's `indexer-agent` / `indexer-service` reads it continuously to associate
+  deployment IDs with active allocations and drive allocation/routing decisions. It is the single
+  most operationally-load-bearing subgraph in the protocol, and reading it on the decentralized
+  network costs GRT. This is the nest that lands the first hundred users who actually pay attention.
+- **Footprint (Arbitrum One):** a defined multi-contract set — nuthatch already **ships and has
+  verified live** the core:
+  - `HorizonStaking` `0x00669A4CF01450B64E8A2A20E9b1FCB71E61eF03` (the in-place-upgraded staking proxy)
+  - `SubgraphService` `0xb2Bb92d0DE618878E438b55D5846cfecD9301105` (owns the allocation lifecycle now)
+  - `StakingExtension` `0x3bE385576d7C282070Ad91BF94366de9f9ba3571` (legacy allocation/delegation history)
+  - plus `RewardsManager`, `EpochManager`, `L2Curation`, `L2GNS`, and the Horizon payments layer
+    (`GraphPayments`, `PaymentsEscrow`, `GraphTallyCollector`) and `DisputeManager` — pin these from
+    the `graphprotocol/contracts` `addresses.json` rather than trusting a half-remembered hex.
+- **Events:** provisions (`ProvisionCreated/Increased/Thawed/Slashed`, `ThawRequestCreated/Fulfilled`),
+  delegation (`TokensDelegated/Undelegated`, `DelegationSlashed`), allocations (`AllocationCreated/
+  Resized/Closed`), collection (`IndexingRewardsCollected`, `QueryFeesCollected`), curation
+  (`Signalled`/`Burned`), GNS (`SubgraphPublished`, `SignalMinted/Burned`), rewards
+  (`HorizonRewardsAssigned`), epochs (`EpochRun`), disputes.
+- **Complexity:** 🟠 **Medium** — events are *sparse* (a few per minute; comfortably inside the RAM
+  budget, per RFC-0002 acceptance) and decode cleanly, but the value is in the **derived economic
+  views**: effective delegation cut, realized APR, per-epoch fee/reward aggregation. This is the
+  strongest possible governed-semantic-layer target ([RFC-0016](rfcs/0016-governed-semantic-layer-and-agent-grade-mcp.md)).
+- **Status:** partially shipped as `horizon-nest` (RFC-0002, live on Arbitrum); the remaining work is
+  finishing `graph-network-nest` (RFC-0011) — Indexer Directory, Curation, Epochs panels.
+
+### 0.2 EBO — the Epoch Block Oracle
+- **Why:** posts the canonical per-epoch start block for every indexed chain, so all indexers close
+  multichain allocations against a consistent reference and produce comparable POIs. Core plumbing —
+  indexers can't operate multichain without it (`graphprotocol/block-oracle`, GIP-0038).
+- **Footprint / mechanism:** data is posted **on-chain as calldata** to a **DataEdge** contract
+  (GIP-0025); on Arbitrum an `EventfulDataEdge` variant **emits events** rather than relying on
+  traces. The **Epoch Subgraph** decodes the calldata payloads.
+- **Complexity:** 🟠 **Medium** — needs the **calldata decoder** (the node-independent RFC-0014 slice
+  the [backlog](backlog.md) already flags as *buildable now*). Nice forcing function: EBO turns that
+  decoder from a theoretical to-do into a concrete, high-value deliverable.
+
+### 0.3 Gateway QoS / Rewards-Eligibility Oracle — watch the shape settle
+- **Why:** indexer quality-of-service (latency, availability, blocks-behind) feeds the gateway's
+  Indexer Selection Algorithm and, in Horizon, **gates indexing-reward eligibility** — so indexers
+  care intensely about it.
+- **Fit caveat (the honest one):** this is the least "pure" of the three. The canonical data
+  *originates off-chain* (gateway telemetry), and the Horizon-era on-chain mechanism has shifted to
+  the **Rewards Eligibility Oracle** (REO, GIP-0079) — a dedicated oracle contract `RewardsManager`
+  checks at claim time — rather than a clean DataEdge feed. The legacy QoS-oracle subgraph decoded
+  DataEdge calldata + IPFS; the on-chain surface here is still consolidating. nuthatch decoding the
+  postings is perfectly deterministic (you decode a poster's claims, you are not the oracle) — just
+  be clear-eyed that it's a different trust shape, and that this one is a *watch-and-follow* target,
+  not a stable one yet. Matches RFC-0011's own open question.
+- **Complexity:** 🟠 **Medium–High**, and the most likely to move under you.
+
+**Tier-0 sequencing:** network subgraph first (largely shipped — finish `graph-network-nest`), EBO
+second (it justifies building the calldata decoder), QoS/REO third (let the on-chain shape settle).
+Residual friction to be *deliberate* about, not accidental: positioning self-hosting-away-from-paid-
+queries with GraphOps — it's Lodestar-aligned and complementary, but it's the CLAUDE.md/Horizon
+tension, so frame it on purpose.
+
 ## Tier 1 — build first (the launch set)
 
 The five that maximise *demand × fit × demo value*. This is the set that makes the "replace your
@@ -234,5 +306,21 @@ Primary sources behind the figures and rankings (all consulted 2026-07-19):
 - enviodev/uniswap-v4-indexer — V4 singleton/hooks pattern reference
 - DefiLlama — cross-protocol TVL/analytics (downstream-consumer evidence)
 
-*Generated from a fact-checked deep-research pass; 71 of 75 verified claims survived adversarial
-review. Figures reflect source dates (2025–early 2026) and are not independently re-measured.*
+**Tier 0 (Graph Protocol infrastructure)** — added 2026-07-19:
+
+- nuthatch [RFC-0002](rfcs/0002-horizon-nest.md) & [RFC-0011](rfcs/0011-graph-network-nest-lodestar-migration.md)
+  — the shipped `horizon-nest` and planned `graph-network-nest`; source of the vendored, live-verified
+  Arbitrum addresses used above
+- `graphprotocol/contracts` — `packages/horizon/addresses.json`, `packages/subgraph-service/addresses.json`
+  (pin the payments-layer + dispute addresses here)
+- `graphprotocol/graph-network-subgraph` (`master`) — the network subgraph manifest + Horizon event
+  signatures; docs at thegraph.com/docs (contracts table, Graph Horizon overview, indexing overview)
+- `graphprotocol/block-oracle` + forum GIP-0038 (Epoch Block Oracle) and GIP-0025 (DataEdge)
+- GIP-0079 + `graphprotocol/rewards-eligibility-oracle` (REO); `edgeandnode/gateway` (off-chain QoS / ISA)
+
+*Tiers 1–3 generated from a fact-checked deep-research pass (71 of 75 verified claims survived
+adversarial review); figures reflect source dates (2025–early 2026) and are not independently
+re-measured. Tier 0 cross-checks a focused web verification (July 2026, post-Horizon) against
+nuthatch's own live-verified RFC-0002 addresses — the two core contracts (HorizonStaking,
+SubgraphService) matched both sources; the newer payments-layer addresses should be pinned byte-for-
+byte from `addresses.json` before use.*

@@ -140,6 +140,8 @@ pub fn tool_specs() -> Value {
           "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "limit": { "type": "integer", "default": 50 } }, "required": ["name"] } },
         { "name": "sql", "description": "Run a read-only SQL query over sealed (finalized) data. Each event is a DuckDB view named `{alias}__{event}` (e.g. \"usdc__transfer\") with block_number, log_index, tx_hash, address + the event's params. Call `schema` first. SELECT/WITH only.",
           "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "A SELECT or WITH query." } }, "required": ["query"] } },
+        { "name": "explain", "description": "Validate a SQL query WITHOUT executing it — binds tables/columns/types and returns {valid:true} or an error with a fix hint. Cheaper than `sql`; use it to check a query before running it.",
+          "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "A SELECT or WITH query to validate." } }, "required": ["query"] } },
         { "name": "entity", "description": "Look up one transfer by its id, formatted `{block:012}-{logindex:06}`.",
           "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } },
         { "name": "balance", "description": "Derived token balance for an address (IVM view; i128 base units, returned as a decimal string).",
@@ -182,6 +184,12 @@ async fn call_tool(params: &Value, client: &reqwest::Client, base: &str) -> Resu
                 .as_str()
                 .ok_or_else(|| anyhow!("`query` is required"))?;
             get_query(client, &format!("{base}/sql"), &[("q", q)]).await
+        }
+        "explain" => {
+            let q = args["query"]
+                .as_str()
+                .ok_or_else(|| anyhow!("`query` is required"))?;
+            get_query(client, &format!("{base}/explain"), &[("q", q)]).await
         }
         "entity" => {
             let id = args["id"]
@@ -284,8 +292,9 @@ mod tests {
         let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle(&list, &client, "http://127.0.0.1:1").await.unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 12);
         assert!(tools.iter().any(|t| t["name"] == "sql"));
+        assert!(tools.iter().any(|t| t["name"] == "explain"));
         assert!(tools.iter().any(|t| t["name"] == "tables"));
         // The compliance tools (RFC-0008 C6).
         assert!(tools.iter().any(|t| t["name"] == "flags"));

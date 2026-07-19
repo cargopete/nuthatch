@@ -36,6 +36,7 @@ pub mod seal;
 pub mod semantic;
 pub mod serve;
 pub mod source;
+pub mod sql_errors;
 pub mod store;
 pub mod transform;
 pub mod velocity;

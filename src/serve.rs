@@ -83,6 +83,7 @@ pub fn router(state: AppState) -> Router {
         .route("/entities", get(entities))
         .route("/entity/{id}", get(entity))
         .route("/sql", get(sql))
+        .route("/explain", get(explain))
         .route("/balances", get(balances))
         .route("/balance/{address}", get(balance))
         .route("/exposure/{address}", get(exposure))
@@ -496,9 +497,79 @@ async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl IntoR
         Ok(Err(e)) => {
             // A guard rejection (timeout / interrupt) or a bad query — counted as a rejection.
             METRICS.inc_sql_rejected();
+            // Errors as prompts (RFC-0016 §3): classify the failure against the schema and append an
+            // actionable hint so an agent (or the REPL user) self-corrects in one round-trip. Raw
+            // engine message always preserved; the hint is additive.
+            let raw = format!("{e:#}");
+            let msg = match crate::sql_errors::enrich(&raw, &q.q, &s.tables) {
+                Some(hint) => format!("{raw}\n\nhint: {hint}"),
+                None => raw,
+            };
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
+        }
+        Err(e) => error(format!("{e}")),
+    }
+}
+
+/// `GET /explain?q=…` — validate a query without executing it (RFC-0016 §3): bind it (catching
+/// unknown tables/columns/type errors, with the same enriched hints as `/sql`) but scan nothing, by
+/// wrapping it as `SELECT * FROM (<q>) LIMIT 0`. An agent checks a query's shape before spending a
+/// concurrency slot on the real thing. Returns `{valid:true}` or the enriched error.
+async fn explain(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl IntoResponse {
+    use crate::metrics::METRICS;
+    if q.q.len() > SQL_MAX_QUERY_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "valid": false, "error": "query too long" })),
+        )
+            .into_response();
+    }
+    let permit = match Arc::clone(&s.sql_gate).try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "valid": false, "error": "server busy" })),
+            )
+                .into_response()
+        }
+    };
+    let dir = s.dir.clone();
+    // Bind-only: the LIMIT 0 wrapper forces the planner to resolve every table/column/type without
+    // materialising rows. A CTE (`WITH …`) is legal inside the subquery, so this covers both shapes.
+    let probe = format!("SELECT * FROM ({}) AS _explain LIMIT 0", q.q);
+    let store = s.store.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let hot = store.hot_rows_by_table().unwrap_or_default();
+        let sealed_through = store.sealed_through();
+        analytics::query_hot_cold(
+            &dir,
+            &probe,
+            analytics::QueryGuard {
+                timeout: SQL_TIMEOUT,
+                max_rows: 1,
+            },
+            &hot,
+            sealed_through,
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(_)) => {
+            Json(json!({ "valid": true, "note": "query binds; run it with the sql tool" }))
+                .into_response()
+        }
+        Ok(Err(e)) => {
+            METRICS.inc_sql_rejected();
+            let raw = format!("{e:#}");
+            let msg = match crate::sql_errors::enrich(&raw, &q.q, &s.tables) {
+                Some(hint) => format!("{raw}\n\nhint: {hint}"),
+                None => raw,
+            };
             (
                 StatusCode::BAD_REQUEST,
-                Json(json!({ "error": format!("{e:#}") })),
+                Json(json!({ "valid": false, "error": msg })),
             )
                 .into_response()
         }
