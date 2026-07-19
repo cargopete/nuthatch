@@ -2,6 +2,18 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-19 - RFC-0015 slice 4: `nuthatch add 0xAnother` — grow a nest, no re-init.** The natural
+  "one or many contracts" flow (RFC-0001): `add` loads the existing nest, resolves each new contract's
+  ABI (Sourcify → Etherscan), vendors it, appends it to `nuthatch.toml`, and regenerates the derived
+  artifacts (schema.json + the AI surface) — the chain, RPC endpoints, and screening config are already
+  settled by `init` and left untouched (the chain is the nest's, never re-detected — one cursor, one
+  chain). The next `dev` backfills the new contract from its own deployment block while the existing
+  contracts resume from their stored cursor. Guardrails: refuses an address already in the nest, refuses
+  `add` on a missing/invalid nest, and `--alias` is validated + collision-checked (auto-aliases continue
+  the `c<N>` sequence past the existing contracts, skipping taken slots). Extracted a shared
+  `write_nest_artifacts` so `init` and `add` regenerate schema.json/llms.txt/skill from one code path
+  (no drift). Verified live: USDC (17 tables) → `add` WETH → 2 contracts / 21 tables; dup/missing/alias
+  errors all fire. 153 lib tests, clippy `-D warnings` clean.
 - **2026-07-19 - RFC-0015 slice 2: magical `init` — chain auto-detect.** `--chain` is now optional.
   Omit it and `init` probes every registered chain (mainnet → arbitrum-one → base) in parallel for the
   contract's `eth_getCode` and picks, in registry order, the first chain with bytecode there — so the

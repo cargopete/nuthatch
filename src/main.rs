@@ -30,6 +30,7 @@ async fn main() -> Result<()> {
 
     match cli::Cli::parse().command {
         cli::Command::Init(args) => project::init(args).await,
+        cli::Command::Add(args) => project::add(args).await,
         cli::Command::Dev(args) => indexer::dev(args).await,
         cli::Command::Sql(args) => run_sql(args).await,
         cli::Command::Transform(args) => run_transform(args),

@@ -1,11 +1,12 @@
 //! `nuthatch init` — resolve each contract's ABI and scaffold a nest (RFC-0001: N contracts).
+//! `nuthatch add` — resolve one more contract's ABI and grow an existing nest, no re-init.
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::abi;
 use crate::chains;
-use crate::cli::InitArgs;
+use crate::cli::{AddArgs, InitArgs};
 use crate::config::{Config, Contract, Nest, CURRENT_SCHEMA_VERSION};
 use crate::rpc::RpcClient;
 
@@ -99,23 +100,13 @@ pub async fn init(args: InitArgs) -> Result<()> {
 
     // Build the registry from the vendored ABIs to generate the schema artifact + AI surface (one
     // source of truth: schema.json, llms.txt, the skill, and `/tables` all come from here).
-    let registry = crate::registry::DecodeRegistry::from_nest(&dir, &config)?;
-    let schema = registry.schema();
-    std::fs::write(
-        dir.join("schema.json"),
-        serde_json::to_string_pretty(&serde_json::json!({
-            "registry_hash": format!("0x{}", hex::encode(registry.hash())),
-            "tables": &schema,
-        }))?,
-    )
-    .context("failed to write schema.json")?;
-    scaffold_ai_surface(&dir, chain.name, &config.contracts, &schema)?;
+    let table_count = write_nest_artifacts(&dir, chain.name, &config)?;
 
     println!(
         "✓ scaffolded nest '{}' ({} contract(s), {} table(s)) in {}",
         config.nest.name,
         config.contracts.len(),
-        schema.len(),
+        table_count,
         dir.display()
     );
     println!("    nuthatch.toml              config");
@@ -127,6 +118,161 @@ pub async fn init(args: InitArgs) -> Result<()> {
     println!("next:  nuthatch dev{}", dir_hint(&args.dir));
     println!("       nuthatch mcp   (expose this index to a coding agent over MCP)");
     Ok(())
+}
+
+/// `nuthatch add 0xAnother` — grow an existing nest with more contracts without re-`init`. This is
+/// the natural "one or many contracts" flow (RFC-0001): the chain, RPC endpoints, and screening
+/// config are already settled by `init`, so `add` only resolves each new contract's ABI, vendors it,
+/// appends it to `nuthatch.toml`, and regenerates the derived artifacts (schema.json + the AI
+/// surface). The next `dev` backfills the new contract from its own deployment block — the existing
+/// contracts resume from their stored cursor, untouched.
+pub async fn add(args: AddArgs) -> Result<()> {
+    let dir = PathBuf::from(&args.dir);
+    let mut config = Config::load(&dir).with_context(|| {
+        format!(
+            "no nest at '{}' (run `nuthatch init` first, or pass --dir)",
+            dir.display()
+        )
+    })?;
+    // The chain is the nest's, already chosen at init — never re-detected. Adding a contract that
+    // lives on a different chain is a different nest (one cursor, one chain — non-negotiable).
+    let chain = chains::lookup(&config.nest.chain).with_context(|| {
+        format!(
+            "nest declares unknown chain '{}' — cannot resolve ABIs",
+            config.nest.chain
+        )
+    })?;
+
+    let new_addresses: Vec<String> = args
+        .addresses
+        .iter()
+        .map(|a| normalise_address(a))
+        .collect::<Result<_>>()?;
+    // Refuse duplicates: a contract already in the nest must not be added twice (it would collide on
+    // the alias/ABI and double-register decoders).
+    for addr in &new_addresses {
+        if config
+            .contracts
+            .iter()
+            .any(|c| c.address.eq_ignore_ascii_case(addr))
+        {
+            bail!("{addr} is already in this nest");
+        }
+    }
+    let aliases = add_aliases(&config.contracts, &args.alias, new_addresses.len())?;
+
+    let rpc_urls = crate::rpc::merge_rpcs(&args.rpc, config.nest.rpc_urls.iter().cloned());
+    let rpc = RpcClient::new(rpc_urls)?;
+    let tip = rpc.block_number().await.ok();
+
+    std::fs::create_dir_all(dir.join("abis"))
+        .with_context(|| format!("cannot create {}", dir.join("abis").display()))?;
+
+    for (address, alias) in new_addresses.iter().zip(&aliases) {
+        println!("→ resolving ABI for {alias} ({address}) on {}…", chain.name);
+        let abi_json = resolve_abi(&rpc, chain.chain_id, address).await?;
+        let abi_path = format!("abis/{alias}.json");
+        std::fs::write(
+            dir.join(&abi_path),
+            serde_json::to_string_pretty(&abi_json).context("failed to serialise ABI")?,
+        )
+        .with_context(|| format!("failed to write {abi_path}"))?;
+
+        let start_block = match tip {
+            Some(tip) => match detect_deploy_block(&rpc, address, tip).await {
+                Ok(b) => {
+                    println!("  ✓ deployed at block {b}");
+                    Some(b)
+                }
+                Err(e) => {
+                    println!("  · deployment block undetected ({e:#}); backfill starts from a tip offset");
+                    None
+                }
+            },
+            None => None,
+        };
+
+        config.contracts.push(Contract {
+            alias: alias.clone(),
+            address: address.clone(),
+            start_block,
+            abi: abi_path,
+            events: Vec::new(),
+        });
+    }
+
+    config.save(&dir)?;
+    let table_count = write_nest_artifacts(&dir, chain.name, &config)?;
+
+    println!(
+        "✓ added {} contract(s); nest '{}' now has {} contract(s), {} table(s)",
+        new_addresses.len(),
+        config.nest.name,
+        config.contracts.len(),
+        table_count,
+    );
+    println!(
+        "next:  nuthatch dev{}   (backfills the new contract(s) from deployment)",
+        dir_hint(&args.dir)
+    );
+    Ok(())
+}
+
+/// Build the registry from the vendored ABIs and (re)write the derived artifacts — `schema.json` and
+/// the AI surface (`llms.txt` + the scaffolded skill). One source of truth: `init` and `add` both
+/// call this so the artifacts never drift from `nuthatch.toml`. Returns the table count.
+fn write_nest_artifacts(dir: &Path, chain_name: &str, config: &Config) -> Result<usize> {
+    let registry = crate::registry::DecodeRegistry::from_nest(dir, config)?;
+    let schema = registry.schema();
+    std::fs::write(
+        dir.join("schema.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "registry_hash": format!("0x{}", hex::encode(registry.hash())),
+            "tables": &schema,
+        }))?,
+    )
+    .context("failed to write schema.json")?;
+    scaffold_ai_surface(dir, chain_name, &config.contracts, &schema)?;
+    Ok(schema.len())
+}
+
+/// Default aliases for `add`ed contracts: continue the `c<N>` sequence past the nest's existing
+/// contracts, skipping any slot already taken. An explicit `--alias` list is validated and checked
+/// for collisions with the existing contracts instead.
+fn add_aliases(existing: &[Contract], provided: &[String], n: usize) -> Result<Vec<String>> {
+    if !provided.is_empty() {
+        if provided.len() != n {
+            bail!("--alias expects {n} name(s), got {}", provided.len());
+        }
+        for a in provided {
+            if !is_valid_alias(a) {
+                bail!("alias '{a}' must match [a-z][a-z0-9_]*");
+            }
+            if existing.iter().any(|c| &c.alias == a) {
+                bail!("alias '{a}' is already used in this nest");
+            }
+        }
+        // Reject duplicates within the provided list too.
+        for (i, a) in provided.iter().enumerate() {
+            if provided[i + 1..].contains(a) {
+                bail!("alias '{a}' given twice");
+            }
+        }
+        return Ok(provided.to_vec());
+    }
+    let used: std::collections::HashSet<&str> = existing.iter().map(|c| c.alias.as_str()).collect();
+    let mut out: Vec<String> = Vec::with_capacity(n);
+    let mut k = existing.len();
+    for _ in 0..n {
+        let mut cand = format!("c{k}");
+        while used.contains(cand.as_str()) || out.contains(&cand) {
+            k += 1;
+            cand = format!("c{k}");
+        }
+        out.push(cand);
+        k += 1;
+    }
+    Ok(out)
 }
 
 /// Initialise a nest from a published one — a git URL or a local directory — instead of resolving
@@ -513,6 +659,38 @@ mod tests {
         assert!(resolve_aliases(&["usdc".into()], 2).is_err()); // count mismatch
         assert!(resolve_aliases(&["USDC".into()], 1).is_err()); // uppercase invalid
         assert!(resolve_aliases(&["1bad".into()], 1).is_err()); // leading digit invalid
+    }
+
+    fn contract(alias: &str) -> Contract {
+        Contract {
+            alias: alias.into(),
+            address: format!("0x{alias}"),
+            start_block: None,
+            abi: format!("abis/{alias}.json"),
+            events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn add_aliases_continue_and_avoid_collisions() {
+        // Auto: continue the c<N> sequence past the existing count.
+        let existing = vec![contract("c0"), contract("c1")];
+        assert_eq!(add_aliases(&existing, &[], 2).unwrap(), vec!["c2", "c3"]);
+
+        // Auto: skip a slot already taken by a custom alias so we never collide.
+        let mixed = vec![contract("usdc"), contract("c1")];
+        // len() == 2 → start at c2 (c1 is taken but c2 is free anyway).
+        assert_eq!(add_aliases(&mixed, &[], 1).unwrap(), vec!["c2"]);
+
+        // Explicit aliases are validated and collision-checked against the existing set.
+        assert_eq!(
+            add_aliases(&existing, &["weth".into()], 1).unwrap(),
+            vec!["weth"]
+        );
+        assert!(add_aliases(&existing, &["c0".into()], 1).is_err()); // collides with existing
+        assert!(add_aliases(&existing, &["WETH".into()], 1).is_err()); // invalid charset
+        assert!(add_aliases(&existing, &["a".into()], 2).is_err()); // count mismatch
+        assert!(add_aliases(&existing, &["x".into(), "x".into()], 2).is_err()); // dup in list
     }
 
     #[test]

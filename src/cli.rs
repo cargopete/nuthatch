@@ -17,6 +17,8 @@ pub struct Cli {
 pub enum Command {
     /// Scaffold an indexer for a contract: resolve its ABI and write a project here.
     Init(InitArgs),
+    /// Add another contract to an existing nest — resolve its ABI and grow the config, no re-init.
+    Add(AddArgs),
     /// Run the indexer: poll logs, store entities, and serve the API.
     Dev(DevArgs),
     /// Query a nest's data with SQL — the live tip and sealed history, one surface. Prints a table.
@@ -450,6 +452,27 @@ pub struct InitArgs {
     /// nest's own name).
     #[arg(long, default_value = ".")]
     pub dir: String,
+}
+
+#[derive(Args)]
+pub struct AddArgs {
+    /// One or more contract addresses to add to the nest, e.g. 0xC02a…6Cc2 (WETH).
+    #[arg(num_args = 1..)]
+    pub addresses: Vec<String>,
+
+    /// Optional aliases, one per address in order (comma-separated). Defaults to the next free
+    /// c<N> slots after the nest's existing contracts.
+    #[arg(long, value_delimiter = ',')]
+    pub alias: Vec<String>,
+
+    /// The nest directory to grow (must contain a nuthatch.toml). Defaults to the current directory.
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+
+    /// Prefer these RPC URL(s) over the nest's configured endpoints for ABI/deploy-block resolution
+    /// (repeatable). Point at your own node to dodge public-RPC limits.
+    #[arg(long)]
+    pub rpc: Vec<String>,
 }
 
 #[derive(Args)]
