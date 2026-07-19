@@ -24,7 +24,7 @@ Statuses last reconciled against the [progress log](../progress-log.md) on 2026-
 | [0013](0013-storage-and-query-engine-direction.md) | Storage and query-engine direction (DataFusion convergence, Turso deferred) | 0001, 0004 | Accepted — §3 SQL-over-the-tip shipped (DuckDB union); DataFusion deferred/gated |
 | [0014](0014-firehose-class-extraction-traces-and-state.md) | Firehose-class extraction — traces and state diffs via ExEx | 0003, 0001, 0004 | Draft (deferred) |
 | [0015](0015-the-delightful-core.md) | The delightful core — CLI/UX for the solo dev (the 0.5 north star) | — (polish over 0.1–0.4) | Draft — sql one-shot (0.4) + REPL (slice 1) shipped; magical init + feedback + add + prod next |
-| [0016](0016-governed-semantic-layer-and-agent-grade-mcp.md) | The governed semantic layer and the agent-grade MCP experience | 0001, 0012, 0015 | Draft — the AI-native workstream (eval harness → `semantic.toml` → errors-as-prompts → result shaping → resources/prompts) |
+| [0016](0016-governed-semantic-layer-and-agent-grade-mcp.md) | The governed semantic layer and the agent-grade MCP experience | 0001, 0012, 0015 | **Implemented** (S1 eval harness → S2 semantic layer → S3 errors-as-prompts + explain → S4 result shaping → S5 resources/prompts; Tier-B baseline pending a keyed run) |
 | [0017](0017-builder-skill.md) | The builder skill — teaching coding agents to drive nuthatch | 0016, 0015 | Draft — repo-installable skill (generated CLI/config refs + drift-checked authored workflows), after 0016 |
 
 ## Conventions

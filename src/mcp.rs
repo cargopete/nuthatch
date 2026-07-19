@@ -109,6 +109,40 @@ async fn handle(req: &Value, client: &reqwest::Client, base: &str) -> Option<Val
                 Err(e) => Some(ok(id, content(&format!("{e:#}"), true))),
             }
         }
+        // Resources (RFC-0016 §6): a client can preload the schema/tables/status context without
+        // burning a tool call. Each maps to an HTTP GET on the running nest.
+        "resources/list" => Some(ok(id?, json!({ "resources": resource_specs() }))),
+        "resources/read" => {
+            let id = id?;
+            let uri = req
+                .pointer("/params/uri")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            match read_resource(uri, client, base).await {
+                Ok(text) => Some(ok(
+                    id,
+                    json!({ "contents": [{ "uri": uri, "mimeType": "text/plain", "text": text }] }),
+                )),
+                Err(e) => Some(err(id, -32602, &format!("{e:#}"))),
+            }
+        }
+        // Prompts (RFC-0016 §6): canned, argument-taking analysis flows that name real tools.
+        "prompts/list" => Some(ok(id?, json!({ "prompts": prompt_specs() }))),
+        "prompts/get" => {
+            let id = id?;
+            let name = req
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let args = req
+                .pointer("/params/arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            match render_prompt(name, &args) {
+                Some(result) => Some(ok(id, result)),
+                None => Some(err(id, -32602, &format!("unknown prompt `{name}`"))),
+            }
+        }
         _ => Some(err(id?, -32601, "method not found")),
     }
 }
@@ -121,9 +155,80 @@ fn initialize_result(req: &Value) -> Value {
         .unwrap_or(PROTOCOL_VERSION);
     json!({
         "protocolVersion": pv,
-        "capabilities": { "tools": {} },
+        // Advertise exactly what we implement — tools, resources, prompts; nothing else. When a future
+        // standing-queries RFC lands, `notifications` slots in here without breaking a client (§6).
+        "capabilities": { "tools": {}, "resources": {}, "prompts": {} },
         "serverInfo": { "name": "nuthatch", "version": env!("CARGO_PKG_VERSION") },
     })
+}
+
+/// The resources a client may preload (RFC-0016 §6). Stable `nuthatch://…` URIs backed by the running
+/// nest's HTTP surface — reading one is a GET, so a client gets the context without a tool round-trip.
+fn resource_specs() -> Value {
+    json!([
+        { "uri": "nuthatch://schema", "name": "schema", "mimeType": "text/plain",
+          "description": "The enriched data model: tables, meaning, footguns, and the hot/cold coverage seam." },
+        { "uri": "nuthatch://tables", "name": "tables", "mimeType": "application/json",
+          "description": "Every decoded table with its columns, Solidity types, and topic0." },
+        { "uri": "nuthatch://status", "name": "status", "mimeType": "application/json",
+          "description": "Index status: chain, contracts, last & sealed block." },
+    ])
+}
+
+/// Resolve a `nuthatch://…` resource URI to its HTTP-backed content.
+async fn read_resource(uri: &str, client: &reqwest::Client, base: &str) -> Result<String> {
+    let path = match uri {
+        "nuthatch://schema" => "/schema",
+        "nuthatch://tables" => "/tables",
+        "nuthatch://status" => "/",
+        other => bail!("unknown resource `{other}`"),
+    };
+    get(client, &format!("{base}{path}")).await
+}
+
+/// The argument-taking prompts (RFC-0016 §6) — canned analysis flows that name real tools. Rendered
+/// entirely client-side (no network), so they work the instant a client lists them.
+fn prompt_specs() -> Value {
+    json!([
+        { "name": "profile-contract", "description": "An activity overview of the indexed contract(s).",
+          "arguments": [] },
+        { "name": "investigate-address", "description": "Balances, exposure, flags, and screening for one address.",
+          "arguments": [ { "name": "address", "description": "The 0x address to investigate.", "required": true } ] },
+        { "name": "verify-a-number", "description": "Re-derive a figure from scratch with provenance.",
+          "arguments": [ { "name": "claim", "description": "The number/claim to verify.", "required": true } ] },
+    ])
+}
+
+/// Render a prompt into MCP `prompts/get` result form (a list of user-role messages). Returns `None`
+/// for an unknown prompt name.
+fn render_prompt(name: &str, args: &Value) -> Option<Value> {
+    let text = match name {
+        "profile-contract" => "Give me an activity overview of this nest. First call `schema` to see \
+            the tables and their meaning, then use `sql` to summarise: total events per table, the \
+            block range covered, and the busiest addresses. Cite the provenance stamp in your answer."
+            .to_string(),
+        "investigate-address" => {
+            let a = args.get("address").and_then(Value::as_str).unwrap_or("<address>");
+            format!(
+                "Investigate the address {a}. Use `balance` for its token balance, `exposure` for its \
+                 exposure to labeled addresses, `flags` for threshold/velocity flags, and \
+                 `screen_status` for sanctions hits. Then summarise the risk picture, citing blocks."
+            )
+        }
+        "verify-a-number" => {
+            let c = args.get("claim").and_then(Value::as_str).unwrap_or("<the claim>");
+            format!(
+                "Independently verify this claim: \"{c}\". Call `schema` first (mind the footguns — \
+                 big-int columns need their `_dec` companion), write the SQL from scratch with `sql`, \
+                 and report the result *with* its provenance stamp (as-of block, sealed_through) so it \
+                 is citable. If your first query errors, use the returned hint to correct it."
+            )
+        }
+        _ => return None,
+    };
+    Some(json!({
+        "messages": [ { "role": "user", "content": { "type": "text", "text": text } } ]
+    }))
 }
 
 /// The tool surface. Not a thin single-endpoint wrapper — schema discovery, SQL, point-reads, and
@@ -410,6 +515,54 @@ mod tests {
         assert!(tools.iter().any(|t| t["name"] == "flags"));
         assert!(tools.iter().any(|t| t["name"] == "exposure"));
         assert!(tools.iter().any(|t| t["name"] == "screen_status"));
+    }
+
+    #[tokio::test]
+    async fn advertises_resources_and_prompts_and_lists_them() {
+        let client = reqwest::Client::new();
+        let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
+        let resp = handle(&init, &client, "http://127.0.0.1:1").await.unwrap();
+        let caps = &resp["result"]["capabilities"];
+        assert!(
+            caps.get("tools").is_some()
+                && caps.get("resources").is_some()
+                && caps.get("prompts").is_some()
+        );
+
+        let rl = json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" });
+        let resp = handle(&rl, &client, "http://127.0.0.1:1").await.unwrap();
+        let uris: Vec<&str> = resp["result"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["uri"].as_str())
+            .collect();
+        assert!(uris.contains(&"nuthatch://schema"));
+
+        let pl = json!({ "jsonrpc": "2.0", "id": 3, "method": "prompts/list" });
+        let resp = handle(&pl, &client, "http://127.0.0.1:1").await.unwrap();
+        assert_eq!(resp["result"]["prompts"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn prompt_get_interpolates_its_argument() {
+        let client = reqwest::Client::new();
+        let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "prompts/get",
+            "params": { "name": "investigate-address", "arguments": { "address": "0xBEEF" } } });
+        let resp = handle(&req, &client, "http://127.0.0.1:1").await.unwrap();
+        let text = resp["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            text.contains("0xBEEF"),
+            "renders the address into the prompt"
+        );
+        assert!(text.contains("screen_status"), "names real tools");
+
+        // Unknown prompt → a clean error, not a panic.
+        let bad = json!({ "jsonrpc": "2.0", "id": 2, "method": "prompts/get", "params": { "name": "nope" } });
+        let resp = handle(&bad, &client, "http://127.0.0.1:1").await.unwrap();
+        assert!(resp.get("error").is_some());
     }
 
     #[test]
