@@ -103,13 +103,18 @@ with date/provider/hardware/commit (the RFC-0004 house rule).
 - [ ] ✅ Blob-mount RCE fixed (0.4.0 critical).
 - [ ] ✅ `/sql` arbitrary file-read fixed (0.4.0 critical).
 - [ ] ✅ `/sql` surface is structurally read-only (single-writer + read-only attach).
-- [ ] 🟡 A security review pass on the **serving surface** (`serve.rs`, `mcp.rs`, `webhooks.rs`,
-  `admin.html`) per release — input validation, path handling, SSRF on ABI fetch, auth story for any
-  exposed admin/webhook endpoint. — *Run `/security-review` on the release diff.*
-- [ ] 🟡 Bind/exposure defaults are safe (does `dev` bind loopback by default? is the admin UI
-  reachable unauthenticated when exposed?). — *Confirm and document in [operators.md](operators.md).*
-- [ ] 🟡 Dependency vulnerability scan (`cargo audit` / `cargo deny`) wired into CI. — *Not in
-  `ci.yml` today; add it.*
+- [ ] ✅ A security review pass on the **serving surface** (`serve.rs`, `mcp.rs`, `webhooks.rs`,
+  `analytics.rs`, `abi.rs`, `rpc.rs`) — *done (0.5.x hardening): no criticals; SQL read-only gate holds
+  three-deep, no SSRF (ABI/RPC hosts are fixed constants), no file-read via `/sql`. Fixed: `/nest`
+  webhook-URL disclosure, `/sql` error path-scrub, `screen_status` quote-escape, constant-time admin
+  token, concurrent webhook delivery. Re-run per release on the diff.*
+- [ ] 🟡 Bind/exposure defaults are safe. — *`dev` binds `127.0.0.1` by default; off-localhost it warns
+  loudly that the data surface has NO auth (the gateway's job). Confirmed by the review; the one control
+  a fronting gateway must enforce is auth on **every** route, not just `/_admin`.*
+- [ ] ✅ Dependency vulnerability scan (`cargo deny`) wired into CI. — *`deny` job runs advisories +
+  licences + bans + sources against `deny.toml`; the AGPL-compatible licence gate is now enforced. Three
+  transitive advisories ignored with written rationale (quick-xml not-reachable ×2; wasmtime-wasi
+  FilePerms tracked for a runtime bump).*
 - [ ] ✅ Effectful (capability-granted) components can only produce **annotations**, never canonical
   entities — purity checkable from the composition manifest. *(transform layer)*
 

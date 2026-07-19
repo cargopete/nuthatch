@@ -26,6 +26,17 @@ jobs:
       - name: test
         run: cargo test --locked
 
+  deny:
+    name: cargo-deny (vulns · licences · bans)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Dependency vulnerability scan (RUSTSEC) + AGPL-compatible licence gate + banned-crate check.
+      # Config + the honest ignore-list rationale live in deny.toml.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+
   build-release:
     name: build release
     runs-on: ubuntu-latest

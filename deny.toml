@@ -1,0 +1,68 @@
+# cargo-deny — dependency vulnerability + licence gate (0.5.x hardening).
+# Runs in CI on every PR. Licence hygiene is a CLAUDE.md non-negotiable: the AGPL-3.0 core means every
+# dependency must offer an AGPL-compatible (permissive, or weak-copyleft-via-OR) licence arm.
+
+[advisories]
+version = 2
+# Fail the build on a yanked crate or any RUSTSEC advisory. Add an `ignore` entry only with a written
+# justification — never to make a red build green quietly.
+yanked = "deny"
+# Flag unmaintained crates only when a workspace member depends on one directly (actionable); deep
+# transitive build-macro crates going unmaintained (paste, proc-macro-error*, derivative) is noise, not
+# a release gate.
+unmaintained = "workspace"
+ignore = [
+  # quick-xml (transitive: dbsp → feldera-storage → object_store). object_store uses it to parse XML
+  # from cloud object stores; nuthatch never configures one and never feeds it untrusted XML (it stores
+  # DBSP state as local Parquet), so neither DoS is reachable. dbsp pins the 0.38 line, so we can't move
+  # it without bumping dbsp. Re-check on the next dbsp bump.
+  "RUSTSEC-2026-0194", # quick-xml: quadratic time on duplicate start-tag attributes
+  "RUSTSEC-2026-0195", # quick-xml: unbounded namespace-declaration allocation
+  # wasmtime-wasi FilePerms bypass on hard links/renames. Reachable only if an operator grants
+  # filesystem-write capability to an untrusted WASM transform component — the escape hatch, running the
+  # operator's own code on the operator's own box; the default zero-capability components can't hit it.
+  # Tracked: bump wasmtime 44 → ≥46 (its own change; a major runtime bump touches the transform layer).
+  "RUSTSEC-2026-0188", # wasmtime-wasi: WASI hard links/renames bypass FilePerms
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# Every permissive licence actually present in the tree — all AGPL-3.0-compatible. Crates that offer an
+# OR with a copyleft arm (ittapi = `GPL-2.0-only OR BSD-3-Clause`, r-efi = `MIT OR Apache-2.0 OR
+# LGPL-2.1-or-later`) resolve to their permissive arm here. We deliberately do NOT list GPL-2.0-only or
+# LGPL, so a future GPL/LGPL-*only* dependency fails the build — which is the point.
+allow = [
+  "AGPL-3.0",            # nuthatch itself (the root crate's own licence). No AGPL *dependencies*.
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "MIT-0",
+  "BSD-1-Clause",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "0BSD",
+  "ISC",
+  "Zlib",
+  "BSL-1.0",             # Boost Software Licence (permissive) — NOT the Business Source Licence.
+  "Unicode-3.0",
+  "Unlicense",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "bzip2-1.0.6",
+]
+
+[bans]
+# Duplicate versions are common and fine in a Rust tree — warn, don't fail.
+multiple-versions = "warn"
+# CLAUDE.md non-negotiable 5: never vendor these. Belt-and-braces (they're not in the tree and never
+# should be) — a Business-Source-Licence engine or a HyperSync client sneaking in fails the build.
+deny = [
+  { name = "materialize" },
+  { name = "hypersync-client" },
+  { name = "hypersync-net-types" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

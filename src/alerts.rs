@@ -30,6 +30,9 @@ const DELIVERY_BATCH: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Per-request timeout: a slow endpoint can't wedge the delivery worker.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How many webhook POSTs are in flight at once during a drain (SEC-8): one slow/dead sink must not
+/// throttle the others — the drain is bounded by the slowest single request, not the sum.
+const DELIVERY_CONCURRENCY: usize = 8;
 
 /// Routes annotation kinds to the webhook sinks that want them. Built once from `[[alerts]]`.
 #[derive(Clone, Default)]
@@ -106,44 +109,78 @@ pub async fn deliver_pending(
     client: &reqwest::Client,
     secrets: &std::collections::HashMap<String, String>,
 ) -> usize {
+    use futures::stream::StreamExt;
     let pending = store.outbox_pending(DELIVERY_BATCH).unwrap_or_default();
+
+    // Phase 1: send all POSTs concurrently (SEC-8), each independent. The store is NOT touched here —
+    // redb is single-writer, so mutations are applied afterwards in phase 2, on this task alone.
+    let outcomes: Vec<(u64, Outcome)> = futures::stream::iter(pending)
+        .map(|(seq, payload_str)| {
+            let client = client.clone();
+            async move {
+                let Ok(payload) = serde_json::from_str::<Value>(&payload_str) else {
+                    return (seq, Outcome::Shed); // corrupt entry — drop it
+                };
+                let url = payload.get("url").and_then(Value::as_str).unwrap_or("");
+                // Send the stored bytes verbatim so a signature matches; sign if the webhook has a secret.
+                let mut req = client
+                    .post(url)
+                    .header("content-type", "application/json")
+                    .body(payload_str.clone());
+                if let Some(secret) = payload
+                    .get("webhook")
+                    .and_then(Value::as_str)
+                    .and_then(|n| secrets.get(n))
+                {
+                    let sig =
+                        crate::webhooks::hmac_sha256_hex(secret.as_bytes(), payload_str.as_bytes());
+                    req = req.header("X-Nuthatch-Signature", format!("sha256={sig}"));
+                }
+                match req.send().await {
+                    Ok(resp) if resp.status().is_success() => (seq, Outcome::Delivered),
+                    Ok(resp) => {
+                        tracing::warn!(
+                            "alert webhook {url} returned {} — will retry",
+                            resp.status()
+                        );
+                        (seq, Outcome::Retry)
+                    }
+                    Err(e) => {
+                        tracing::warn!("alert webhook {url} delivery failed: {e} — will retry");
+                        (seq, Outcome::Retry)
+                    }
+                }
+            }
+        })
+        .buffer_unordered(DELIVERY_CONCURRENCY)
+        .collect()
+        .await;
+
+    // Phase 2: apply the store mutations (single-writer). Remove delivered + corrupt; leave retries.
     let mut delivered = 0usize;
-    for (seq, payload_str) in pending {
-        let Ok(payload) = serde_json::from_str::<Value>(&payload_str) else {
-            let _ = store.outbox_remove(seq); // corrupt entry — shed it
-            continue;
-        };
-        let url = payload.get("url").and_then(Value::as_str).unwrap_or("");
-        // Send the stored bytes verbatim so a signature matches; sign if the webhook has a secret.
-        let mut req = client
-            .post(url)
-            .header("content-type", "application/json")
-            .body(payload_str.clone());
-        if let Some(secret) = payload
-            .get("webhook")
-            .and_then(Value::as_str)
-            .and_then(|n| secrets.get(n))
-        {
-            let sig = crate::webhooks::hmac_sha256_hex(secret.as_bytes(), payload_str.as_bytes());
-            req = req.header("X-Nuthatch-Signature", format!("sha256={sig}"));
-        }
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
+    for (seq, outcome) in outcomes {
+        match outcome {
+            Outcome::Delivered => {
                 let _ = store.outbox_remove(seq);
                 delivered += 1;
             }
-            Ok(resp) => {
-                tracing::warn!(
-                    "alert webhook {url} returned {} — will retry",
-                    resp.status()
-                );
+            Outcome::Shed => {
+                let _ = store.outbox_remove(seq);
             }
-            Err(e) => {
-                tracing::warn!("alert webhook {url} delivery failed: {e} — will retry");
-            }
+            Outcome::Retry => {}
         }
     }
     delivered
+}
+
+/// The fate of one outbox entry after a delivery attempt.
+enum Outcome {
+    /// 2xx — remove it.
+    Delivered,
+    /// Corrupt/unparseable — remove it (never deliverable).
+    Shed,
+    /// Transient failure — leave it for the next drain (at-least-once).
+    Retry,
 }
 
 /// The background delivery worker: drain the outbox, publish the depth gauge, sleep, repeat. Runs

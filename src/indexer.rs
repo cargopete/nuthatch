@@ -635,8 +635,12 @@ async fn build_nest(
             .map(|c| serde_json::json!({ "alias": c.alias, "address": c.address })).collect::<Vec<_>>(),
         "templates": config.templates,
         "factories": config.factories,
+        // Deliberately NOT the full `url`: webhook URLs routinely embed a secret in the path (Slack/
+        // Discord/bearer-in-path), and `/nest` is unauthenticated. Expose only scheme+host so the admin
+        // UI can show *where* a webhook points without leaking the credential to any reader (incl. a
+        // co-tenant on a roost).
         "webhooks": config.webhooks.iter()
-            .map(|w| serde_json::json!({ "name": w.name, "table": w.table, "url": w.url,
+            .map(|w| serde_json::json!({ "name": w.name, "table": w.table, "target": webhook_host(&w.url),
                 "finality": w.finality.clone().unwrap_or_else(|| "sealed".into()) })).collect::<Vec<_>>(),
     });
 
@@ -2255,9 +2259,40 @@ async fn sleep_secs(s: u64) {
     tokio::time::sleep(std::time::Duration::from_secs(s)).await;
 }
 
+/// Reduce a webhook URL to `scheme://host[:port]` for display on the unauthenticated `/nest` surface —
+/// dropping the path/query/userinfo where webhook secrets live (SEC review: `/nest` URL leak). A
+/// best-effort string parse (no url dep); a malformed URL degrades to a bare "configured".
+fn webhook_host(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    // Drop any `user:pass@` userinfo, keep `host[:port]`.
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    match (scheme.is_empty(), host.is_empty()) {
+        (_, true) => "configured".to_string(),
+        (true, false) => host.to_string(),
+        (false, false) => format!("{scheme}://{host}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webhook_host_drops_the_secret_bearing_path() {
+        // A Slack-style webhook (secret in the path) reduces to scheme+host — the secret is gone.
+        assert_eq!(
+            webhook_host("https://hooks.slack.com/services/T00/B00/XXXXsecretXXXX"),
+            "https://hooks.slack.com"
+        );
+        // Userinfo and port handled; query/fragment dropped.
+        assert_eq!(
+            webhook_host("https://user:pass@example.com:8443/hook?token=abc#f"),
+            "https://example.com:8443"
+        );
+        assert_eq!(webhook_host("not a url"), "not a url");
+        assert_eq!(webhook_host("https://"), "configured");
+    }
 
     /// H2/H3: `fetch_logs_splitting` halves a range and retries when a provider caps the result, so an
     /// oversized window self-corrects instead of aborting the backfill; a single block that alone

@@ -334,10 +334,14 @@ async fn call_tool(params: &Value, client: &reqwest::Client, base: &str) -> Resu
         }
         "screen_status" => {
             // Query the sealed sanction_hit annotations for this address, with the list version.
+            // Escape `'` → `''` before interpolating into the SQL literal (SEC review): the read-only
+            // gate already blocks writes and DuckDB `prepare` blocks stacking, but an unescaped quote is
+            // still a real injection bug — close it at the source.
             let a = args["address"]
                 .as_str()
                 .ok_or_else(|| anyhow!("`address` is required"))?
-                .to_ascii_lowercase();
+                .to_ascii_lowercase()
+                .replace('\'', "''");
             let q = format!(
                 "SELECT block_number, side, counterparty, value, list_snapshot FROM sanction_hit \
                  WHERE lower(address) = '{a}' ORDER BY block_number LIMIT 100"

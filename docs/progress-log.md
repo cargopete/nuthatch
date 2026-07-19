@@ -2,6 +2,25 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-19 - 0.5.x hardening 1/N: security pass on the serving surface + CI supply-chain gate.** A
+  full security review of `serve.rs`/`mcp.rs`/`webhooks.rs`/`analytics.rs`/`abi.rs`/`rpc.rs` (the surface
+  a hosted platform will front) — **no criticals**: the read-only SQL gate holds three-deep (SEC-7 is
+  safe — leading-keyword gate + single-statement `prepare` + ephemeral read-only connection; `COPY … TO`
+  can't lead a `SELECT`/`WITH`), no SSRF (Sourcify/Etherscan/RPC hosts are fixed constants; user/chain
+  input never enters a URL authority), no file-read via `/sql` (denylist + `allowed_directories`). Fixed
+  the real disclosure/robustness findings: **`/nest` no longer leaks webhook URLs** (they embed secrets
+  in the path — now reduced to scheme+host via `webhook_host`); **`/sql`/`/explain` errors are
+  path-scrubbed** (`sanitize_sql_error` redacts the nest-dir prefix DuckDB embeds — SEC-11 restored for
+  the error-prone endpoint); **`screen_status` escapes `'`→`''`** (injection, low-sev but closed at
+  source); **constant-time admin-token compare** (`ct_eq`, no timing side-channel); **webhook delivery is
+  now concurrent** (SEC-8 — `buffer_unordered(8)`, so one dead sink no longer throttles the drain;
+  redb-single-writer preserved by applying store mutations in a second phase). New **`deny.toml` +
+  cargo-deny CI job** (advisories + licences + bans + sources): the AGPL-compatible licence gate is now
+  *enforced* (verified `ittapi`/`r-efi` resolve to their permissive arm, no GPL/LGPL-only sneaks in);
+  three transitive RUSTSEC advisories ignored with written rationale (quick-xml DoS ×2 — not reachable,
+  no untrusted XML through object_store; wasmtime-wasi FilePerms — tracked for a runtime bump). Deferred
+  to later hardening slices: the `/sql` hot-scan RAM bound (perf), MCP path percent-encoding (low, no
+  privilege gain). 175 lib tests + 7 e2e/integration suites, clippy `-D warnings` clean.
 - **2026-07-19 - 🏷️ Release 0.5.0 — the delightful, agent-native release.** Version 0.4.0 → 0.5.0.
   Ships **three complete RFCs**. **RFC-0015 (the delightful core):** `nuthatch sql` REPL, **magical
   `init`** (omit `--chain` — it probes the known chains for the contract's bytecode), **live backfill

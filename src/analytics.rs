@@ -86,6 +86,14 @@ fn run(
     if !(head.starts_with("select") || head.starts_with("with")) {
         bail!("only SELECT/WITH queries are allowed on the read-only SQL surface");
     }
+    // Read-only is enforced three-deep — do NOT loosen any of these without re-reasoning SEC-7:
+    //   1. this leading-keyword gate rejects a *statement* that opens with INSERT/UPDATE/DELETE/COPY/
+    //      ATTACH/PRAGMA/… (a `WITH cte AS (…) INSERT …` is the only way DML could ride a `with`
+    //      prefix, and DuckDB won't parse INSERT/COPY *inside* a CTE/subquery);
+    //   2. `conn.prepare` below is single-statement — `;`-stacking a second statement is refused;
+    //   3. the connection is a fresh in-memory instance whose only tables are read-only views over
+    //      Parquet plus an ephemeral hot temp table, so even a hypothetical write has no durable target.
+    // `COPY … TO` (a file write) must *lead* the statement, which (1) blocks.
     // SEC-2: refuse DuckDB filesystem/network table functions (`read_text`, `glob`, …) — they read
     // files from inside a plain SELECT, past the keyword gate, and would otherwise leak any file the
     // process can read (e.g. `nuthatch.toml`'s secrets). This is the primary control; the

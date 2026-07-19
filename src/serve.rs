@@ -167,10 +167,11 @@ async fn admin_index(State(s): State<AppState>, Query(q): Query<AdminQuery>) -> 
     if !s.admin_enabled {
         return (StatusCode::NOT_FOUND, "admin UI disabled").into_response();
     }
-    // SEC-5: off-localhost the route requires the token per request (constant-time-ish compare on a
-    // short secret). On localhost `admin_token` is `None` and the page is open.
+    // SEC-5: off-localhost the route requires the token per request. On localhost `admin_token` is
+    // `None` and the page is open. The compare is constant-time (SEC review) so a timing side-channel
+    // can't recover the token byte-by-byte.
     if let Some(required) = &s.admin_token {
-        if q.token.as_deref() != Some(required.as_str()) {
+        if !q.token.as_deref().is_some_and(|t| ct_eq(t, required)) {
             return (
                 StatusCode::UNAUTHORIZED,
                 "admin UI requires a valid ?token=",
@@ -515,9 +516,10 @@ async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl IntoR
             // A guard rejection (timeout / interrupt) or a bad query — counted as a rejection.
             METRICS.inc_sql_rejected();
             // Errors as prompts (RFC-0016 §3): classify the failure against the schema and append an
-            // actionable hint so an agent (or the REPL user) self-corrects in one round-trip. Raw
-            // engine message always preserved; the hint is additive.
-            let raw = format!("{e:#}");
+            // actionable hint so an agent (or the REPL user) self-corrects in one round-trip. The raw
+            // engine message is preserved but path-scrubbed (SEC review) — DuckDB embeds absolute
+            // segment paths, which would leak the on-disk layout; the useful table/column detail stays.
+            let raw = sanitize_sql_error(&format!("{e:#}"), &s.dir);
             let msg = match crate::sql_errors::enrich(&raw, &q.q, &s.tables) {
                 Some(hint) => format!("{raw}\n\nhint: {hint}"),
                 None => raw,
@@ -579,7 +581,7 @@ async fn explain(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> impl I
         }
         Ok(Err(e)) => {
             METRICS.inc_sql_rejected();
-            let raw = format!("{e:#}");
+            let raw = sanitize_sql_error(&format!("{e:#}"), &s.dir);
             let msg = match crate::sql_errors::enrich(&raw, &q.q, &s.tables) {
                 Some(hint) => format!("{raw}\n\nhint: {hint}"),
                 None => raw,
@@ -734,9 +736,67 @@ fn error(msg: String) -> axum::response::Response {
         .into_response()
 }
 
+/// Constant-time string equality for the admin token — no early return on the first differing byte, so
+/// an attacker can't time-recover the secret. The length check leaks only the length, which is fixed
+/// for a random token.
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Redact the nest-directory prefix from a DuckDB error before it's relayed to a `/sql`/`/explain`
+/// client (SEC review). DuckDB embeds absolute segment paths (`…/mynest/segments/foo.parquet`) in
+/// binder/IO errors; the useful part for the caller is the table/column/type detail, not the on-disk
+/// layout. We keep the message and replace only the dir prefix with `<nest>`.
+fn sanitize_sql_error(raw: &str, dir: &std::path::Path) -> String {
+    let mut out = raw.to_string();
+    // Both the canonical and as-configured forms — the error could carry either.
+    for p in [dir.canonicalize().ok(), Some(dir.to_path_buf())]
+        .into_iter()
+        .flatten()
+    {
+        let s = p.display().to_string();
+        if !s.is_empty() {
+            out = out.replace(&s, "<nest>");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ct_eq_matches_only_identical_strings() {
+        assert!(ct_eq("s3cret", "s3cret"));
+        assert!(!ct_eq("s3cret", "s3creT"));
+        assert!(!ct_eq("s3cret", "s3cre")); // length differs
+        assert!(!ct_eq("", "x"));
+        assert!(ct_eq("", ""));
+    }
+
+    #[test]
+    fn sanitize_sql_error_redacts_the_nest_dir() {
+        let dir = std::path::Path::new("/var/lib/nuthatch/mynest");
+        let raw = "IO Error: No files found that match the pattern \
+                   \"/var/lib/nuthatch/mynest/segments/usdc__transfer-abc.parquet\"";
+        let out = sanitize_sql_error(raw, dir);
+        assert!(
+            !out.contains("/var/lib/nuthatch/mynest"),
+            "dir prefix redacted"
+        );
+        assert!(out.contains("<nest>/segments/usdc__transfer-abc.parquet"));
+        // The useful DuckDB detail (the message + filename) survives.
+        assert!(out.contains("No files found"));
+    }
 
     /// A minimal but real `AppState` — enough to drive the analytical handlers directly (no HTTP
     /// harness). `permits` seeds the admission gate so a test can saturate it.
