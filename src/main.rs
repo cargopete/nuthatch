@@ -1,7 +1,7 @@
 //! nuthatch — be your own indexer.
 //!
 //! Turn any contract into a local SQL database:
-//!   `nuthatch init 0xADDR --chain mainnet`  -> resolve ABI (Sourcify -> Etherscan) -> scaffold a nest
+//!   `nuthatch init 0xADDR`                  -> detect the chain, resolve ABI (Sourcify -> Etherscan), scaffold a nest
 //!   `nuthatch dev`                          -> backfill + follow the tip -> decode -> serve an API
 //!   `nuthatch sql "SELECT …"`               -> query the live tip + sealed history, as a table
 //!

@@ -2,6 +2,17 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-19 - RFC-0015 slice 2: magical `init` — chain auto-detect.** `--chain` is now optional.
+  Omit it and `init` probes every registered chain (mainnet → arbitrum-one → base) in parallel for the
+  contract's `eth_getCode` and picks, in registry order, the first chain with bytecode there — so the
+  user no longer has to know (or correctly spell) which chain their contract lives on. New
+  `chains::all()` drives the probe; `detect_chain` fans `eth_getCode` across chains' default endpoints
+  (best-effort per chain — an unreachable RPC reads as "not here", never a veto). Three outcomes:
+  found-on-one (`✓ found on mainnet`), found-on-several (picks L1-first, discloses the others, `pass
+  --chain to pick another`), found-nowhere (graceful bail nudging to explicit `--chain`/`--rpc`).
+  Verified live: USDC → mainnet, ARB token → mainnet+arbitrum-one ambiguity note, `0x…dEaD` →
+  graceful not-found. README quickstart drops `--chain`; chain list corrected to the three actually
+  supported. 145 lib tests, clippy `-D warnings` clean.
 - **2026-07-19 - docs: RFC-0016 (governed semantic layer + agent-grade MCP) and RFC-0017 (builder
   skill).** Two new RFCs record the AI-native workstream that turns "an agent *can* query nuthatch"
   into "an agent queries it *correctly, first try, and can prove it*." **RFC-0016** reframes the MCP

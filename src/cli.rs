@@ -435,9 +435,10 @@ pub struct InitArgs {
     #[arg(long, value_delimiter = ',')]
     pub alias: Vec<String>,
 
-    /// Chain to index. E.g. mainnet, arbitrum-one.
-    #[arg(long, default_value = "mainnet")]
-    pub chain: String,
+    /// Chain to index, e.g. mainnet, arbitrum-one, base. Omit it and nuthatch probes each known
+    /// chain for the contract's bytecode and picks the one it lives on — you rarely need to say.
+    #[arg(long)]
+    pub chain: Option<String>,
 
     /// Prefer these RPC URL(s) over the chain defaults (repeatable). They're written first in the
     /// nest's `rpc_urls` and also used for ABI/deploy-block resolution during init, with the

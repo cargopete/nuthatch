@@ -17,12 +17,15 @@ pub async fn init(args: InitArgs) -> Result<()> {
     if args.addresses.is_empty() {
         bail!("provide one or more contract addresses, or --from <git-url|dir>");
     }
-    let chain = chains::lookup(&args.chain).with_context(|| {
-        format!(
-            "unknown chain '{}' (try: mainnet, arbitrum-one)",
-            args.chain
-        )
-    })?;
+    // Chain identity: honour an explicit `--chain`, otherwise detect it. The first-run friction we
+    // most want to delete is making the user know (and correctly spell) which chain their contract
+    // is on — so when they don't say, we go and find out.
+    let chain = match &args.chain {
+        Some(name) => chains::lookup(name).with_context(|| {
+            format!("unknown chain '{name}' (try: mainnet, arbitrum-one, base)")
+        })?,
+        None => detect_chain(&args.addresses).await?,
+    };
     let dir = PathBuf::from(&args.dir);
     std::fs::create_dir_all(dir.join("abis"))
         .with_context(|| format!("cannot create {}", dir.display()))?;
@@ -337,6 +340,52 @@ async fn detect_deploy_block(rpc: &RpcClient, address: &str, tip: u64) -> Result
 
 fn is_empty_code(code: &str) -> bool {
     code.trim_start_matches("0x").is_empty()
+}
+
+/// Detect which registered chain a contract lives on by probing `eth_getCode` on each chain's
+/// default endpoints in parallel. We probe the *first* address (a nest's contracts are expected to
+/// share a chain — one cursor, one chain, per the non-negotiables) and pick, in registry order, the
+/// first chain with bytecode there. Best-effort per chain: an unreachable endpoint reads as "not
+/// here", never a hard failure, so one flaky RPC can't veto detection.
+async fn detect_chain(addresses: &[String]) -> Result<&'static chains::Chain> {
+    let probe = normalise_address(&addresses[0])?;
+    println!("→ no --chain given; probing known chains for {probe}…");
+
+    let probes = chains::all().iter().map(|chain| {
+        let probe = probe.clone();
+        async move {
+            let rpc =
+                RpcClient::new(chain.rpc_urls.iter().map(|s| s.to_string()).collect()).ok()?;
+            let tip = rpc.block_number().await.ok()?;
+            let code = rpc.get_code(&probe, tip).await.ok()?;
+            (!is_empty_code(&code)).then_some(*chain)
+        }
+    });
+    let found: Vec<&'static chains::Chain> = futures::future::join_all(probes)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+
+    match found.as_slice() {
+        [] => bail!(
+            "couldn't find bytecode for {probe} on any known chain (mainnet, arbitrum-one, base).\n\
+             Pass --chain explicitly, or --rpc <url> for a custom endpoint."
+        ),
+        [only] => {
+            println!("  ✓ found on {}", only.name);
+            Ok(only)
+        }
+        [first, rest @ ..] => {
+            let others: Vec<&str> = rest.iter().map(|c| c.name).collect();
+            println!(
+                "  ✓ found on {} (also deployed on {} — pass --chain to pick another)",
+                first.name,
+                others.join(", ")
+            );
+            Ok(first)
+        }
+    }
 }
 
 fn scaffold_ai_surface(

@@ -10,7 +10,7 @@
 ```sh
 cargo install --git https://github.com/nuthatch-indexer/nuthatch nuthatch
 
-nuthatch init 0xA0b86991c6218b36c1D19D4a2e9Eb0cE3606eB48 --chain mainnet   # USDC
+nuthatch init 0xA0b86991c6218b36c1D19D4a2e9Eb0cE3606eB48   # USDC — chain auto-detected
 nuthatch dev            # backfills from deployment, follows the tip, serves an API
 nuthatch sql "SELECT count(*), sum(CAST(value AS DECIMAL(38,0))) FROM usdc__transfer"
 ```
@@ -53,8 +53,8 @@ cargo install --git https://github.com/nuthatch-indexer/nuthatch nuthatch
 ```
 
 Prebuilt binaries are attached to CI builds; a `curl | sh` installer is on the roadmap
-(RFC-0015). Supported chains include Ethereum, Arbitrum One, Base, Optimism, Polygon, and more
-(`--chain`); point at your own node with `--rpc`.
+(RFC-0015). Chains: Ethereum, Arbitrum One, and Base — **omit `--chain` and nuthatch probes each
+for your contract's bytecode and picks the one it lives on.** Point at your own node with `--rpc`.
 
 ---
 

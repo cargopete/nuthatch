@@ -94,6 +94,13 @@ pub fn lookup(name: &str) -> Option<&'static Chain> {
     }
 }
 
+/// Every registered chain, in auto-detect probe order (L1 first, then the busiest L2s). `init`
+/// walks this when `--chain` is omitted: the chain a contract lives on is discoverable, not a
+/// thing the user should have to know and type.
+pub fn all() -> &'static [&'static Chain] {
+    &[&MAINNET, &ARBITRUM_ONE, &BASE]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +145,26 @@ mod tests {
     #[test]
     fn unknown_chain_is_none() {
         assert!(lookup("dogechain").is_none());
+    }
+
+    #[test]
+    fn all_chains_are_probeable_and_lead_with_l1() {
+        let all = all();
+        // Every registered chain is reachable via `lookup` and carries endpoints to probe.
+        assert!(!all.is_empty());
+        for c in all {
+            assert!(
+                lookup(c.name).is_some(),
+                "{} must resolve via lookup",
+                c.name
+            );
+            assert!(
+                !c.rpc_urls.is_empty(),
+                "{} needs endpoints to probe",
+                c.name
+            );
+        }
+        // L1 first: mainnet is the most likely home and the least surprising default hit.
+        assert_eq!(all[0].name, "mainnet");
     }
 }
