@@ -2,6 +2,20 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-19 - RFC-0016 S5: MCP resources + prompts — the AI-native workstream is complete.** The MCP
+  server used a third of the protocol (tools only); now it advertises and implements **resources** and
+  **prompts** too. `initialize` capabilities honestly list `tools`+`resources`+`prompts` (leaving room
+  for a future `notifications`). Three **resources** with stable `nuthatch://…` URIs (`schema`,
+  `tables`, `status`), each backed by an HTTP GET on the running nest — a client preloads context
+  without burning a tool call. Three argument-taking **prompts** rendered client-side (no network):
+  `profile-contract` (activity overview), `investigate-address {address}` (balances/exposure/flags/
+  screening), `verify-a-number {claim}` (re-derive with provenance, minding the §2 footguns and using
+  the §3 error hints). Verified live over the stdio bridge: capabilities, `resources/list`, and
+  `prompts/get` interpolating its argument. **This closes RFC-0016** (S1 eval harness → S2 semantic
+  layer → S3 errors-as-prompts + explain → S4 result shaping → S5 resources+prompts): an agent now
+  reads *this* nest's meaning, self-corrects from enriched errors, gets context-shaped citable results,
+  and can preload resources/prompts — the AI-native claim made literally true, with nothing in the data
+  path touched. 171 lib tests; clippy `-D warnings` clean.
 - **2026-07-19 - RFC-0016 S4: result shaping + provenance.** MCP responses now diverge from HTTP
   responses deliberately — curl and agents are different consumers. `/sql` gains an optional
   `max_rows` (clamped to the node cap) and a **provenance** block on every result (`as_of` block,
