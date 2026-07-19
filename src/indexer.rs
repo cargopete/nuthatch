@@ -802,6 +802,10 @@ pub async fn backfill_direct_pipelined(
     // persists it as a resume watermark so a mid-backfill failure resumes here instead of restarting
     // from `from` (which would re-fetch, and on an adaptive path re-seal, already-sealed ranges).
     mut on_seal: impl FnMut(u64) -> Result<()>,
+    // Called per completed window with (block reached, rows decoded) — drives the live progress line
+    // (RFC-0015 slice 3). Fires every window, so a sparse range still shows honest block-position
+    // movement between the (rare) seals. Pure presentation; must not touch stored state.
+    mut on_progress: impl FnMut(u64, u64),
 ) -> Result<u64> {
     use futures::stream::StreamExt;
 
@@ -851,8 +855,10 @@ pub async fn backfill_direct_pipelined(
     let mut total = 0u64;
     while let Some(res) = stream.next().await {
         let (w_to, json) = res?;
-        total += json.len() as u64;
+        let n = json.len() as u64;
+        total += n;
         buf.extend(json);
+        on_progress(w_to, n);
         if buf.len() >= SEAL_DIRECT_BATCH {
             seal::seal_range(dir, &buf, batch_from, w_to)?;
             buf.clear();
@@ -890,6 +896,8 @@ pub async fn backfill_direct_factory(
     // window (non-deterministic boundaries), so resuming from the last sealed block instead of `from`
     // is what prevents a re-run from re-sealing overlapping ranges under new hashes (duplicate data).
     mut on_seal: impl FnMut(u64) -> Result<()>,
+    // Per-chunk live progress (RFC-0015 slice 3): (block reached, rows decoded). See the pipelined path.
+    mut on_progress: impl FnMut(u64, u64),
 ) -> Result<u64> {
     use std::collections::HashSet;
     let base: Vec<String> = registry
@@ -1001,6 +1009,7 @@ pub async fn backfill_direct_factory(
             total += 1;
         }
         next = chunk_to + 1;
+        on_progress(chunk_to, rows.len() as u64);
 
         if buf.len() >= SEAL_DIRECT_BATCH || next > to {
             if !buf.is_empty() {
@@ -1128,6 +1137,12 @@ impl NestIngest {
                     self.store
                         .set_meta(SEALED_THROUGH_KEY, &sealed_to.to_string())
                 };
+                // Live feedback for the multi-minute bulk seal (RFC-0015 slice 3).
+                let mut prog = crate::progress::Backfill::new(
+                    "sealing history",
+                    resume_from,
+                    finalized_through,
+                );
                 // A factory nest backfills with the sequential two-pass (RFC-0009 §3, address-filtered,
                 // efficient, deterministic). Factory backfill is sequential regardless of `--concurrency`:
                 // the child-event bulk is inherently ordered until the step-5 topic0-flip makes filters
@@ -1154,6 +1169,7 @@ impl NestIngest {
                         window,
                         fs.force_topic0(),
                         on_seal,
+                        |blk, n| prog.tick(blk, n),
                     )
                     .await?
                 } else {
@@ -1171,16 +1187,16 @@ impl NestIngest {
                         window,
                         concurrency,
                         on_seal,
+                        |blk, n| prog.tick(blk, n),
                     )
                     .await?
                 };
+                let _ = sealed;
+                prog.finish(finalized_through, false);
                 self.store
                     .set_meta(SEALED_THROUGH_KEY, &finalized_through.to_string())?;
                 self.store
                     .set_meta(LAST_BLOCK_KEY, &finalized_through.to_string())?;
-                tracing::info!(
-                    "seal-direct backfill done: {sealed} rows sealed over {resume_from}..={finalized_through}"
-                );
                 if let Err(e) =
                     rebuild_balances(&self.dir, &self.store, &self.registry, &self.balances)
                 {
@@ -1500,7 +1516,10 @@ impl NestIngest {
         METRICS.set_last_block(to);
         METRICS.add_rows_decoded(stored as u64);
         if stored > 0 {
-            tracing::info!(
+            // Per-window detail is debug: the live progress line (RFC-0015 slice 3) is the
+            // user-facing narrative during catch-up, and this fires once per window — pure spam at
+            // info over a long backfill. `count()` is only paid when debug is on.
+            tracing::debug!(
                 "blocks {next}..={to}: +{stored} rows (total {})",
                 self.store.count()?
             );
@@ -1555,6 +1574,12 @@ async fn index_loop(
 
     // Adaptive getLogs sizing (RFC-0004 §2), seeded from the chain's default window.
     let mut chunker = AdaptiveWindow::for_window(window);
+    // Live catch-up feedback (RFC-0015 slice 3): a single progress line while the hot loop chases
+    // the tip for the *first* time, ending on a crisp "caught up". `None` until there's actually a
+    // backlog to report; `caught_up` latches after the first catch-up so steady-state tip-following
+    // stays quiet — the "caught up" line fires exactly once, not on every new block.
+    let mut progress: Option<crate::progress::Backfill> = None;
+    let mut caught_up = false;
     loop {
         let tip = match source.tip().await {
             Ok(t) => t,
@@ -1572,21 +1597,38 @@ async fn index_loop(
         }
 
         if next > tip {
-            // Caught up to the tip — poll for new blocks.
+            // Reached the tip. If this was the initial backfill, announce it once and latch.
+            if let Some(p) = progress.take() {
+                p.finish(next.saturating_sub(1), true);
+            }
+            caught_up = true;
+            // Poll for new blocks.
             sleep_secs(2).await;
             continue;
         }
 
+        // There's a backlog. During the *initial* catch-up, drive the live progress line; once we've
+        // caught up once, new blocks are processed quietly (no reporter, no per-window log).
+        if !caught_up {
+            progress
+                .get_or_insert_with(|| crate::progress::Backfill::new("backfilling", next, tip));
+        }
         let to = (next + chunker.window() - 1).min(tip);
         match source.logs(&nest.addresses, &nest.topic0s, next, to).await {
             Ok(logs) => {
                 chunker.observed(logs.len() as u64);
+                let n = logs.len() as u64;
                 match nest
                     .process_window(source.as_ref(), &logs, next, to, tip)
                     .await?
                 {
                     // Window processed and committed — advance the cursor past it.
-                    Some(_stored) => next = to + 1,
+                    Some(_stored) => {
+                        next = to + 1;
+                        if let Some(p) = progress.as_mut() {
+                            p.tick(to, n);
+                        }
+                    }
                     // Timestamps were unavailable; the cursor stayed put, retry the same window.
                     None => continue,
                 }
@@ -1750,7 +1792,9 @@ fn maybe_seal(
             )?;
             METRICS.set_sealed_through(ceiling);
             METRICS.add_rows_sealed(summary.rows as u64);
-            tracing::info!(
+            // Debug, not info: over a from-history backfill nearly every window seals, so this is
+            // per-window spam. The sealed watermark is in `/metrics` (SEALED_THROUGH) for observability.
+            tracing::debug!(
                 "sealed blocks {from}..={ceiling}: {} rows across {} table(s); pruned {pruned} from hot",
                 summary.rows,
                 summary.tables
@@ -2403,6 +2447,7 @@ template="pool"
             100,
             false,
             |_| Ok(()),
+            |_, _| {},
         )
         .await
         .unwrap();
@@ -2550,6 +2595,7 @@ template="pool"
                 100,
                 force_topic0,
                 |_| Ok(()),
+                |_, _| {},
             )
             .await
             .unwrap();
@@ -3057,6 +3103,7 @@ template = "pool"
             5,
             8,
             |_| Ok(()),
+            |_, _| {},
         )
         .await
         .unwrap();

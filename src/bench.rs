@@ -195,6 +195,7 @@ async fn one_run(
             window,
             concurrency,
             |_| Ok(()), // bench doesn't persist a resume watermark
+            |_, _| {},  // bench doesn't render progress
         )
         .await?
     } else if seal_direct {

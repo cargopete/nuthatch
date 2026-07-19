@@ -13,6 +13,20 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   Verified live: USDC → mainnet, ARB token → mainnet+arbitrum-one ambiguity note, `0x…dEaD` →
   graceful not-found. README quickstart drops `--chain`; chain list corrected to the three actually
   supported. 145 lib tests, clippy `-D warnings` clean.
+- **2026-07-19 - RFC-0015 slice 3: live backfill feedback.** `dev` now shows a clean, honest sense of
+  progress during the one long wait — the from-deployment catch-up — instead of log spam. New
+  `progress::Backfill` reporter: on a TTY it draws a single carriage-returned line (`backfilling 73.2%
+  │ block 18,400,000 │ 98,304 events │ 12,050 ev/s │ ETA 1m20s`, redrawn ~8×/s); piped/systemd gets a
+  throttled 15 s heartbeat instead (never a stray `\r` in a journal); both end on a crisp `✓ caught up
+  to tip at block N — X events in Ys, Z ev/s; now following`. ETA is computed from *block* rate so it
+  stays meaningful over sparse wide-window ranges. Wired into both catch-up paths (the seal-direct bulk
+  in `prepare` → "sealing history", and the hot window loop in `index_loop` → "backfilling"), fed
+  per-window via a new `on_progress` callback on `backfill_direct_pipelined`/`_factory`. The reporter is
+  pure presentation (no lock, no stored state — the deterministic core is untouched) and a `caught_up`
+  latch fires the catch-up line exactly once, leaving steady-state tip-following silent. The old
+  per-window/per-seal `info` lines (`blocks X..=Y: +N rows`, `sealed blocks…`) drop to `debug` — they
+  were the spam; the watermark lives in `/metrics`. Verified live on USDC: clean single narrative,
+  exactly one caught-up line. 152 lib tests + 6 e2e, clippy `-D warnings` clean.
 - **2026-07-19 - docs: RFC-0016 (governed semantic layer + agent-grade MCP) and RFC-0017 (builder
   skill).** Two new RFCs record the AI-native workstream that turns "an agent *can* query nuthatch"
   into "an agent queries it *correctly, first try, and can prove it*." **RFC-0016** reframes the MCP
