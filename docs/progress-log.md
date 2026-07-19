@@ -2,6 +2,24 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+
+- **2026-07-19 - RFC-0016 S2: the governed semantic layer + enriched `schema`.** The MCP `schema` tool
+  was a static string, identical for every nest — it described the *shape* of the model, never *this*
+  nest's data. Now it's composed per-nest from four layers. New `src/semantic.rs` + `semantic.toml`
+  (beside `nuthatch.toml`): authored per-table/per-column **meaning**, generated at `init`/`add` from
+  the ABI (honest "seeded from the ABI — edit to improve" fallbacks), with **derived-not-authored
+  footguns** — reserved-word columns (`"from"`/`"to"`) and big-int columns (`value` → `value_dec`) are
+  computed from the registry, so they're always present and always correct even if the author never
+  opens the file. New `GET /schema` composes **structure** (registry) + **meaning** (semantic.toml) +
+  **footguns** + live **coverage** (the hot/cold seam stated as numbers: `sealed_through` + tip); the
+  MCP `schema` tool now relays it instead of the old static string. A **drift guard** (`dev` startup +
+  every `/schema` call) warns loudly if the file describes a table/column the registry lacks — stale
+  semantics are worse than none. `add` merges onto an existing file (authored text survives, footguns
+  refresh). `semantic.toml` travels with `nest pack` and is hash-verified on `mount` for free (it's an
+  authored input in the existing content-addressing). Verified live on USDC: the enriched `/schema`
+  shows nest description, coverage seam, per-table meaning, and the footgun warnings. 159 lib tests + a
+  new `semantic_layer` integration test (footgun derivation, no-drift, composed-doc golden); clippy
+  `-D warnings` clean. NatSpec-from-Sourcify descriptions and sample-row evidence are follow-ups.
 - **2026-07-19 - RFC-0016 S1: the eval harness (Tier A) — the measurement spine for agent-grade MCP.**
   The AI-native workstream is gated on measurement, not anecdote (the RFC-0004 rule applied to the MCP
   surface), so this is the first thing to land. New `eval/questions.toml` — 15 pinned questions across

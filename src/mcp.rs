@@ -166,7 +166,9 @@ async fn call_tool(params: &Value, client: &reqwest::Client, base: &str) -> Resu
         .unwrap_or_else(|| json!({}));
     match name {
         "status" => get(client, &format!("{base}/")).await,
-        "schema" => Ok(schema_doc()),
+        // The enriched, per-nest schema (RFC-0016 §2): structure + meaning + footguns + coverage,
+        // composed server-side from the running nest and `semantic.toml`. No longer a static string.
+        "schema" => get(client, &format!("{base}/schema")).await,
         "tables" => get(client, &format!("{base}/tables")).await,
         "table" => {
             let name = args["name"]
@@ -237,42 +239,6 @@ async fn fetch(req: reqwest::RequestBuilder, url: &str) -> Result<String> {
         anyhow!("cannot reach nuthatch at {url} — is `nuthatch dev` running? ({e})")
     })?;
     Ok(resp.text().await?)
-}
-
-/// The semantic hint an agent reads before querying — the seed of the governed semantic layer.
-fn schema_doc() -> String {
-    r#"nuthatch data model
-
-TABLES (one per contract event; id = "{block:012}-{logindex:06}")
-  Each event of each contract is a table named `{alias}__{event}` (e.g. usdc__transfer,
-  usdc__approval). Every table has: block_number, log_index, tx_hash, address (emitter) + the
-  event's decoded params. Discover the exact tables/columns from `GET /` and the nest's schema.
-
-VIEWS (incrementally maintained)
-  balances — per-address net balance = Σ(received) − Σ(sent), in i128 base units (returned as
-             decimal strings), for ERC-20 Transfer tables. Query via `balance`/`top_balances`.
-             Reorgs retract automatically. Rebuilt from stored facts on restart.
-
-COMPLIANCE (RFC-0008; amounts are i128 base units as decimal strings)
-  exposure       — an address's direct exposure to the labeled set (tool `exposure`).
-  flags          — threshold (single transfer ≥ N) and velocity (windowed volume) flags (tool `flags`).
-  screen_status  — was an address flagged by sanctions screening, and against which list-snapshot
-                   version? (tool `screen_status`). Sanction hits are the `sanction_hit` SQL table:
-                   SELECT * FROM sanction_hit WHERE address = '0x…' — each row carries its
-                   list_snapshot hash, so a hit traces to (list version, block, component).
-
-FACTORIES (RFC-0009; only in a nest with [[templates]]/[[factories]])
-  Children of a template share tables (`pool__swap`, …), distinguished by the `address` column. Each
-  template also has a `{template}__children` view: which children were discovered, when, and by which
-  parent — SELECT address, discovered_block, discovered_timestamp, parent_address FROM "pool__children".
-
-SQL (tool `sql`, read-only, over FINALIZED data)
-  Each sealed table is a DuckDB view of the same name (quote it). Examples:
-    SELECT count(*) FROM "usdc__transfer"
-    SELECT "to", count(*) n FROM "usdc__transfer" GROUP BY "to" ORDER BY n DESC LIMIT 10
-  Note: `sql` sees only sealed (past-finality) data; recent tip data is served by the point-read
-  tool (`entity`) and the live IVM views (`balance`, `top_balances`)."#
-        .to_string()
 }
 
 fn ok(id: Value, result: Value) -> Value {
