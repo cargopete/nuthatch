@@ -75,8 +75,12 @@ If any of these is ❌ the release does not go out, full stop. These are the CLA
   process (never multiplex chains behind one cursor).
 - [ ] ✅ Per-nest blast-radius isolation in a roost: one nest's bad view / runaway factory can't harm
   another. *(RFC-0012)*
-- [ ] 🟡 Graceful recovery from a corrupt/partial segment on startup (detect + quarantine + resume
-  rather than crash-loop). — *Confirm behaviour and add a fixture if absent.*
+- [ ] ✅ Graceful recovery from a corrupt/partial segment on startup (detect + quarantine + resume
+  rather than crash-loop). — *0.5.x: `seal::verify_and_quarantine` runs at startup — each manifest
+  segment is hash-verified against its content address; a corrupt/tampered/unreadable one is moved to a
+  sibling `quarantine/` dir with a loud error, and `define_views` skips any missing file, so one bad
+  segment reduces a table's cold data instead of failing every `/sql`. Fixtures: `seal.rs`
+  quarantine test + `analytics.rs` query-survives-missing-segment test.*
 - [ ] 🟡 RPC-provider failure handling: dead-provider failover, honest stall reporting under sustained
   provider flakiness. — *Failover is now **health-aware** (0.5.x): a failed endpoint enters a 30 s
   cooldown and is skipped, so a dead provider no longer costs a request-timeout on every round-robin

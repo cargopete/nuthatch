@@ -555,7 +555,22 @@ fn define_views(conn: &Connection, dir: &Path, hot: &HotRows, sealed_through: u6
             .map(|segs| {
                 segs.iter()
                     .filter(|s| s.to_block <= sealed_through)
-                    .map(|s| format!("'{}'", seg_dir.join(&s.file).display()))
+                    .filter_map(|s| {
+                        let p = seg_dir.join(&s.file);
+                        // Skip a manifest segment whose file is gone from disk (quarantined as corrupt
+                        // by the startup integrity pass, or externally removed). Without this, one
+                        // missing file makes `read_parquet` throw and the whole query fail; instead the
+                        // table's cold data is reduced, loudly, and queries keep working.
+                        if p.exists() {
+                            Some(format!("'{}'", p.display()))
+                        } else {
+                            tracing::warn!(
+                                "segment {} for {table} missing on disk — skipping (cold data reduced)",
+                                s.file
+                            );
+                            None
+                        }
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -944,6 +959,34 @@ template="pool"
         assert_eq!(one["to"], Value::from("0xc"));
         let appr = get_row(dir.path(), 10, 2).unwrap().unwrap();
         assert_eq!(appr["spender"], Value::from("0xd"));
+    }
+
+    #[test]
+    fn query_survives_a_missing_segment_file() {
+        // A segment listed in the manifest but gone from disk (quarantined as corrupt / removed) must
+        // not fail the whole query — its cold data is skipped, the surviving segment still answers.
+        let dir = tempfile::tempdir().unwrap();
+        let row = |b: u64| {
+            format!(
+                r#"{{"table":"usdc__transfer","from":"0xa","to":"0xb","value":"1","block_number":{b},"tx_hash":"0xt","log_index":0}}"#
+            )
+        };
+        crate::seal::seal_range(dir.path(), &[row(10)], 10, 10).unwrap();
+        crate::seal::seal_range(dir.path(), &[row(11)], 11, 11).unwrap();
+        // Both sealed → 2 rows.
+        let n = query(dir.path(), r#"SELECT count(*) AS n FROM "usdc__transfer""#).unwrap();
+        assert_eq!(n[0]["n"], Value::from(2u64));
+
+        // Delete one segment file (as quarantine would). The query still works, returning the survivor.
+        let manifest = crate::seal::load_manifest(dir.path()).unwrap();
+        let gone = &manifest.tables["usdc__transfer"][0].file;
+        std::fs::remove_file(dir.path().join(crate::seal::SEGMENTS_DIR).join(gone)).unwrap();
+        let n = query(dir.path(), r#"SELECT count(*) AS n FROM "usdc__transfer""#).unwrap();
+        assert_eq!(
+            n[0]["n"],
+            Value::from(1u64),
+            "surviving segment still queryable"
+        );
     }
 
     #[test]
