@@ -77,9 +77,11 @@ If any of these is ❌ the release does not go out, full stop. These are the CLA
   another. *(RFC-0012)*
 - [ ] 🟡 Graceful recovery from a corrupt/partial segment on startup (detect + quarantine + resume
   rather than crash-loop). — *Confirm behaviour and add a fixture if absent.*
-- [ ] 🟡 RPC-provider failure handling: retry/backoff, dead-provider failover, honest stall reporting
-  under sustained provider flakiness. — *Verify the tip-follower survives a provider going dark for
-  minutes without silent data gaps.*
+- [ ] 🟡 RPC-provider failure handling: dead-provider failover, honest stall reporting under sustained
+  provider flakiness. — *Failover is now **health-aware** (0.5.x): a failed endpoint enters a 30 s
+  cooldown and is skipped, so a dead provider no longer costs a request-timeout on every round-robin
+  hit. The tip loop already retries the same window (no silent gaps). Remaining: a **loud stall signal**
+  (metric + escalating log) when all endpoints are down — lands with the health endpoint (§7).*
 
 ## 3. Performance & footprint budgets
 

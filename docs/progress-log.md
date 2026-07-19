@@ -2,6 +2,17 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-19 - 0.5.x hardening 2/N: health-aware RPC failover.** The RPC client had round-robin
+  failover but no memory of which endpoints were down — so a dead provider cost a full 20 s request
+  timeout on every call that round-robined onto it (~1/N of calls), dragging tip-follow latency during a
+  partial outage. Now each endpoint carries a health state: a failed call puts it in a 30 s cooldown and
+  `endpoint_order` tries healthy endpoints first, cooling ones only as a last resort (soonest-to-recover
+  first); a successful call clears it. So a dead provider is skipped after one failure and failover is
+  immediate. The tip loop already retries the same window on failure (no silent gaps) — that's unchanged.
+  The cooldown clock is wall-time used only for "try again after" (never in the deterministic data
+  path). Corrupt/missing-segment recovery (the other half of the resilience item — a corrupt segment
+  currently fails every `/sql` query) is split to its own slice. The loud all-endpoints-down stall
+  signal lands with the health endpoint. 176 lib tests, clippy `-D warnings` clean.
 - **2026-07-19 - 0.5.x hardening 1/N: security pass on the serving surface + CI supply-chain gate.** A
   full security review of `serve.rs`/`mcp.rs`/`webhooks.rs`/`analytics.rs`/`abi.rs`/`rpc.rs` (the surface
   a hosted platform will front) — **no criticals**: the read-only SQL gate holds three-deep (SEC-7 is
