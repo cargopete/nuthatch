@@ -35,6 +35,7 @@ pub mod screen;
 pub mod seal;
 pub mod semantic;
 pub mod serve;
+pub mod skill;
 pub mod source;
 pub mod sql_errors;
 pub mod store;

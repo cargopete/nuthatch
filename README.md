@@ -119,6 +119,16 @@ claude mcp add nuthatch -- nuthatch mcp --url http://127.0.0.1:8288
 Then just ask: *"what are the top USDC holders?"* — the agent writes the SQL and runs it against your
 nest. (Making that correct on the first try is the [semantic-layer work](docs/rfcs/0016-governed-semantic-layer-and-agent-grade-mcp.md).)
 
+**Teach your agent to *build* nests too.** Install the builder skill and an agent can drive nuthatch
+itself — `init`, config, factories, compliance, roosts, troubleshooting — before you even have a nest:
+
+```sh
+cp -r skills/nuthatch-builder ~/.claude/skills/   # or your repo's .claude/skills/
+```
+
+Its CLI/config references are generated from the binary and CI-checked for drift, so the skill never
+lies about a flag ([RFC-0017](docs/rfcs/0017-builder-skill.md)).
+
 ---
 
 ## Everything else it can do

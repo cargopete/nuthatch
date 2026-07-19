@@ -2,6 +2,23 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+
+- **2026-07-19 - RFC-0017: the builder skill — teaching coding agents to *drive* nuthatch.** A model
+  asked to "set up nuthatch for this contract" today hallucinates flags (nuthatch is days old, in
+  nobody's training data). New repo-installable skill at `skills/nuthatch-builder/` teaching an agent
+  authoring knowledge (init/config/factories/compliance/roost/ops) — complementary to the per-nest MCP
+  runtime knowledge (RFC-0016). Two rules keep it honest: **generate what can be generated**, and
+  **CI-check the rest for drift.** New `src/skill.rs` renders `cli-reference.md` from clap's own
+  metadata (the binary describing itself — every subcommand + flag, deterministic), emitted by a hidden
+  `nuthatch skill-refs` subcommand. Authored files (`SKILL.md`, `workflows.md`, `compliance.md`,
+  `troubleshooting.md`, `config-reference.md`) carry the recipes and the symptom→metric→remedy tables,
+  written against the generated reference. **Drift gate** (`tests/skill_refs.rs`, CI): the committed
+  `cli-reference.md` must equal what the binary generates now, AND every `--flag` mentioned in the
+  authored prose must be a real flag — a skill that lies about a flag fails the build. README gains the
+  one-line install (`cp -r skills/nuthatch-builder ~/.claude/skills/`). The authoring *eval* (an agent
+  building a nest end-to-end, scored in the RFC-0016 Tier-B harness) is a follow-up — like the 0016
+  baseline, a real score means a keyed agent run, not a typed figure. 171 lib tests + the drift gate;
+  clippy `-D warnings` clean.
 - **2026-07-19 - RFC-0016 S5: MCP resources + prompts — the AI-native workstream is complete.** The MCP
   server used a third of the protocol (tools only); now it advertises and implements **resources** and
   **prompts** too. `initialize` capabilities honestly list `tools`+`resources`+`prompts` (leaving room
