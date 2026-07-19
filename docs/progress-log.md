@@ -2,6 +2,24 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-19 - 🏷️ Release 0.5.0 — the delightful, agent-native release.** Version 0.4.0 → 0.5.0.
+  Ships **three complete RFCs**. **RFC-0015 (the delightful core):** `nuthatch sql` REPL, **magical
+  `init`** (omit `--chain` — it probes the known chains for the contract's bytecode), **live backfill
+  feedback** (a progress line with events/sec + ETA, ending on a crisp "caught up to tip"), **`nuthatch
+  add 0xAnother`** (grow a nest without re-init), the **MCP one-liner** (`mcp --print-config`), and
+  copy-paste **systemd/Docker** prod recipes. **RFC-0016 (the agent-grade MCP):** the AI-native
+  workstream, measure-first — an **eval harness** (fixture nest + 15-question oracle, CI-gated); the
+  **governed semantic layer** (`semantic.toml` + a per-nest enriched `/schema` with the hot/cold
+  coverage seam and derived footguns); **errors-as-prompts + `explain`** (SQL errors that teach,
+  fuzzy-matched to the real schema; validate-without-executing); **result shaping + provenance**
+  (compact tables, row caps, citable stamps); and **resources + prompts** (the full MCP surface). An
+  agent now reads *this* nest's meaning, self-corrects from enriched errors, and cites its answers —
+  with nothing in the deterministic data path touched. **RFC-0017 (the builder skill):** a
+  repo-installable skill teaching an agent to *drive* nuthatch, with a `cli-reference.md` generated from
+  the binary and a CI drift gate that fails on any hallucinated flag. Pending (honest): the RFC-0016
+  Tier-B agent baseline and the RFC-0017 authoring eval both need a keyed agent run, not a typed number.
+  171 lib tests + 8 e2e/integration suites, clippy `-D warnings` clean, footprint budget green.
+
 
 - **2026-07-19 - RFC-0017: the builder skill — teaching coding agents to *drive* nuthatch.** A model
   asked to "set up nuthatch for this contract" today hallucinates flags (nuthatch is days old, in
