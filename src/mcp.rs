@@ -138,8 +138,8 @@ pub fn tool_specs() -> Value {
           "inputSchema": { "type": "object", "properties": {} } },
         { "name": "table", "description": "Recent rows of one table, merged across the hot tip and sealed segments.",
           "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "limit": { "type": "integer", "default": 50 } }, "required": ["name"] } },
-        { "name": "sql", "description": "Run a read-only SQL query over sealed (finalized) data. Each event is a DuckDB view named `{alias}__{event}` (e.g. \"usdc__transfer\") with block_number, log_index, tx_hash, address + the event's params. Call `schema` first. SELECT/WITH only.",
-          "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "A SELECT or WITH query." } }, "required": ["query"] } },
+        { "name": "sql", "description": "Run a read-only SQL query over the live tip ∪ sealed history. Each event is a DuckDB view named `{alias}__{event}` (e.g. \"usdc__transfer\") with block_number, log_index, tx_hash, address + the event's params. Call `schema` first. SELECT/WITH only. Returns a compact table + a provenance stamp; capped at `limit` rows (default 200).",
+          "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "A SELECT or WITH query." }, "limit": { "type": "integer", "description": "Max rows to return (default 200).", "default": 200 } }, "required": ["query"] } },
         { "name": "explain", "description": "Validate a SQL query WITHOUT executing it — binds tables/columns/types and returns {valid:true} or an error with a fix hint. Cheaper than `sql`; use it to check a query before running it.",
           "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "A SELECT or WITH query to validate." } }, "required": ["query"] } },
         { "name": "entity", "description": "Look up one transfer by its id, formatted `{block:012}-{logindex:06}`.",
@@ -183,7 +183,16 @@ async fn call_tool(params: &Value, client: &reqwest::Client, base: &str) -> Resu
             let q = args["query"]
                 .as_str()
                 .ok_or_else(|| anyhow!("`query` is required"))?;
-            get_query(client, &format!("{base}/sql"), &[("q", q)]).await
+            // Shape the result for a context window (RFC-0016 §4): a small default row cap and a
+            // compact table + provenance stamp, instead of 50K rows of verbose JSON.
+            let limit = args["limit"].as_u64().unwrap_or(200).to_string();
+            let raw = get_query(
+                client,
+                &format!("{base}/sql"),
+                &[("q", q), ("max_rows", &limit)],
+            )
+            .await?;
+            Ok(format_sql_result(&raw))
         }
         "explain" => {
             let q = args["query"]
@@ -231,6 +240,107 @@ async fn call_tool(params: &Value, client: &reqwest::Client, base: &str) -> Resu
             get_query(client, &format!("{base}/sql"), &[("q", &q)]).await
         }
         other => bail!("unknown tool `{other}`"),
+    }
+}
+
+/// Shape a `/sql` JSON response for an agent's context window (RFC-0016 §4): a compact aligned table
+/// instead of verbose per-row JSON (measured ≥3× fewer tokens), truncation stated as *guidance* (an
+/// agent told *why* it was cut adapts; one silently truncated reports wrong totals), and a provenance
+/// stamp so the answer is citable back to content-addressed data. An error body is relayed verbatim
+/// (it already carries the §3 fix hint).
+fn format_sql_result(raw: &str) -> String {
+    let v: Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return raw.to_string(),
+    };
+    if let Some(err) = v.get("error").and_then(Value::as_str) {
+        return err.to_string();
+    }
+    let rows = v
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut out = String::new();
+    if rows.is_empty() {
+        out.push_str("(0 rows)\n");
+    } else {
+        let cols: Vec<String> = rows[0]
+            .as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
+        let mut w: Vec<usize> = cols.iter().map(String::len).collect();
+        for r in &rows {
+            if let Some(o) = r.as_object() {
+                for (i, c) in cols.iter().enumerate() {
+                    w[i] = w[i].max(o.get(c).map(cell).map(|s| s.len()).unwrap_or(0));
+                }
+            }
+        }
+        let pad = |s: &str, i: usize| format!("{s:<width$}", width = w[i]);
+        out.push_str(
+            &cols
+                .iter()
+                .enumerate()
+                .map(|(i, c)| pad(c, i))
+                .collect::<Vec<_>>()
+                .join("  "),
+        );
+        out.push('\n');
+        for r in &rows {
+            if let Some(o) = r.as_object() {
+                out.push_str(
+                    &cols
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| pad(&o.get(c).map(cell).unwrap_or_default(), i))
+                        .collect::<Vec<_>>()
+                        .join("  "),
+                );
+                out.push('\n');
+            }
+        }
+    }
+
+    let count = v
+        .get("count")
+        .and_then(Value::as_u64)
+        .unwrap_or(rows.len() as u64);
+    if v.get("truncated").and_then(Value::as_bool).unwrap_or(false) {
+        out.push_str(&format!(
+            "\n… truncated at {count} rows — aggregate (GROUP BY), tighten the WHERE, or raise `limit`.\n"
+        ));
+    }
+    if let Some(p) = v.get("provenance") {
+        let as_of = p
+            .get("as_of")
+            .and_then(Value::as_u64)
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "?".into());
+        let sealed = p.get("sealed_through").and_then(Value::as_u64).unwrap_or(0);
+        let rh: String = p
+            .get("registry_hash")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim_start_matches("0x")
+            .chars()
+            .take(8)
+            .collect();
+        out.push_str(&format!(
+            "— as of block {as_of}, sealed_through {sealed}, source hot+sealed, registry {rh}\n"
+        ));
+    }
+    out
+}
+
+/// One result cell as compact text: strings bare (no JSON quotes), null empty, everything else its
+/// JSON scalar form. This is the density win over `[{"k":"v",…}]`.
+fn cell(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
     }
 }
 
@@ -300,6 +410,35 @@ mod tests {
         assert!(tools.iter().any(|t| t["name"] == "flags"));
         assert!(tools.iter().any(|t| t["name"] == "exposure"));
         assert!(tools.iter().any(|t| t["name"] == "screen_status"));
+    }
+
+    #[test]
+    fn sql_result_is_compact_with_provenance_and_smaller_than_json() {
+        let raw = r#"{"count":2,"truncated":false,"rows":[{"n":10,"to":"0xabc"},{"n":5,"to":"0xdef"}],"provenance":{"as_of":100,"sealed_through":93,"source":"hot+sealed","registry_hash":"0x30ced74de367aa"}}"#;
+        let out = format_sql_result(raw);
+        assert!(out.contains("0xabc") && !out.contains("\"0xabc\""));
+        assert!(out.contains("as of block 100"));
+        assert!(out.contains("sealed_through 93"));
+        assert!(out.contains("registry 30ced74d"));
+        assert!(out.len() < raw.len(), "compact must beat verbose JSON");
+    }
+
+    #[test]
+    fn sql_truncation_is_guidance_not_silence() {
+        let raw = r#"{"count":200,"truncated":true,"rows":[{"n":1}],"provenance":{"as_of":9,"sealed_through":9,"source":"hot+sealed","registry_hash":"0xabcd1234"}}"#;
+        let out = format_sql_result(raw);
+        assert!(out.contains("truncated at 200 rows"));
+        assert!(
+            out.contains("GROUP BY") && out.contains("`limit`"),
+            "tells the agent how to adapt"
+        );
+    }
+
+    #[test]
+    fn sql_error_body_is_relayed_verbatim() {
+        let raw = r#"{"error":"Binder Error: …\n\nhint: use value_dec"}"#;
+        let out = format_sql_result(raw);
+        assert!(out.contains("hint: use value_dec"));
     }
 
     #[tokio::test]
