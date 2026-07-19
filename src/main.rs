@@ -141,81 +141,197 @@ fn run_labels(args: cli::LabelsArgs) -> Result<()> {
     }
 }
 
-/// `nuthatch sql "<query>"` — one-shot read-only SQL over the nest's data (live tip ∪ sealed history),
-/// printed as a table. The terminal-native front door to querying, so a user never needs curl to poke
-/// at their own data. Same guarded engine as `/sql`.
+/// `nuthatch sql [query]` — read-only SQL over the nest's data (live tip ∪ sealed history). With a
+/// query, one-shot to a table (`--json` to pipe). Without, an interactive REPL. The terminal-native
+/// front door to querying, so a user never needs curl to poke at their own data (RFC-0015).
 async fn run_sql(args: cli::SqlArgs) -> Result<()> {
-    let dir = std::path::PathBuf::from(&args.dir);
-    // Prefer the local files (works when `dev` is stopped). redb is single-writer, so if `dev` holds
-    // the store the open fails — then we query the *running* instance over its HTTP API instead, so the
-    // same command works whether or not the indexer is up.
-    let (rows, truncated) = match store::Store::open(&dir.join(config::DB_FILE)) {
-        Ok(store) => {
-            // Live tip ∪ sealed history, disjoint by the sealed watermark (COR-1).
-            let hot = store.hot_rows_by_table().unwrap_or_default();
-            let sealed_through = store.sealed_through();
-            let out = analytics::query_hot_cold(
-                &dir,
-                &args.query,
-                analytics::QueryGuard {
-                    timeout: std::time::Duration::from_secs(30),
-                    max_rows: 50_000,
-                },
-                &hot,
-                sealed_through,
-            )?;
-            (out.rows, out.truncated)
+    let backend = SqlBackend::open(&args.dir, &args.url)?;
+    match args.query.clone() {
+        Some(query) => {
+            let (rows, truncated) = backend.query(&query).await?;
+            if args.json {
+                for row in &rows {
+                    println!("{row}");
+                }
+            } else {
+                print_table(&rows);
+            }
+            if truncated {
+                eprintln!("(result truncated at 50000 rows)");
+            }
+            Ok(())
         }
-        Err(_) => (
-            query_over_http(&args.url, &args.query)
-                .await
-                .with_context(|| {
-                    format!(
-                        "no nest at {} to query directly, and no running nuthatch at {} — start \
-                 `nuthatch dev` (or pass --url / --dir)",
-                        args.dir, args.url
-                    )
-                })?,
-            false,
-        ),
-    };
-    if args.json {
-        for row in &rows {
-            println!("{row}");
-        }
-    } else {
-        print_table(&rows);
+        None => repl(backend).await,
     }
-    if truncated {
-        eprintln!("(result truncated at 50000 rows)");
+}
+
+/// Where `nuthatch sql` queries run: the local store (when `dev` is stopped) or the running instance's
+/// HTTP API (when `dev` holds the single-writer redb). Opened once, so a REPL reuses one connection.
+enum SqlBackend {
+    Local {
+        dir: std::path::PathBuf,
+        store: store::Store,
+    },
+    Http {
+        url: String,
+        client: reqwest::Client,
+    },
+}
+
+impl SqlBackend {
+    fn open(dir: &str, url: &str) -> Result<Self> {
+        let dir = std::path::PathBuf::from(dir);
+        // Prefer local files; redb is single-writer, so if `dev` holds the store the open fails and we
+        // fall back to the running instance's API — the same command works either way.
+        match store::Store::open(&dir.join(config::DB_FILE)) {
+            Ok(store) => Ok(SqlBackend::Local { dir, store }),
+            Err(_) => Ok(SqlBackend::Http {
+                url: url.trim_end_matches('/').to_string(),
+                client: reqwest::Client::new(),
+            }),
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            SqlBackend::Local { dir, .. } => format!("local nest at {}", dir.display()),
+            SqlBackend::Http { url, .. } => format!("running nuthatch at {url}"),
+        }
+    }
+
+    async fn query(&self, sql: &str) -> Result<(Vec<serde_json::Value>, bool)> {
+        match self {
+            SqlBackend::Local { dir, store } => {
+                // Live tip ∪ sealed history, disjoint by the sealed watermark (COR-1).
+                let hot = store.hot_rows_by_table().unwrap_or_default();
+                let sealed_through = store.sealed_through();
+                let out = analytics::query_hot_cold(
+                    dir,
+                    sql,
+                    analytics::QueryGuard {
+                        timeout: std::time::Duration::from_secs(30),
+                        max_rows: 50_000,
+                    },
+                    &hot,
+                    sealed_through,
+                )?;
+                Ok((out.rows, out.truncated))
+            }
+            SqlBackend::Http { url, client } => {
+                let resp = client
+                    .get(format!("{url}/sql"))
+                    .query(&[("q", sql)])
+                    .send()
+                    .await
+                    .with_context(|| format!("querying {url} — is `nuthatch dev` running?"))?;
+                let status = resp.status();
+                let body: serde_json::Value =
+                    resp.json().await.context("reading the API response")?;
+                if !status.is_success() {
+                    anyhow::bail!(
+                        "{}",
+                        body.get("error")
+                            .and_then(|e| e.as_str())
+                            .unwrap_or("query failed")
+                    );
+                }
+                let rows = body
+                    .get("rows")
+                    .and_then(|r| r.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let truncated = body
+                    .get("truncated")
+                    .and_then(|t| t.as_bool())
+                    .unwrap_or(false);
+                Ok((rows, truncated))
+            }
+        }
+    }
+}
+
+/// The interactive `nuthatch sql` REPL: readline with history, dot-commands, and a table per query.
+async fn repl(backend: SqlBackend) -> Result<()> {
+    use rustyline::error::ReadlineError;
+    println!("nuthatch sql — querying {}.", backend.describe());
+    println!("Type SQL, or .help for commands. .exit (or Ctrl-D) to quit.");
+    let mut rl = rustyline::DefaultEditor::new().context("starting the REPL")?;
+    loop {
+        match rl.readline("nuthatch> ") {
+            Ok(line) => {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let _ = rl.add_history_entry(line);
+                if line.starts_with('.') {
+                    if repl_meta(line, &backend).await {
+                        break; // .exit / .quit
+                    }
+                    continue;
+                }
+                // A query error is printed, never fatal — the session stays open.
+                match backend.query(line).await {
+                    Ok((rows, truncated)) => {
+                        print_table(&rows);
+                        if truncated {
+                            eprintln!("(result truncated at 50000 rows)");
+                        }
+                    }
+                    Err(e) => eprintln!("error: {e:#}"),
+                }
+            }
+            Err(ReadlineError::Interrupted) => continue, // Ctrl-C clears the line
+            Err(ReadlineError::Eof) => break,            // Ctrl-D exits
+            Err(e) => {
+                eprintln!("{e}");
+                break;
+            }
+        }
     }
     Ok(())
 }
 
-/// Query a running instance's `/sql` endpoint (the fallback when `dev` holds the local store).
-async fn query_over_http(url: &str, query: &str) -> Result<Vec<serde_json::Value>> {
-    let base = url.trim_end_matches('/');
-    let resp = reqwest::Client::new()
-        .get(format!("{base}/sql"))
-        .query(&[("q", query)])
-        .send()
-        .await
-        .context("connecting to the running nuthatch API")?;
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().await.context("reading the API response")?;
-    if !status.is_success() {
-        anyhow::bail!(
-            "query failed: {}",
-            body.get("error")
-                .and_then(|e| e.as_str())
-                .unwrap_or("unknown")
-        );
+/// Handle a REPL dot-command. Returns `true` when the session should exit.
+async fn repl_meta(line: &str, backend: &SqlBackend) -> bool {
+    let mut parts = line.split_whitespace();
+    match parts.next() {
+        Some(".exit") | Some(".quit") | Some(".q") => return true,
+        Some(".help") => {
+            println!(".tables            list the queryable tables");
+            println!(".schema <table>    show a table's columns");
+            println!(".exit / .quit      leave the REPL (or Ctrl-D)");
+            println!("anything else is run as SQL (SELECT/WITH only).");
+        }
+        Some(".tables") => {
+            run_meta_query(
+                backend,
+                "SELECT table_name FROM information_schema.tables \
+                 WHERE NOT starts_with(table_name, '__hot_') ORDER BY table_name",
+            )
+            .await;
+        }
+        Some(".schema") => match parts.next() {
+            Some(t) => {
+                let q = format!(
+                    "SELECT column_name, data_type FROM information_schema.columns \
+                     WHERE table_name = '{}' ORDER BY ordinal_position",
+                    t.replace('\'', "''")
+                );
+                run_meta_query(backend, &q).await;
+            }
+            None => eprintln!("usage: .schema <table>"),
+        },
+        _ => eprintln!("unknown command {line:?} — try .help"),
     }
-    Ok(body
-        .get("rows")
-        .and_then(|r| r.as_array())
-        .cloned()
-        .unwrap_or_default())
+    false
+}
+
+async fn run_meta_query(backend: &SqlBackend, sql: &str) {
+    match backend.query(sql).await {
+        Ok((rows, _)) => print_table(&rows),
+        Err(e) => eprintln!("error: {e:#}"),
+    }
 }
 
 /// Render query rows as a simple aligned ASCII table.

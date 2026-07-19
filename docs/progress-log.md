@@ -11,6 +11,16 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   (proxy/EIP-1967 introspection, child-`end` conditions, SSE push, the 0012 live-parity proof). Notes
   the one node-independent 0014 slice worth building without the node (calldata decoder + `[extract]`
   config + schemas + volume guard). Linked from the RFC index.
+- **2026-07-18 - RFC-0015 slice 1: the `nuthatch sql` REPL (first 0.5 "delightful core" work).** With no
+  query argument, `nuthatch sql` now opens an interactive REPL — rustyline (history, line editing,
+  Ctrl-C clears / Ctrl-D exits), dot-commands (`.tables`, `.schema <table>`, `.help`, `.exit`), and a
+  formatted table per query; a query error prints but never ends the session. Refactored the query path
+  into a `SqlBackend` (Local store when `dev` is stopped, HTTP fallback to the running instance when it
+  holds the single-writer redb) opened once and reused across the whole REPL session. `.tables`/`.schema`
+  are canned `information_schema` queries, so they work identically over both backends. This is the
+  terminal-native query surface the RFC calls the single biggest UX lever — `init → dev → sql` and you're
+  poking at your contract's data in a real REPL, no curl, no browser. Verified live on Arbitrum. 148
+  tests, clippy `-D warnings` clean.
 - **2026-07-18 - 🏷️ Release 0.4.0 — the hardening release.** Version 0.3.0 → 0.4.0. Cut after a
   five-dimension codebase audit and a sweep that fixed **2 critical security bugs** (blob-mount RCE,
   `/sql` arbitrary file-read), **2 high data-corruption bugs** (atomic seal/prune + structural SQL

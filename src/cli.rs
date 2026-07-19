@@ -389,8 +389,9 @@ pub struct McpArgs {
 
 #[derive(Args)]
 pub struct SqlArgs {
-    /// The SQL query (SELECT/WITH). Tables are `{alias}__{event}`, e.g. `usdc__transfer`.
-    pub query: String,
+    /// The SQL query (SELECT/WITH). Tables are `{alias}__{event}`, e.g. `usdc__transfer`. Omit to open
+    /// an interactive REPL (`.tables`, `.schema <t>`, history; `.exit` to quit).
+    pub query: Option<String>,
 
     /// Nest directory (queried directly when no `nuthatch dev` holds the store).
     #[arg(long, default_value = ".")]
