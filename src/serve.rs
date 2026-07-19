@@ -78,6 +78,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/metrics", get(metrics_handler))
         .route("/tables", get(tables))
+        .route("/schema", get(schema_doc))
         .route("/table/{name}", get(table))
         .route("/entities", get(entities))
         .route("/entity/{id}", get(entity))
@@ -275,6 +276,37 @@ struct TableQuery {
     limit: Option<usize>,
     from_block: Option<u64>,
     to_block: Option<u64>,
+}
+
+/// The enriched schema document (RFC-0016 §2): the composition of registry **structure**, the
+/// authored **meaning** from `semantic.toml`, the derived **footguns**, and live **coverage** (the
+/// hot/cold seam as numbers). Assembled per call from this running nest — the MCP `schema` tool
+/// relays it, so an agent reads *this* nest's data model, not a static string. Plain text.
+async fn schema_doc(State(s): State<AppState>) -> impl IntoResponse {
+    let sem = crate::semantic::load(&s.dir).ok().flatten();
+    if let Some(sem) = &sem {
+        for w in crate::semantic::drift(&s.tables, sem) {
+            tracing::warn!("semantic.toml drift: {w}");
+        }
+    }
+    let coverage = crate::semantic::Coverage {
+        sealed_through: s.store.sealed_through(),
+        tip: s
+            .store
+            .get_meta("last_block")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+    };
+    let doc = crate::semantic::compose(&s.tables, sem.as_ref(), Some(&coverage));
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        doc,
+    )
 }
 
 /// Recent rows of one table, merged across the hot store and the sealed cold segments.

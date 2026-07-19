@@ -233,6 +233,17 @@ fn write_nest_artifacts(dir: &Path, chain_name: &str, config: &Config) -> Result
     )
     .context("failed to write schema.json")?;
     scaffold_ai_surface(dir, chain_name, &config.contracts, &schema)?;
+
+    // The governed semantic layer (RFC-0016): generate `semantic.toml` from the registry — ABI-seeded
+    // descriptions + derived footguns. On `add`, merge onto the existing file so authored descriptions
+    // survive while the footguns are refreshed (init has no existing file, so it just writes fresh).
+    let generated = crate::semantic::generate(&schema, &config.nest.name, chain_name);
+    let sem = match crate::semantic::load(dir)? {
+        Some(existing) => crate::semantic::merge(existing, generated),
+        None => generated,
+    };
+    crate::semantic::save(dir, &sem)?;
+
     Ok(schema.len())
 }
 

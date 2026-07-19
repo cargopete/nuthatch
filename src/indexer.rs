@@ -569,6 +569,14 @@ async fn build_nest(
         &hex::encode(registry.hash())[..12],
     );
 
+    // Governed semantic layer (RFC-0016): if `semantic.toml` describes a table/column the registry
+    // doesn't have, the semantics are stale — worse than none. Warn loudly at startup.
+    if let Ok(Some(sem)) = crate::semantic::load(&dir) {
+        for w in crate::semantic::drift(&registry.schema(), &sem) {
+            tracing::warn!("semantic.toml drift: {w}");
+        }
+    }
+
     // A nest that vendors deployment blocks backfills from the earliest one (full history from
     // deployment); otherwise a cold start falls back to the `--backfill` tip offset.
     let start_block = config.contracts.iter().filter_map(|c| c.start_block).min();
