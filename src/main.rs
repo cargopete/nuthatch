@@ -62,6 +62,14 @@ async fn main() -> Result<()> {
                 a.expect.as_deref(),
             ),
         },
+        cli::Command::SkillRefs => {
+            nuthatch::skill::write_refs(std::path::Path::new("."))?;
+            println!(
+                "✓ regenerated {}/cli-reference.md",
+                nuthatch::skill::SKILL_DIR
+            );
+            Ok(())
+        }
         cli::Command::Roost(args) => match args.what {
             cli::RoostWhat::Dev(a) => {
                 roost::dev(

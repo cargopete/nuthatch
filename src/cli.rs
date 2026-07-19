@@ -46,6 +46,10 @@ pub enum Command {
     Nest(NestArgs),
     /// Run a roost: many nests on one chain behind one API, each under `/<name>/…` (RFC-0012).
     Roost(RoostArgs),
+    /// Regenerate the builder skill's machine-generated references from clap metadata (RFC-0017).
+    /// Hidden: a dev/authoring tool, not part of the user-facing two-command story.
+    #[command(hide = true)]
+    SkillRefs,
 }
 
 #[derive(Args)]
