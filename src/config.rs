@@ -209,6 +209,13 @@ pub struct Contract {
 
 impl Config {
     pub fn load(dir: &Path) -> Result<Config> {
+        // RFC-0018 §2: a nest may be authored as `nest.star` (Starlark) that *computes* its config.
+        // When present it takes precedence and is evaluated hermetically to the same `Config` a TOML
+        // file would produce; TOML remains what `init` emits and the default for everyone else.
+        let star = dir.join("nest.star");
+        if star.exists() {
+            return crate::starlark_config::load_star(&star, dir);
+        }
         let path = dir.join(CONFIG_FILE);
         let raw = std::fs::read_to_string(&path).with_context(|| {
             format!(
