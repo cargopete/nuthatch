@@ -2,6 +2,17 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-20 - Hardening: seal-direct backfill retries a transient RPC failure instead of aborting.**
+  The §5 dogfood surfaced it live: a single `--seal-direct` window that hit a 403 from one endpoint (while
+  the others throttled under concurrency) aborted the *entire* backfill. A per-attempt fetch already fails
+  over across endpoints (`RpcClient::call`), but the concurrent seal-direct pipeline had no window-level
+  retry, so an all-endpoints-at-once blip propagated straight through `res?` and killed the run — unlike
+  the tip loop, which retries. Added `retry_transient` (bounded attempts, capped exponential backoff, base
+  parameterised for tests) around both RPC calls in each backfill window (`getLogs` + `block_timestamps`);
+  a window now waits and retries up to 5× before giving up, so a rate-limit or provider blip no longer
+  wastes a long backfill. 2 new tests (recovers-after-two-failures, gives-up-after-max); 196 lib tests,
+  clippy `-D warnings` clean.
+
 - **2026-07-20 - RFC-0018 §5: dogfooded on the real horizon-nest / graph-network-nest — fork → instance,
   proven byte-identical; plus the bug it caught.** The RFC's acceptance case was a measured, byte-identical
   fork: `graph-network-nest` differed from `horizon-nest` by exactly one line (`name =`). Made it real:

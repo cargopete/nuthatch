@@ -816,6 +816,45 @@ fn fetch_logs_splitting<'a>(
     })
 }
 
+/// Attempts and base backoff for a transient RPC failure during a seal-direct backfill window.
+const BACKFILL_RETRY_ATTEMPTS: usize = 5;
+const BACKFILL_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Retry a transient RPC operation with capped exponential backoff. A single attempt already fails
+/// over across endpoints ([`RpcClient::call`]); this covers the case where *every* endpoint is briefly
+/// unavailable at once — a shared rate-limit or a provider blip (e.g. a 403 from one host while the
+/// others throttle under concurrency). Without it a single such window aborts the whole seal-direct
+/// backfill; with it the window waits and retries, matching the tip loop's resilience. `base` is
+/// parameterised so tests can pass `Duration::ZERO`.
+async fn retry_transient<T, F, Fut>(
+    label: &str,
+    attempts: usize,
+    base: std::time::Duration,
+    mut op: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut attempt = 1usize;
+    loop {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if attempt >= attempts {
+                    return Err(e.context(format!("{label} failed after {attempts} attempts")));
+                }
+                let backoff = base.saturating_mul(1u32 << (attempt - 1).min(6));
+                tracing::warn!(
+                    "{label} failed (attempt {attempt}/{attempts}): {e:#}; retrying in {backoff:?}"
+                );
+                tokio::time::sleep(backoff).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
 /// Concurrent-fetch variant of [`backfill_direct`]: up to `concurrency` window fetches are in flight
 /// at once (overlapping the RPC round-trip latency that dominates once the storage path is cheap),
 /// while results are consumed strictly **in block order** — so the buffered rows, the batch
@@ -856,8 +895,16 @@ pub async fn backfill_direct_pipelined(
     // one task; `buffered` yields them back in window order.
     let mut stream = futures::stream::iter(windows)
         .map(|(w_from, w_to)| async move {
-            // Split-and-retry on a provider result cap instead of aborting the whole backfill (H2/H3).
-            let logs = fetch_logs_splitting(source, addresses, topic0s, w_from, w_to).await?;
+            // Split-and-retry on a provider result cap instead of aborting the whole backfill (H2/H3),
+            // and retry the whole fetch on a transient all-endpoints failure (rate-limit / provider
+            // blip) so one bad window doesn't abort the run.
+            let logs = retry_transient(
+                &format!("seal-direct getLogs {w_from}..={w_to}"),
+                BACKFILL_RETRY_ATTEMPTS,
+                BACKFILL_RETRY_BASE,
+                || fetch_logs_splitting(source, addresses, topic0s, w_from, w_to),
+            )
+            .await?;
             let mut rows: Vec<_> = logs
                 .iter()
                 .filter_map(|log| match registry.decode(log) {
@@ -872,7 +919,13 @@ pub async fn backfill_direct_pipelined(
             let mut blocks: Vec<u64> = rows.iter().map(|r| r.block_number).collect();
             blocks.sort_unstable();
             blocks.dedup();
-            let ts = source.block_timestamps(&blocks).await?;
+            let ts = retry_transient(
+                &format!("seal-direct block_timestamps {w_from}..={w_to}"),
+                BACKFILL_RETRY_ATTEMPTS,
+                BACKFILL_RETRY_BASE,
+                || source.block_timestamps(&blocks),
+            )
+            .await?;
             let json: Vec<String> = rows
                 .iter_mut()
                 .map(|r| {
@@ -2324,6 +2377,41 @@ fn webhook_host(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retry_transient_recovers_after_transient_failures() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let r: Result<u32> = retry_transient("op", 5, std::time::Duration::ZERO, || async {
+            // Fail the first two attempts (a rate-limit blip), succeed on the third.
+            if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                Err(anyhow::anyhow!("all RPC endpoints failed"))
+            } else {
+                Ok(42)
+            }
+        })
+        .await;
+        assert_eq!(r.unwrap(), 42);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "should stop retrying once it succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_transient_gives_up_after_max_attempts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let r: Result<u32> = retry_transient("op", 3, std::time::Duration::ZERO, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::anyhow!("persistent 403"))
+        })
+        .await;
+        let err = r.unwrap_err().to_string();
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "exactly `attempts` tries");
+        assert!(err.contains("after 3 attempts"), "got: {err}");
+    }
 
     #[test]
     fn webhook_host_drops_the_secret_bearing_path() {
