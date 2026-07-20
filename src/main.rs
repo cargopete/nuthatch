@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
         cli::Command::Check(args) => check::check(args),
         cli::Command::Bench(args) => match args.what {
             cli::BenchWhat::Backfill(a) => bench::backfill(a).await,
+            cli::BenchWhat::Query(a) => bench::query(a),
         },
         cli::Command::Labels(args) => run_labels(args),
         cli::Command::Lists(args) => run_lists(args).await,

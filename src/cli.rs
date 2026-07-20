@@ -328,6 +328,39 @@ pub struct BenchArgs {
 pub enum BenchWhat {
     /// Measure backfill throughput (events/sec, wall-clock, peak RSS) over a pinned block range.
     Backfill(BackfillBenchArgs),
+    /// Measure the read path: entity point-read latency (p50/p99) and the `/sql` hot∪cold scan cost
+    /// (query latency + peak RSS). The regression guard for the perf refactors — run offline against
+    /// an already-indexed nest.
+    Query(QueryBenchArgs),
+}
+
+#[derive(Args)]
+pub struct QueryBenchArgs {
+    /// Nest directory (must contain an indexed `nuthatch.redb`). Stop `dev` first — the bench opens
+    /// the store directly.
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+
+    /// The `/sql` query to time (over hot∪cold). Defaults to `SELECT count(*)` on the largest hot
+    /// table — the full-tip-materialising scan whose cost is the #1 RAM risk on deep-finality L2s.
+    #[arg(long)]
+    pub sql: Option<String>,
+
+    /// Entity point-reads to time (keys sampled evenly across the hot store).
+    #[arg(long, default_value_t = 1000)]
+    pub reads: usize,
+
+    /// `/sql` query repetitions to time (the report is the p50/p99 across them).
+    #[arg(long, default_value_t = 20)]
+    pub iters: usize,
+
+    /// Write the bench-report JSON here. Prints to stdout regardless.
+    #[arg(long)]
+    pub out: Option<String>,
+
+    /// A label for the report (e.g. "R1: horizon tip 12k rows").
+    #[arg(long)]
+    pub label: Option<String>,
 }
 
 #[derive(Args)]

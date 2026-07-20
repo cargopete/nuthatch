@@ -2,6 +2,21 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-20 - Perf: `nuthatch bench query` — the read-path regression guard (#40 foundation).** The
+  perf backlog's four "bigger than 0.4" refactors (bound the `/sql` hot-scan, a persistent DuckDB
+  connection, single-scan the restart rebuild, a compact binary row format) are all **benchmark-gated** —
+  but `bench` only measured *backfill* throughput, so the read-path costs those refactors target could
+  regress silently. This adds the missing baseline: `bench query` runs offline against an indexed nest
+  and reports **entity point-read latency** (p50/p99/p99.9 over sampled `get_entity`s — the redb B-tree
+  path a storage-format change would move) and the **`/sql` hot∪cold scan cost** (query p50/p99 + peak
+  RSS over N iterations — the whole-tip materialisation that is the #1 RAM risk on deep-finality L2s),
+  emitting the same provenance-stamped JSON artifact as `bench backfill`. New `Store::sample_entity_keys`
+  (bounded) feeds the point-reads; a `percentile` helper (2 tests). Verified end-to-end on a live-indexed
+  horizon nest: point-read **p50 7.4µs**, and a bare `count(*)` over the hot∪cold surface at **p50 166ms,
+  peak 145 MB** — the exact "rebuild the world per query" cost the persistent-connection + bounded-scan
+  refactors now have a number to beat. The refactors themselves are the follow-on PRs, each measured
+  against this. `cli-reference.md` regenerated; full suite + drift gate green.
+
 - **2026-07-20 - Observability: per-nest labelled `/metrics` series (SEC-9).** In a roost, the ingestion
   gauges and counters (`last_block`, `sealed_through`, `rows_decoded/sealed`, `reorgs`) were the process
   global — every mounted nest blended into one number, so an operator couldn't tell which nest was lagging

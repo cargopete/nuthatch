@@ -430,6 +430,22 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// Up to `limit` entity keys, chain-ordered — the point-read bench (`nuthatch bench query`) samples
+    /// from these. Bounded so a large hot store doesn't materialise every key just to time a few reads.
+    pub fn sample_entity_keys(&self, limit: usize) -> Result<Vec<String>> {
+        let rtx = self.db.begin_read()?;
+        let t = rtx.open_table(ENTITIES)?;
+        let mut out = Vec::with_capacity(limit.min(4096));
+        for row in t.iter()? {
+            let (k, _) = row?;
+            out.push(k.value().to_string());
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

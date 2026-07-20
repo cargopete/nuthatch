@@ -161,6 +161,143 @@ pub async fn backfill(args: BackfillBenchArgs) -> Result<()> {
     Ok(())
 }
 
+/// Read-path bench report (`nuthatch bench query`): entity point-read latency and the `/sql` hot∪cold
+/// scan cost + peak RSS. The regression guard the perf refactors (bound the hot-scan, persistent DuckDB
+/// connection, compact row format) must each beat on a before/after — none of these were measurable
+/// before, so they could regress silently.
+#[derive(Debug, Serialize)]
+pub struct QueryBenchReport {
+    pub bench: &'static str,
+    pub label: Option<String>,
+    pub nest: String,
+    pub chain: String,
+    /// Rows in the unsealed hot tip a `/sql` query materialises into temp tables — the scan-cost driver
+    /// and the #1 RAM risk on deep-finality L2s.
+    pub hot_rows: u64,
+    pub sealed_through: u64,
+    pub reads: usize,
+    pub point_read_p50_us: f64,
+    pub point_read_p99_us: f64,
+    pub point_read_p999_us: f64,
+    pub sql: String,
+    pub sql_iters: usize,
+    pub sql_p50_ms: f64,
+    pub sql_p99_ms: f64,
+    pub sql_peak_rss_mb: u64,
+    pub commit: Option<String>,
+}
+
+/// `nuthatch bench query` — measure the read path against an already-indexed nest (run offline: it
+/// opens the store directly). Establishes the point-read and `/sql` scan baselines the #40 perf
+/// refactors are gated on.
+pub fn query(args: crate::cli::QueryBenchArgs) -> Result<()> {
+    let dir = PathBuf::from(&args.dir);
+    let config = Config::load(&dir)?;
+    let store = Store::open(&dir.join(crate::config::DB_FILE))
+        .context("open the nest store (stop `nuthatch dev` first — the bench needs the DB)")?;
+
+    let keys = store.sample_entity_keys(args.reads)?;
+    let hot = store.hot_rows_by_table()?;
+    let hot_rows: u64 = hot.values().map(|v| v.len() as u64).sum();
+    let sealed_through = store.sealed_through();
+
+    // --- Point-read latency: time get_entity over the sampled keys. ---
+    let (p50_us, p99_us, p999_us, n_reads) = if keys.is_empty() {
+        (0.0, 0.0, 0.0, 0)
+    } else {
+        let mut us: Vec<f64> = Vec::with_capacity(keys.len());
+        for k in &keys {
+            let t = Instant::now();
+            let _ = store.get_entity(k)?;
+            us.push(t.elapsed().as_nanos() as f64 / 1000.0);
+        }
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        (
+            percentile(&us, 50.0),
+            percentile(&us, 99.0),
+            percentile(&us, 99.9),
+            us.len(),
+        )
+    };
+
+    // --- /sql hot∪cold scan cost: run the query `iters` times, time each, sample peak RSS. ---
+    let sql = match &args.sql {
+        Some(s) => s.clone(),
+        None => {
+            // Default: count over the largest hot table (forces the full-tip materialisation); a fully
+            // sealed nest (no hot rows) falls back to the first registry table.
+            let table = match hot
+                .iter()
+                .max_by_key(|(_, v)| v.len())
+                .map(|(t, _)| t.clone())
+            {
+                Some(t) => t,
+                None => DecodeRegistry::from_nest(&dir, &config)?
+                    .tables()
+                    .first()
+                    .map(|d| d.table.clone())
+                    .context("nest has no tables to scan — pass --sql")?,
+            };
+            format!("SELECT count(*) FROM {table}")
+        }
+    };
+    let guard = || crate::analytics::QueryGuard {
+        timeout: Duration::from_secs(60),
+        max_rows: 5_000_000,
+    };
+    // Warm-up (attach segments + build temp tables) kept out of the percentiles.
+    crate::analytics::query_hot_cold(&dir, &sql, guard(), &hot, sealed_through)
+        .with_context(|| format!("running bench query: {sql}"))?;
+    let rss = RssSampler::start();
+    let mut ms: Vec<f64> = Vec::with_capacity(args.iters.max(1));
+    for _ in 0..args.iters.max(1) {
+        let t = Instant::now();
+        let _ = crate::analytics::query_hot_cold(&dir, &sql, guard(), &hot, sealed_through)?;
+        ms.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let sql_peak_rss_mb = rss.stop();
+    ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    println!(
+        "bench query: nest '{}' on {} — {} hot rows, sealed_through {}, {} point-read(s), {} sql iter(s)",
+        config.nest.name, config.nest.chain, hot_rows, sealed_through, n_reads, args.iters,
+    );
+    println!("  point-read: p50 {p50_us:.1}µs  p99 {p99_us:.1}µs  p99.9 {p999_us:.1}µs");
+    println!(
+        "  /sql `{}`: p50 {:.1}ms  p99 {:.1}ms  peak {} MB",
+        sql,
+        percentile(&ms, 50.0),
+        percentile(&ms, 99.0),
+        sql_peak_rss_mb
+    );
+
+    let report = QueryBenchReport {
+        bench: "query",
+        label: args.label.clone(),
+        nest: config.nest.name.clone(),
+        chain: config.nest.chain.clone(),
+        hot_rows,
+        sealed_through,
+        reads: n_reads,
+        point_read_p50_us: round2(p50_us),
+        point_read_p99_us: round2(p99_us),
+        point_read_p999_us: round2(p999_us),
+        sql,
+        sql_iters: args.iters,
+        sql_p50_ms: round2(percentile(&ms, 50.0)),
+        sql_p99_ms: round2(percentile(&ms, 99.0)),
+        sql_peak_rss_mb,
+        commit: git_commit(),
+    };
+    let json = serde_json::to_string_pretty(&report)?;
+    println!("\n{json}");
+    if let Some(out) = &args.out {
+        std::fs::write(out, &json).with_context(|| format!("failed to write {out}"))?;
+        println!("\nwrote {out}");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn one_run(
     rpc_urls: &[String],
@@ -350,6 +487,15 @@ fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
 
+/// Nearest-rank percentile of a pre-sorted slice. `p` in `[0, 100]`. Empty slice → 0.
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let rank = (p / 100.0 * (sorted.len() as f64 - 1.0)).round() as usize;
+    sorted[rank.min(sorted.len() - 1)]
+}
+
 /// The short commit the bench ran at (provenance for the report), or None outside a git checkout.
 fn git_commit() -> Option<String> {
     let out = std::process::Command::new("git")
@@ -378,5 +524,16 @@ mod tests {
     #[test]
     fn round_two_dp() {
         assert_eq!(round2(1234.5678), 1234.57);
+    }
+
+    #[test]
+    fn percentiles_nearest_rank() {
+        let v = [10.0, 20.0, 30.0, 40.0, 50.0]; // sorted, 5 elements
+        assert_eq!(percentile(&v, 0.0), 10.0); // rank round(0)   = 0 → v[0]
+        assert_eq!(percentile(&v, 50.0), 30.0); // rank round(2.0) = 2 → v[2]
+        assert_eq!(percentile(&v, 99.0), 50.0); // rank round(3.96)= 4 → v[4]
+        assert_eq!(percentile(&v, 100.0), 50.0); // rank round(4)  = 4 → v[4]
+        assert_eq!(percentile(&[], 99.0), 0.0); // empty guard
+        assert_eq!(percentile(&[42.0], 99.0), 42.0); // single element
     }
 }
