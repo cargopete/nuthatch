@@ -2,6 +2,20 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-20 - Hardening: the seal-direct *factory* backfill retries transient RPC failures too.**
+  Building the Uniswap-v3 catalogue nest (factory discovery over mainnet) immediately surfaced it: the
+  factory backfill (`backfill_direct_factory`) never got the transient-retry that #105 added to the
+  pipelined path, so a single 521/blip on a public mainnet endpoint aborted a run that had already
+  discovered hundreds of pools. Added `logs_with_retry` — the same bounded exponential backoff as
+  `retry_transient`, but it **passes a result-cap error straight through** so the factory's outer
+  window-shrink logic still handles "too many results" (the two strategies differ: shrink for a cap,
+  back-off for a down endpoint). Wired into all three factory fetch sites (topic0, pass-1, pass-2
+  children) plus the timestamp fetch. Pointing the feature at a real hard nest is what found the gap —
+  same story as every fix this week. (Also logged, for a follow-up: a JSON-RPC error returned as HTTP
+  200 + an `error` body — e.g. a keyless endpoint's "authenticate with an API key" — isn't detected as
+  an endpoint failure, so failover doesn't fire and the bad endpoint poisons the pool.) Retry tests
+  green, full suite green.
+
 - **2026-07-20 - Cleanup: retire `graph-network-nest` — one nest, not a clone.** The §5 dogfood proved
   the Starlark composition mechanism, but on a bad exemplar: `graph-network-nest` indexed the *same three
   contracts on the same chain* as `horizon-nest`, through the same views, producing byte-identical data —

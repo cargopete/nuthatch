@@ -856,6 +856,42 @@ where
     }
 }
 
+/// Fetch logs with the same bounded transient-retry as [`retry_transient`], but **pass a result-cap
+/// error straight through** so the caller's own window-shrink logic handles it. The factory backfill
+/// needs this because its cap strategy is an outer shrink (not the pipelined path's internal split):
+/// "too many results" ⇒ shrink the window, "endpoint down" ⇒ back off and retry. Without it a single
+/// transient RPC blip (a 521, an all-endpoints rate-limit) aborts a long factory backfill mid-run —
+/// exactly what building the Uniswap-v3 nest surfaced.
+async fn logs_with_retry(
+    source: &dyn Source,
+    addresses: &[String],
+    topic0s: &[String],
+    from: u64,
+    to: u64,
+) -> Result<Vec<crate::rpc::Log>> {
+    let mut attempt = 1usize;
+    loop {
+        match source.logs(addresses, topic0s, from, to).await {
+            Ok(l) => return Ok(l),
+            // A result cap is not transient — hand it back so the caller shrinks the window.
+            Err(e) if chunker::is_result_too_large(&e) => return Err(e),
+            Err(e) if attempt >= BACKFILL_RETRY_ATTEMPTS => {
+                return Err(e).with_context(|| {
+                    format!("getLogs {from}..={to} failed after {BACKFILL_RETRY_ATTEMPTS} attempts")
+                });
+            }
+            Err(e) => {
+                let backoff = BACKFILL_RETRY_BASE.saturating_mul(1u32 << (attempt - 1).min(6));
+                tracing::warn!(
+                    "factory getLogs {from}..={to} failed (attempt {attempt}/{BACKFILL_RETRY_ATTEMPTS}): {e:#}; retrying in {backoff:?}"
+                );
+                tokio::time::sleep(backoff).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
 /// Concurrent-fetch variant of [`backfill_direct`]: up to `concurrency` window fetches are in flight
 /// at once (overlapping the RPC round-trip latency that dominates once the storage path is cheap),
 /// while results are consumed strictly **in block order** — so the buffered rows, the batch
@@ -1019,7 +1055,7 @@ pub async fn backfill_direct_factory(
         if use_topic0 {
             // Topic0-only: every matching log (contract + all children) is in hand in one fetch, so
             // there is no second pass; `decode_window` filters locally by registry membership.
-            all_logs = match source.logs(&[], topic0s, next, chunk_to).await {
+            all_logs = match logs_with_retry(source, &[], topic0s, next, chunk_to).await {
                 Ok(l) => {
                     chunker.observed(l.len() as u64);
                     l
@@ -1044,7 +1080,7 @@ pub async fn backfill_direct_factory(
                     current.push(c.to_string());
                 }
             }
-            let logs1 = match source.logs(&current, topic0s, next, chunk_to).await {
+            let logs1 = match logs_with_retry(source, &current, topic0s, next, chunk_to).await {
                 Ok(l) => {
                     chunker.observed(l.len() as u64);
                     l
@@ -1077,8 +1113,7 @@ pub async fn backfill_direct_factory(
                 for c in &new {
                     fetched.insert(c.to_ascii_lowercase());
                 }
-                let more = source
-                    .logs(&new, topic0s, next, chunk_to)
+                let more = logs_with_retry(source, &new, topic0s, next, chunk_to)
                     .await
                     .with_context(|| format!("getLogs (children) {next}..={chunk_to}"))?;
                 let _ = decode_window(registry, Some(factory), children, &more, &empty_ts);
@@ -1090,7 +1125,13 @@ pub async fn backfill_direct_factory(
         let mut blocks: Vec<u64> = all_logs.iter().map(|l| l.block_number).collect();
         blocks.sort_unstable();
         blocks.dedup();
-        let ts = source.block_timestamps(&blocks).await?;
+        let ts = retry_transient(
+            &format!("factory block_timestamps {next}..={chunk_to}"),
+            BACKFILL_RETRY_ATTEMPTS,
+            BACKFILL_RETRY_BASE,
+            || source.block_timestamps(&blocks),
+        )
+        .await?;
         let rows = decode_window(registry, Some(factory), children, &all_logs, &ts);
         for r in &rows {
             buf.push(r.to_json().to_string());
