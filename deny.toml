@@ -18,11 +18,8 @@ ignore = [
   # it without bumping dbsp. Re-check on the next dbsp bump.
   "RUSTSEC-2026-0194", # quick-xml: quadratic time on duplicate start-tag attributes
   "RUSTSEC-2026-0195", # quick-xml: unbounded namespace-declaration allocation
-  # wasmtime-wasi FilePerms bypass on hard links/renames. Reachable only if an operator grants
-  # filesystem-write capability to an untrusted WASM transform component — the escape hatch, running the
-  # operator's own code on the operator's own box; the default zero-capability components can't hit it.
-  # Tracked: bump wasmtime 44 → ≥46 (its own change; a major runtime bump touches the transform layer).
-  "RUSTSEC-2026-0188", # wasmtime-wasi: WASI hard links/renames bypass FilePerms
+  # RUSTSEC-2026-0188 (wasmtime-wasi FilePerms bypass) is FIXED, not ignored: wasmtime 44 → 46 clears it
+  # with no code change (the component-model API was stable across the bump). Ignore entry removed.
 ]
 
 [licenses]

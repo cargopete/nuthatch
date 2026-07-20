@@ -35,8 +35,8 @@ arrow = { version = "56", features = ["ipc"] }
 parquet = { version = "56", default-features = false, features = ["arrow", "snap"] }
 duckdb = { version = "1", features = ["bundled"] }
 dbsp = "0.320"
-wasmtime = { version = "44", features = ["component-model"] }
-wasmtime-wasi = "44"
+wasmtime = { version = "46", features = ["component-model"] }
+wasmtime-wasi = "46"
 sha2 = "0.10"
 ed25519-dalek = "2"
 getrandom = "0.2"
