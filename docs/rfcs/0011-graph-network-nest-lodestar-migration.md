@@ -1,6 +1,7 @@
 # RFC-0011: The graph-network nest and the Lodestar migration
 
 - Status: **Parked after pilot (2026-07-18)** — the wedge is proven in production; the full migration is not done. See "Implementation status" below.
+- Update (2026-07-20): the separate `graph-network-nest` repo — a byte-identical clone of `horizon-nest` that never diverged — has been **retired**. The remaining network-subgraph surface (Indexer Directory, Curation, Epochs) is now planned as an **extension of `horizon-nest`**, not a second nest. This RFC stands as the migration record; "the graph-network nest" throughout means that intended-superset work, now folded into `horizon-nest`.
 
 ## Implementation status (parked 2026-07-18)
 

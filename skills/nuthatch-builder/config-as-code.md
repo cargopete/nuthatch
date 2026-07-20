@@ -64,35 +64,44 @@ The leading `alias`, `address`, `start_block` of `contract(...)` may be **positi
 `def` wrapper reads cleanly: `def erc20(alias, addr, sb): return contract(alias, addr, sb,
 abi="abis/erc20.json")`. `abi` and `events` are always keyword.
 
-## Composition: extend a nest, don't fork it (`load()`)
+## Composition: one logic, many chains (`load()`)
 
-A nest can *reuse* another instead of copy-pasting it. This is what turns two byte-identical forks
-(`horizon-nest` and its "seeded from" twin) into one reusable unit and one thin instance.
+Where `load()` earns its keep is **the same nest instantiated across several chains** — one shared
+definition, one thin instance per chain, differing only by chain, address, and RPC. (Two *identical*
+nests on the *same* chain aren't a composition case — that's one nest wearing two names. Don't fork or
+`load()`; just keep the one.)
 
 The contract is **library-defines, entry-instantiates**:
 
 - A **reusable** nest is a `.star` that *defines a factory function* and **never calls `nest()`
   itself**. It is a library, not an entry.
-- An **entry** `nest.star` `load()`s that function and calls it exactly once.
+- An **entry** `nest.star` `load()`s that function and calls it once, with its chain's parameters.
 
 ```python
-# horizon/lib.star — the reusable unit. Defines; never self-instantiates.
-def horizon_staking(name, chain, extra = []):
+# uniswap-v3/lib.star — the reusable unit. Defines; never self-instantiates.
+def uniswap_v3(name, chain, factory, rpc):
     return nest(
         name = name,
         chain = chain,
-        rpc_urls = ["https://arb.example/rpc"],
-        contracts = [contract("staking", "0x…", abi = "abis/staking.json")] + extra,
+        rpc_urls = [rpc],
+        contracts = [contract("factory", factory, abi = "abis/uniswap_v3_factory.json")],
+        # …templates + factory rules for the pools, shared by every chain…
     )
 ```
 
 ```python
-# graph-network/nest.star — an instance of horizon, not a fork of it.
-load("//horizon:lib.star", "horizon_staking")
-horizon_staking(name = "graph-network", chain = "arbitrum-one")
+# uniswap-v3-arbitrum/nest.star — one instance; its siblings differ only in the three arguments.
+load("//uniswap-v3:lib.star", "uniswap_v3")
+uniswap_v3(
+    name = "uniswap-v3-arbitrum",
+    chain = "arbitrum-one",
+    factory = "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+    rpc = "https://arb.example/rpc",
+)
 ```
 
-Fix a bug in `horizon/lib.star` once and every instance inherits it — the whole point.
+Fix a bug in `uniswap-v3/lib.star` once and mainnet, Arbitrum, Optimism, and Base all inherit it —
+the whole point. Reach for this only when the instances genuinely differ; identical config isn't reuse.
 
 **`load()` paths are confined** (a `.star` can never read an arbitrary file):
 

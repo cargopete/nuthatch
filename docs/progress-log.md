@@ -2,6 +2,21 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-20 - Cleanup: retire `graph-network-nest` — one nest, not a clone.** The §5 dogfood proved
+  the Starlark composition mechanism, but on a bad exemplar: `graph-network-nest` indexed the *same three
+  contracts on the same chain* as `horizon-nest`, through the same views, producing byte-identical data —
+  it was one nest wearing two names (an intended full-network *superset* that never diverged), sharing
+  only its config while duplicating 10,430 lines of views/ABIs/schema/checks. Deleted the repo; **reverted
+  `horizon-nest` to `nuthatch.toml`** (the `lib.star`/`nest.star` factory existed only for the clone to
+  `load()`, and a static 3-contract config shouldn't use Starlark per our own guidance — kept
+  `semantic.toml` + views). Repointed every live reference to `horizon-nest`: the frontend (nests page
+  install example, roadmap, `llms.txt`×2), `docs/nest-catalogue.md` (the remaining network surface now
+  *extends* horizon, not a second nest), and a retirement note on RFC-0011. Rewrote the builder skill's
+  `load()` example to the honest case — *one logic across many chains* (Uniswap-v3 on N chains), with an
+  explicit "identical config isn't reuse; that's one nest" caveat. Composition is for instances that
+  genuinely differ; horizon/graph-network were a file and its copy. Frontend rebuilds clean, drift gate
+  green.
+
 - **2026-07-20 - Perf: `nuthatch bench query` — the read-path regression guard (#40 foundation).** The
   perf backlog's four "bigger than 0.4" refactors (bound the `/sql` hot-scan, a persistent DuckDB
   connection, single-scan the restart rebuild, a compact binary row format) are all **benchmark-gated** —

@@ -122,8 +122,10 @@ address), so the protocol is now a **stable, defined contract set on Arbitrum On
   budget, per RFC-0002 acceptance) and decode cleanly, but the value is in the **derived economic
   views**: effective delegation cut, realized APR, per-epoch fee/reward aggregation. This is the
   strongest possible governed-semantic-layer target ([RFC-0016](rfcs/0016-governed-semantic-layer-and-agent-grade-mcp.md)).
-- **Status:** partially shipped as `horizon-nest` (RFC-0002, live on Arbitrum); the remaining work is
-  finishing `graph-network-nest` (RFC-0011) — Indexer Directory, Curation, Epochs panels.
+- **Status:** shipped as `horizon-nest` (RFC-0002, live on Arbitrum) — staking, service, delegation.
+  The remaining network-subgraph surface (Indexer Directory, Curation, Epochs; the Lodestar migration,
+  RFC-0011) **extends `horizon-nest`** rather than forking a second nest — the earlier
+  `graph-network-nest` was a byte-identical clone and has been retired.
 
 ### 0.2 EBO — the Epoch Block Oracle
 - **Why:** posts the canonical per-epoch start block for every indexed chain, so all indexers close
@@ -150,8 +152,9 @@ address), so the protocol is now a **stable, defined contract set on Arbitrum On
   not a stable one yet. Matches RFC-0011's own open question.
 - **Complexity:** 🟠 **Medium–High**, and the most likely to move under you.
 
-**Tier-0 sequencing:** network subgraph first (largely shipped — finish `graph-network-nest`), EBO
-second (it justifies building the calldata decoder), QoS/REO third (let the on-chain shape settle).
+**Tier-0 sequencing:** network subgraph first (largely shipped as `horizon-nest`; extend it with the
+remaining surface), EBO second (it justifies building the calldata decoder), QoS/REO third (let the
+on-chain shape settle).
 Residual friction to be *deliberate* about, not accidental: positioning self-hosting-away-from-paid-
 queries with GraphOps — it's Lodestar-aligned and complementary, but it's the CLAUDE.md/Horizon
 tension, so frame it on purpose.
@@ -280,8 +283,8 @@ Real demand but narrower, more complex, or blocked on capabilities nuthatch hasn
   ship needing traces/state-diffs (deferred, RFC-0014) or churning-proxy introspection (backlog)
   until those land. When a candidate needs them, that's a Tier-3-or-later signal, not a "make it work
   somehow."
-- **This dovetails with the graph-network work.** RFC-0002 (Horizon nest) and RFC-0011 (graph-network
-  nest) already prove the "publish a real nest" path; this catalogue is the demand-ranked backlog of
+- **This dovetails with the Horizon nest work.** RFC-0002 (`horizon-nest`) and the Lodestar migration
+  (RFC-0011) already prove the "publish a real nest" path; this catalogue is the demand-ranked backlog of
   *which nests come next*.
 
 ---
