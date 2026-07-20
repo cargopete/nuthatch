@@ -2,6 +2,29 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-20 - RFC-0018 §2a: an optional Starlark (`nest.star`) config front-end — "a nest is a
+  function, not a fork."** A nest can now be authored as a `nest.star` that *computes* its config
+  (loop over a basket of addresses that share an ABI instead of copy-pasting `[[contracts]]` blocks)
+  as an opt-in alternative to `nuthatch.toml`. It is pure sugar: a `.star` and its equivalent `.toml`
+  deserialize to a **byte-identical `Config`**, because both funnel through the same serde derives —
+  so the win is authoring ergonomics, never new capability, and everything downstream (pack, mount,
+  semantic layer, views) neither knows nor cares which front-end produced the config. The **§4 gate
+  passed on all three axes** before a line of host code: `starlark` 0.14.2 is Apache-2.0 (one-way
+  compatible with the AGPL-3.0 core, not on the forbidden list, transitive tree all MIT/Apache/BSD);
+  binary-size delta **+4.56 MB** (72.6 → 77.1 MB release, +6.3%) for a full hermetic interpreter atop
+  a binary already carrying DuckDB+wasmtime+arrow — within tolerance; and it's teachable (builder-skill
+  `config-as-code.md`, drift-gate clean). The host (`src/starlark_config.rs`) exposes exactly **four
+  closed builtins** (`nest`/`contract`/`factory`/`template`) mapping 1:1 to the config structs;
+  `nest()` (called once) assembles a `serde_json::Value` and deserializes it to `Config`. Hermetic by
+  construction — no clock, randomness, network, or FS — so it's a *description*, not a program, runs
+  once at load, and never touches the deterministic data path (non-negotiable #4 untouched).
+  `Config::load` gains the precedence hook (`nest.star` present ⇒ use it, else TOML as before). The
+  acceptance bar is a round-trip test proving a loop-authored 2-contract nest equals its hand-written
+  TOML twin; 6 new tests, full suite green (188 lib + integration), drift gate green, clippy clean.
+  Next: §2b (restricted `load()` for composition, fork → instance) and §5 (dogfood on horizon-nest /
+  graph-network-nest).
+
+
 - **2026-07-19 - RFC-0018 §1b: `init` scaffolds the views layer + the builder skill teaches it.** The
   logic layer is now *discoverable the moment you `init`*, without moving the zero-authoring floor.
   `init` scaffolds `views/` with a commented, ready-to-uncomment starter view derived from the nest's

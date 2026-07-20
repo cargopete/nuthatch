@@ -38,6 +38,7 @@ pub mod serve;
 pub mod skill;
 pub mod source;
 pub mod sql_errors;
+pub mod starlark_config;
 pub mod store;
 pub mod transform;
 pub mod velocity;
