@@ -34,6 +34,23 @@ pub fn check(args: CheckArgs) -> Result<()> {
     }
 
     let mut failures = 0usize;
+
+    // RFC-0018 §1: authored views are validated as part of `check` — a broken view, or one that
+    // references a table/column the registry no longer has (**drift**), fails loudly with a
+    // fuzzy-matched fix hint instead of vanishing silently. This runs before the parity checks so a
+    // drifted view is caught even if it's the reason a parity check would fail.
+    if let Some(schema) = nest_schema(&dir) {
+        for issue in analytics::validate_nest_views(&dir, &schema) {
+            let hint = issue
+                .hint
+                .map(|h| format!("\n    hint: {h}"))
+                .unwrap_or_default();
+            let first = issue.error.lines().next().unwrap_or(&issue.error);
+            println!("✗ view {}: {first}{hint}", issue.file);
+            failures += 1;
+        }
+    }
+
     for (name, sql_path) in &checks {
         let sql = std::fs::read_to_string(sql_path)
             .with_context(|| format!("cannot read {}", sql_path.display()))?;
@@ -80,6 +97,14 @@ pub fn check(args: CheckArgs) -> Result<()> {
     }
     println!("✓ all {} check(s) passed", checks.len());
     Ok(())
+}
+
+/// The nest's decode-registry table schemas, for view drift-validation. `None` if the dir isn't a
+/// nest (no config) — view validation is then skipped, not fatal.
+fn nest_schema(dir: &Path) -> Option<Vec<crate::registry::TableSchema>> {
+    let cfg = crate::config::Config::load(dir).ok()?;
+    let reg = crate::registry::DecodeRegistry::from_nest(dir, &cfg).ok()?;
+    Some(reg.schema())
 }
 
 /// Every `checks/<name>.sql` (sorted), optionally filtered to names containing `filter`.

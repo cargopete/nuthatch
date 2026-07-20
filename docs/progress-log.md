@@ -2,6 +2,24 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-19 - RFC-0018 §1a: authored SQL views become a validated, drift-gated, described layer.**
+  `analytics::define_nest_views` already loaded `views/*.sql` into the hot∪cold `/sql` surface — but
+  silently: a broken view was swallowed to `debug!` and dropped, invisible to every describe-surface and
+  unchecked for drift (the exact "a broken thing is worse than an absent one" anti-pattern RFC-0016
+  fixed for semantics). This promotes the hidden hook to a first-class layer, entirely outside the
+  deterministic data path (views are read-only `CREATE VIEW`s, recomputed per query). New
+  `analytics::validate_nest_views` sets up the empty base surface and *binds* each view against the
+  schema — so a view referencing a renamed/absent table or column simply fails to bind, which means
+  **validation IS the drift gate** (no SQL parsing), each failure fuzzy-matched to a fix hint via the
+  RFC-0016 `sql_errors` path. Surfaced loudly now, not swallowed: `nuthatch check` **fails** on a
+  broken/drifted view, and `dev` startup **warns** with the hint — while the live query loader stays
+  fault-isolated (a bad view never disables its siblings). `semantic.toml` gains `[view.*]` sections
+  and the composed `/schema` (+ the MCP `schema` tool) now renders authored views, so an agent finally
+  *sees* `top_recipients` and what it means. Verified live: `nuthatch check` on a nest with a
+  `SELECT * FROM transfers` view prints `✗ view … hint: closest is c0__transfer` and fails. 182 lib
+  tests, clippy `-D warnings` clean. Next: §1b (`init` scaffolds `views/` + starter + semantic stub +
+  builder-skill `views.md`), then the Starlark front-end (§2, behind its licence/size gate).
+
 
 - **2026-07-19 - 0.5.x hardening 4/N: a `/ready` endpoint + a loud RPC-stall signal.** Unattended
   operation needs a supervisor to tell "up and healthy" from "up but stuck." `/health` stays plain
