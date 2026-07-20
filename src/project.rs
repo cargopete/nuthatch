@@ -112,6 +112,8 @@ pub async fn init(args: InitArgs) -> Result<()> {
     println!("    nuthatch.toml              config");
     println!("    abis/                      resolved ABIs");
     println!("    schema.json                decoded tables + columns");
+    println!("    semantic.toml              what the data means (edit freely)");
+    println!("    views/                     authored SQL derivations (a commented starter to uncomment)");
     println!("    llms.txt                   how an AI agent queries this index");
     println!("    .claude/skills/nuthatch/   Claude Code skill (offline, no phone-home)");
     println!();
@@ -234,6 +236,11 @@ fn write_nest_artifacts(dir: &Path, chain_name: &str, config: &Config) -> Result
     .context("failed to write schema.json")?;
     scaffold_ai_surface(dir, chain_name, &config.contracts, &schema)?;
 
+    // The logic layer (RFC-0018 §1): scaffold `views/` with a commented, ready-to-uncomment starter so
+    // the authored-derivations layer is *discoverable* the moment you `init` — the happy path is
+    // unchanged (a directory of comments; the commented starter is a no-op that validates clean).
+    scaffold_views(dir, &schema)?;
+
     // The governed semantic layer (RFC-0016): generate `semantic.toml` from the registry — ABI-seeded
     // descriptions + derived footguns. On `add`, merge onto the existing file so authored descriptions
     // survive while the footguns are refreshed (init has no existing file, so it just writes fresh).
@@ -245,6 +252,57 @@ fn write_nest_artifacts(dir: &Path, chain_name: &str, config: &Config) -> Result
     crate::semantic::save(dir, &sem)?;
 
     Ok(schema.len())
+}
+
+/// Scaffold the `views/` logic layer (RFC-0018 §1b) with a commented, ready-to-uncomment starter view
+/// derived from the nest's own first table, plus a README. Idempotent: if `views/` already exists (an
+/// `add` on a nest whose author already wrote views), it's left untouched. The starter is entirely
+/// comments, so it's a no-op for the query surface and validates clean until the author uncomments it.
+fn scaffold_views(dir: &Path, schema: &[crate::registry::TableSchema]) -> Result<()> {
+    let views = dir.join("views");
+    if views.exists() {
+        return Ok(()); // author already has a views/ — never clobber it
+    }
+    std::fs::create_dir_all(&views)
+        .with_context(|| format!("cannot create {}", views.display()))?;
+
+    std::fs::write(
+        views.join("README.md"),
+        "# views/ — this nest's authored logic (RFC-0018 §1)\n\n\
+         Drop `*.sql` files here, each a `CREATE VIEW …` over your nest's tables (the live tip ∪ sealed\n\
+         history, one surface — recomputed per query, never materialised). Query a view by name with\n\
+         `nuthatch sql` or the MCP `sql` tool. Files load in sorted filename order (`10-…`, `20-…`), so\n\
+         a later view can build on an earlier one. Describe what a view *means* in `semantic.toml` under\n\
+         `[view.<name>]` so an agent sees it. A broken/drifted view fails `nuthatch check` loudly.\n",
+    )
+    .context("failed to write views/README.md")?;
+
+    // The starter references this nest's real first table when there is one, so it's copy-paste-true.
+    let (table, alias) = schema
+        .first()
+        .map(|t| (t.table.as_str(), t.alias.as_str()))
+        .unwrap_or(("your__event", "your"));
+    let starter = format!(
+        "-- views/10-example.sql — an authored derivation this nest computes. Uncomment to enable.\n\
+         --\n\
+         -- Read-only SQL over your nest's tables (tip ∪ sealed history), recomputed per query. Query it\n\
+         -- by name via `nuthatch sql` or the MCP; describe it in semantic.toml `[view.<name>]`.\n\
+         --\n\
+         -- Footguns (see the builder skill's views.md):\n\
+         --   • reserved-word columns like \"from\"/\"to\" must be double-quoted\n\
+         --   • big-int columns are exact text — use the `<col>_dec` companion for SUM/AVG/compare\n\
+         --\n\
+         -- Example over this nest's `{table}` table:\n\
+         --\n\
+         -- CREATE VIEW {alias}_activity AS\n\
+         --   SELECT count(*) AS events,\n\
+         --          min(block_number) AS first_block,\n\
+         --          max(block_number) AS last_block\n\
+         --   FROM \"{table}\";\n"
+    );
+    std::fs::write(views.join("10-example.sql"), starter)
+        .context("failed to write views/10-example.sql")?;
+    Ok(())
 }
 
 /// Default aliases for `add`ed contracts: continue the `c<N>` sequence past the nest's existing
@@ -702,6 +760,41 @@ mod tests {
         assert!(add_aliases(&existing, &["WETH".into()], 1).is_err()); // invalid charset
         assert!(add_aliases(&existing, &["a".into()], 2).is_err()); // count mismatch
         assert!(add_aliases(&existing, &["x".into(), "x".into()], 2).is_err()); // dup in list
+    }
+
+    #[test]
+    fn scaffold_views_creates_a_commented_starter_and_never_clobbers() {
+        use crate::registry::{ColumnSchema, TableSchema};
+        let dir = tempfile::tempdir().unwrap();
+        let schema = vec![TableSchema {
+            table: "usdc__transfer".into(),
+            alias: "usdc".into(),
+            event: "Transfer".into(),
+            topic0: "0xddf2".into(),
+            columns: vec![ColumnSchema {
+                name: "value".into(),
+                sol_type: "uint256".into(),
+                storage: "word32".into(),
+                indexed: false,
+            }],
+        }];
+        scaffold_views(dir.path(), &schema).unwrap();
+        let starter = std::fs::read_to_string(dir.path().join("views/10-example.sql")).unwrap();
+        assert!(dir.path().join("views/README.md").exists());
+        // References the nest's real table, and every line is a comment (a no-op that validates clean).
+        assert!(starter.contains("usdc__transfer"));
+        assert!(starter
+            .lines()
+            .all(|l| l.trim().is_empty() || l.trim_start().starts_with("--")));
+
+        // Idempotent: a second call (e.g. `add` on a nest with authored views) never overwrites.
+        std::fs::write(dir.path().join("views/10-example.sql"), "-- author's edit").unwrap();
+        scaffold_views(dir.path(), &schema).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("views/10-example.sql")).unwrap(),
+            "-- author's edit",
+            "existing views/ is never clobbered"
+        );
     }
 
     #[test]

@@ -252,8 +252,21 @@ pub fn save(dir: &std::path::Path, sem: &Semantic) -> Result<()> {
                   # tool, the admin UI, and the scaffolded skill. Edit descriptions freely; the\n\
                   # `[table.*.footguns]` are DERIVED from the ABI and regenerated — leave them be.\n\n";
     let body = toml::to_string_pretty(sem).context("serialise semantic.toml")?;
-    std::fs::write(dir.join("semantic.toml"), format!("{header}{body}"))
-        .context("write semantic.toml")?;
+    // When no views are described yet, seed a commented `[view.*]` stub (RFC-0018 §1b) so an author who
+    // uncomments a `views/*.sql` knows where to say what it means. A comment can't be represented in the
+    // serde model, so it's appended as trailing text — inert until uncommented.
+    let view_stub = if sem.views.is_empty() {
+        "\n# Authored views (views/*.sql) are described here so the MCP/`/schema` can render them:\n\
+         # [view.your_view_name]\n\
+         # description = \"What this derivation computes.\"\n"
+    } else {
+        ""
+    };
+    std::fs::write(
+        dir.join("semantic.toml"),
+        format!("{header}{body}{view_stub}"),
+    )
+    .context("write semantic.toml")?;
     Ok(())
 }
 

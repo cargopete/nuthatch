@@ -25,6 +25,20 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   graph-network-nest).
 
 
+- **2026-07-19 - RFC-0018 §1b: `init` scaffolds the views layer + the builder skill teaches it.** The
+  logic layer is now *discoverable the moment you `init`*, without moving the zero-authoring floor.
+  `init` scaffolds `views/` with a commented, ready-to-uncomment starter view derived from the nest's
+  own first table (`count(*)` + block range) + a `views/README.md`; `semantic.toml` gains a commented
+  `[view.*]` stub so an author knows where to describe a view they enable. The starter is entirely
+  comments — a no-op that validates clean — so the happy path is unchanged. Scaffolding is idempotent
+  (`scaffold_views` never clobbers an existing `views/`, so `add` on a nest with authored views is
+  safe). New `skills/nuthatch-builder/views.md` (under the RFC-0017 drift gate) teaches authoring a
+  view, describing it in `semantic.toml`, and the three footguns (reserved-word `"from"`/`"to"`,
+  big-int `_dec`, hot∪cold recompute-per-query). Verified live: a fresh `init` produces `views/10-
+  example.sql` + `README.md`, the commented starter passes `nuthatch check`, and `semantic.toml`
+  carries the `[view.*]` stub. That completes RFC-0018 §1 (the alive layer). 183 lib tests, clippy
+  `-D warnings` clean. Next: §2 — the Starlark front-end, behind its licence/size gate.
+
 - **2026-07-19 - RFC-0018 §1a: authored SQL views become a validated, drift-gated, described layer.**
   `analytics::define_nest_views` already loaded `views/*.sql` into the hot∪cold `/sql` surface — but
   silently: a broken view was swallowed to `debug!` and dropped, invisible to every describe-surface and
