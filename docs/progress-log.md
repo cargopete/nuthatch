@@ -2,6 +2,28 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-20 - RFC-0018 §2b: `load()` composition — reuse a nest instead of forking it.** §2a made
+  config *computable*; §2b makes it *composable*, delivering the RFC's headline property in full: a
+  nest is a function, not a fork. A `nest.star` can now `load()` a factory function another nest
+  *defines* and instantiate it — turning `graph-network-nest` (today a byte-identical fork of
+  `horizon-nest`) into a one-line **instance** of it. The contract is **library-defines /
+  entry-instantiates**, chosen for its lack of magic: a reusable nest is a `.star` that defines a
+  factory and never self-instantiates; a thin entry `load()`s and calls it once. This falls out of the
+  host design rather than being bolted on — a `load()`ed module is evaluated **without** the collector,
+  so a stray top-level `nest()` in a library errors clearly, while the factory it defines calls
+  `nest()` only when the *entry* invokes it (back in the entry's collector-bearing evaluator). The
+  loader (`NestFileLoader`) is **confined** two ways: `load("lib.star", …)` relative to the nest dir,
+  and `load("//pkg:file.star", …)` under a catalogue root (`$NUTHATCH_CATALOGUE`, else the nest dir's
+  parent so sibling checkouts resolve with zero config) — `..` and any path escaping the root are
+  refused before a byte is read. `contract()`'s leading `alias`/`address`/`start_block` are now
+  positional-or-named so the RFC's `def erc20(...)` wrappers read naturally. Acceptance proof is a test
+  where `graph-network` loads horizon's shared factory and inherits its staking contract + adds one of
+  its own — no copy of horizon's config in sight; plus confinement + self-instantiation-rejection
+  tests. 10 starlark tests, full suite green (193 lib + integration), clippy clean, drift gate clean.
+  Builder skill `config-as-code.md` gains the composition section. Next: §5 — dogfood the real
+  `horizon-nest` / `graph-network-nest` repos (fork → instance) with their `checks/` parity harness.
+
+
 - **2026-07-20 - RFC-0018 §2a: an optional Starlark (`nest.star`) config front-end — "a nest is a
   function, not a fork."** A nest can now be authored as a `nest.star` that *computes* its config
   (loop over a basket of addresses that share an ABI instead of copy-pasting `[[contracts]]` blocks)
