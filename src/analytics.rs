@@ -702,22 +702,90 @@ fn json_to_duck(v: Option<&Value>, col: &str) -> DuckValue {
 /// skipped with a debug log rather than failing the whole query. Nest SQL is authored by the nest
 /// you chose to consume; it runs read-only in this ephemeral in-memory DuckDB, same trust as `/sql`.
 fn define_nest_views(conn: &Connection, dir: &Path) {
+    for v in nest_view_files(dir) {
+        if let Err(e) = conn.execute_batch(&v.sql) {
+            // Fault-isolated on the *live* query path: one bad view never takes down the others or the
+            // process. Silence ends elsewhere — `validate_nest_views` (RFC-0018 §1) is the loud gate,
+            // surfaced at `dev` startup and by `nuthatch check`. Here we only need to not crash.
+            tracing::debug!("nest view {} skipped: {e}", v.file);
+        }
+    }
+}
+
+/// One authored view file: its basename (`10-recipients.sql`) and SQL, in load order.
+pub struct NestViewFile {
+    pub file: String,
+    pub sql: String,
+}
+
+/// Read `{dir}/views/*.sql` in sorted filename order — so `10-foo.sql` builds on nothing and
+/// `20-bar.sql` can build on foo. Empty when there is no `views/` dir. The one reader both the live
+/// loader and the validation gate use, so they never disagree about what a nest's views are.
+pub fn nest_view_files(dir: &Path) -> Vec<NestViewFile> {
     let Ok(entries) = std::fs::read_dir(dir.join("views")) else {
-        return; // no views/ dir — nothing to load
+        return Vec::new();
     };
-    let mut files: Vec<PathBuf> = entries
+    let mut paths: Vec<PathBuf> = entries
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "sql"))
         .collect();
-    files.sort();
-    for f in files {
-        let Ok(sql) = std::fs::read_to_string(&f) else {
-            continue;
-        };
-        if let Err(e) = conn.execute_batch(&sql) {
-            tracing::debug!("nest view {} skipped: {e}", f.display());
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|p| {
+            let sql = std::fs::read_to_string(&p).ok()?;
+            let file = p.file_name()?.to_string_lossy().into_owned();
+            Some(NestViewFile { file, sql })
+        })
+        .collect()
+}
+
+/// A view that failed to load — RFC-0018 §1 turns the old silent skip into a first-class, teachable
+/// signal.
+#[derive(Debug, Clone)]
+pub struct ViewIssue {
+    pub file: String,
+    /// The raw engine error (path-free — it's a bind, no segment paths).
+    pub error: String,
+    /// A fuzzy-matched fix hint (RFC-0016 errors-as-prompts), when the failure is a known class — a
+    /// renamed/absent table or column (drift), a reserved word, or a big-int arithmetic slip.
+    pub hint: Option<String>,
+}
+
+/// Validate a nest's authored views (RFC-0018 §1, the loud gate). Sets up the base surface — empty
+/// typed per-event views + labels + children, from the nest's own `schema.json`; no data needed, we're
+/// *binding*, not running — then defines each view in load order and records any that fail. A failure
+/// is either a syntax error or a reference to a table/column the registry no longer has (**drift**);
+/// both come back with a fuzzy-matched fix hint. Loading for real queries stays fault-isolated in
+/// `define_nest_views`; this is the separate, surfaced check for `dev` startup and `nuthatch check`.
+pub fn validate_nest_views(dir: &Path, schema: &[crate::registry::TableSchema]) -> Vec<ViewIssue> {
+    let files = nest_view_files(dir);
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let Ok(conn) = Connection::open_in_memory() else {
+        return Vec::new();
+    };
+    // Base surface the views bind against. `u64::MAX` includes every sealed segment (or, on a fresh
+    // nest, yields the empty typed views) so a view referencing `usdc__transfer` resolves.
+    let empty_hot = HotRows::new();
+    let _ = define_views(&conn, dir, &empty_hot, u64::MAX);
+    define_labels_view(&conn, dir);
+    define_children_views(&conn, dir);
+
+    let mut issues = Vec::new();
+    for v in &files {
+        if let Err(e) = conn.execute_batch(&v.sql) {
+            let error = format!("{e}");
+            let hint = crate::sql_errors::enrich(&error, &v.sql, schema);
+            issues.push(ViewIssue {
+                file: v.file.clone(),
+                error,
+                hint,
+            });
         }
     }
+    issues
 }
 
 /// (table, [(column, storage)]) for every declared table, from the nest's `schema.json`. Empty if
@@ -1408,6 +1476,45 @@ template="pool"
         .unwrap();
         let again = query(dir.path(), "SELECT n FROM recipients WHERE addr = '0xb'").unwrap();
         assert_eq!(again[0]["n"], Value::from(2u64));
+    }
+
+    /// RFC-0018 §1: `validate_nest_views` flags a broken/drifted view (with a fuzzy-matched hint) and
+    /// leaves a valid one alone — the loud gate the old silent-skip loader never had.
+    #[test]
+    fn validate_nest_views_flags_the_broken_one_with_a_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let entities = vec![
+            r#"{"table":"usdc__transfer","from":"0xa","to":"0xb","value":"5","block_number":10,"tx_hash":"0xt","log_index":0}"#.to_string(),
+        ];
+        crate::seal::seal_range(dir.path(), &entities, 10, 10).unwrap();
+        std::fs::create_dir_all(dir.path().join("views")).unwrap();
+        std::fs::write(
+            dir.path().join("views/10-good.sql"),
+            r#"CREATE VIEW good AS SELECT "to" AS addr FROM "usdc__transfer";"#,
+        )
+        .unwrap();
+        // References `transfers` — the classic drop-the-prefix drift the registry no longer has.
+        std::fs::write(
+            dir.path().join("views/20-broken.sql"),
+            "CREATE VIEW broken AS SELECT * FROM transfers;",
+        )
+        .unwrap();
+
+        let schema = vec![crate::registry::TableSchema {
+            table: "usdc__transfer".into(),
+            alias: "usdc".into(),
+            event: "Transfer".into(),
+            topic0: "0xddf2".into(),
+            columns: vec![],
+        }];
+        let issues = validate_nest_views(dir.path(), &schema);
+        assert_eq!(issues.len(), 1, "only the broken view is flagged");
+        assert_eq!(issues[0].file, "20-broken.sql");
+        let hint = issues[0].hint.as_ref().expect("a fix hint");
+        assert!(
+            hint.contains("usdc__transfer"),
+            "fuzzy-suggests the real table: {hint}"
+        );
     }
 
     /// RFC-0001 acceptance: `/sql` can JOIN across two per-event tables.

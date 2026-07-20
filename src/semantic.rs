@@ -34,6 +34,11 @@ pub struct Semantic {
     /// the generated file and the composed doc are deterministic (Tier-A goldenable).
     #[serde(default, rename = "table")]
     pub tables: BTreeMap<String, TableSemantic>,
+    /// Per-authored-view meaning, keyed by view name (RFC-0018 §1) — the derivations the nest exists to
+    /// answer. Rendered into `/schema`/the MCP exactly like tables, so an agent *sees* `top_recipients`
+    /// and what it means rather than rediscovering it.
+    #[serde(default, rename = "view")]
+    pub views: BTreeMap<String, ViewSemantic>,
 }
 
 fn one() -> u32 {
@@ -42,6 +47,14 @@ fn one() -> u32 {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NestSemantic {
+    #[serde(default)]
+    pub description: String,
+}
+
+/// What one authored SQL view (`views/*.sql`) computes (RFC-0018 §1). The view's *shape* (columns) is
+/// introspected from DuckDB at query time — the author only has to say what it *means*.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ViewSemantic {
     #[serde(default)]
     pub description: String,
 }
@@ -181,6 +194,9 @@ pub fn generate(schema: &[TableSchema], nest_name: &str, chain: &str) -> Semanti
             description: format!("The `{nest_name}` nest on {chain}. {SEEDED}"),
         },
         tables,
+        // Authored views are seeded per-scaffolded-view by `init` (RFC-0018 §1b), not generated from
+        // the registry — the registry has no views.
+        views: BTreeMap::new(),
     }
 }
 
@@ -350,6 +366,25 @@ pub fn compose(
             ));
         }
     }
+
+    // Authored views (RFC-0018 §1): the derivations the nest exists to answer, queryable by name over
+    // the same hot∪cold surface. Rendered from `semantic.toml` `[view.*]` so an agent sees them.
+    if let Some(s) = sem {
+        if !s.views.is_empty() {
+            out.push_str(
+                "\nAUTHORED VIEWS (derived — query by name, recomputed per query over hot∪cold)\n",
+            );
+            for (name, v) in &s.views {
+                let desc = if v.description.is_empty() {
+                    "(an authored SQL view — describe it in semantic.toml `[view.…]`)"
+                } else {
+                    &v.description
+                };
+                out.push_str(&format!("  {name} — {desc}\n"));
+            }
+        }
+    }
+
     out.push_str(GENERAL_GUIDANCE);
     out
 }
@@ -461,6 +496,23 @@ mod tests {
         let text = toml::to_string_pretty(&sem).unwrap();
         let back: Semantic = toml::from_str(&text).unwrap();
         assert_eq!(back.tables["usdc__transfer"].footguns, fg);
+    }
+
+    #[test]
+    fn compose_renders_authored_views() {
+        // RFC-0018 §1: an authored view described in semantic.toml appears in the composed /schema so
+        // an agent can see and query it by name.
+        let schema = [transfer_table()];
+        let mut sem = Semantic::default();
+        sem.views.insert(
+            "top_recipients".into(),
+            ViewSemantic {
+                description: "The addresses that received the most transfers.".into(),
+            },
+        );
+        let doc = compose(&schema, Some(&sem), None);
+        assert!(doc.contains("AUTHORED VIEWS"));
+        assert!(doc.contains("top_recipients — The addresses that received the most transfers."));
     }
 
     #[test]

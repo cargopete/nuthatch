@@ -589,6 +589,15 @@ async fn build_nest(
             tracing::warn!("semantic.toml drift: {w}");
         }
     }
+    // Authored views (RFC-0018 §1): a broken/drifted view no longer vanishes silently — it's a loud
+    // startup warning (with a fuzzy-matched fix hint), and a `nuthatch check` failure. The view still
+    // loads fault-isolated (a bad one never disables its siblings or the query surface).
+    for issue in crate::analytics::validate_nest_views(&dir, &registry.schema()) {
+        match &issue.hint {
+            Some(h) => tracing::warn!("view {} failed to load: {} — {h}", issue.file, issue.error),
+            None => tracing::warn!("view {} failed to load: {}", issue.file, issue.error),
+        }
+    }
 
     // A nest that vendors deployment blocks backfills from the earliest one (full history from
     // deployment); otherwise a cold start falls back to the `--backfill` tip offset.
