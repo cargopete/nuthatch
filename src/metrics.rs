@@ -5,10 +5,48 @@
 //! (tip, watermark, RSS) are set to the latest value; counters (rows, queries) only ever increase.
 //! Nothing here phones home: metrics are exposed on the same local API and scraped by the operator.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
 
 /// The one process-wide metrics registry. `const`-constructed, so it needs no lazy init.
 pub static METRICS: Metrics = Metrics::new();
+
+/// Per-nest counterparts of the nest-scoped signals (SEC-9). In a roost the process-global gauges and
+/// counters blend every mounted nest into one number; these let an operator see each nest's own
+/// progress under a `{nest="…"}` label. Updating a per-nest value also bumps the matching global
+/// aggregate, so the existing unlabelled series stay correct and backward-compatible.
+#[derive(Default)]
+pub struct NestMetrics {
+    last_block: AtomicU64,
+    sealed_through: AtomicU64,
+    rows_decoded: AtomicU64,
+    rows_sealed: AtomicU64,
+    reorgs: AtomicU64,
+}
+
+impl NestMetrics {
+    pub fn set_last_block(&self, v: u64) {
+        self.last_block.store(v, Relaxed);
+        METRICS.set_last_block(v);
+    }
+    pub fn set_sealed_through(&self, v: u64) {
+        self.sealed_through.store(v, Relaxed);
+        METRICS.set_sealed_through(v);
+    }
+    pub fn add_rows_decoded(&self, n: u64) {
+        self.rows_decoded.fetch_add(n, Relaxed);
+        METRICS.add_rows_decoded(n);
+    }
+    pub fn add_rows_sealed(&self, n: u64) {
+        self.rows_sealed.fetch_add(n, Relaxed);
+        METRICS.add_rows_sealed(n);
+    }
+    pub fn inc_reorgs(&self) {
+        self.reorgs.fetch_add(1, Relaxed);
+        METRICS.inc_reorgs();
+    }
+}
 
 pub struct Metrics {
     // Ingestion — the "is it keeping up?" signals an operator alerts on.
@@ -28,6 +66,9 @@ pub struct Metrics {
     sql_queries: AtomicU64,
     sql_rejections: AtomicU64,
     rpc_requests: AtomicU64,
+    /// Per-nest handles, keyed by nest name (SEC-9). `BTreeMap` so `/metrics` renders in a stable
+    /// order. Populated once per nest at build; a solo `dev` has a single entry.
+    per_nest: Mutex<BTreeMap<String, Arc<NestMetrics>>>,
 }
 
 impl Metrics {
@@ -45,7 +86,20 @@ impl Metrics {
             sql_queries: AtomicU64::new(0),
             sql_rejections: AtomicU64::new(0),
             rpc_requests: AtomicU64::new(0),
+            per_nest: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Get (or create) the per-nest metrics handle for `name`. Called once per nest at build; the
+    /// returned handle is cheap to clone and its updates also feed the process-global aggregates.
+    pub fn nest(&self, name: &str) -> Arc<NestMetrics> {
+        let mut map = self.per_nest.lock().unwrap();
+        if let Some(h) = map.get(name) {
+            return h.clone();
+        }
+        let h = Arc::new(NestMetrics::default());
+        map.insert(name.to_string(), h.clone());
+        h
     }
 
     pub fn set_tip(&self, v: u64) {
@@ -187,6 +241,50 @@ impl Metrics {
             "Outbound JSON-RPC requests issued (incl. failover retries).",
             self.rpc_requests.load(Relaxed),
         ));
+
+        // Per-nest series (SEC-9): in a roost, one `{nest="…"}`-labelled line per mounted nest, so the
+        // blended aggregates above can be broken down by nest. Distinct `_nest_` metric names keep the
+        // exposition unambiguous (a name is never both labelled and unlabelled).
+        let per = self.per_nest.lock().unwrap();
+        if !per.is_empty() {
+            let mut labelled =
+                |name: &str, help: &str, typ: &str, get: &dyn Fn(&NestMetrics) -> u64| {
+                    s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {typ}\n"));
+                    for (nest, m) in per.iter() {
+                        s.push_str(&format!("{name}{{nest=\"{nest}\"}} {}\n", get(m)));
+                    }
+                };
+            labelled(
+                "nuthatch_nest_last_block",
+                "Highest block committed, per nest.",
+                "gauge",
+                &|m| m.last_block.load(Relaxed),
+            );
+            labelled(
+                "nuthatch_nest_sealed_through",
+                "Highest block sealed to the cold layer, per nest.",
+                "gauge",
+                &|m| m.sealed_through.load(Relaxed),
+            );
+            labelled(
+                "nuthatch_nest_rows_decoded_total",
+                "Rows decoded since start, per nest.",
+                "counter",
+                &|m| m.rows_decoded.load(Relaxed),
+            );
+            labelled(
+                "nuthatch_nest_rows_sealed_total",
+                "Rows sealed to Parquet since start, per nest.",
+                "counter",
+                &|m| m.rows_sealed.load(Relaxed),
+            );
+            labelled(
+                "nuthatch_nest_reorgs_total",
+                "Reorgs detected and rolled back since start, per nest.",
+                "counter",
+                &|m| m.reorgs.load(Relaxed),
+            );
+        }
         s
     }
 }
@@ -244,6 +342,32 @@ mod tests {
         assert!(out.contains("nuthatch_rows_decoded_total 5"));
         assert!(out.contains("nuthatch_sql_queries_total 1"));
         assert!(out.contains("nuthatch_sql_rejections_total 1"));
+    }
+
+    #[test]
+    fn per_nest_series_are_labelled() {
+        let m = Metrics::new();
+        let horizon = m.nest("horizon");
+        let graph = m.nest("graph-network");
+        horizon.set_last_block(500);
+        horizon.add_rows_decoded(10);
+        graph.set_last_block(400);
+        graph.inc_reorgs();
+        let out = m.render();
+        // One labelled series per nest, distinct from the blended aggregates.
+        assert!(out.contains("# TYPE nuthatch_nest_last_block gauge"));
+        assert!(out.contains("nuthatch_nest_last_block{nest=\"horizon\"} 500"));
+        assert!(out.contains("nuthatch_nest_last_block{nest=\"graph-network\"} 400"));
+        assert!(out.contains("nuthatch_nest_rows_decoded_total{nest=\"horizon\"} 10"));
+        assert!(out.contains("nuthatch_nest_reorgs_total{nest=\"graph-network\"} 1"));
+        // A per-nest update also feeds the process-global aggregate (backward-compatible).
+        assert_eq!(horizon.last_block.load(Relaxed), 500);
+    }
+
+    #[test]
+    fn no_nests_means_no_per_nest_block() {
+        // A fresh registry with no nests registered renders only the aggregates — no labelled series.
+        assert!(!Metrics::new().render().contains("nuthatch_nest_last_block"));
     }
 
     #[test]

@@ -2,6 +2,29 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+<<<<<<< Updated upstream
+=======
+- **2026-07-20 - Observability: per-nest labelled `/metrics` series (SEC-9).** In a roost, the ingestion
+  gauges and counters (`last_block`, `sealed_through`, `rows_decoded/sealed`, `reorgs`) were the process
+  global — every mounted nest blended into one number, so an operator couldn't tell which nest was lagging
+  or churning. Added a `NestMetrics` handle per nest (keyed by name, stored in a `const`-friendly
+  `Mutex<BTreeMap>` on the existing hand-rolled registry — no metrics-framework dependency), threaded
+  through `NestIngest`. A per-nest update *also* bumps the matching process-global aggregate, so the
+  existing unlabelled series stay correct and backward-compatible; `/metrics` now additionally renders
+  `nuthatch_nest_*{nest="…"}` lines, one per mounted nest, in stable (BTreeMap) order. A solo `dev`
+  renders a single labelled entry; a registry with no nests omits the block entirely. 2 new tests; full
+  suite green, clippy clean. `set_tip`/RPC stay global (a roost shares one cursor and one fetch).
+
+- **2026-07-20 - Security: bump wasmtime 44 → 46, clearing RUSTSEC-2026-0188 (no longer suppressed).**
+  The transform/screen runtime ran on wasmtime 44, whose `wasmtime-wasi` carried RUSTSEC-2026-0188 (a
+  FilePerms bypass on WASI hard links/renames) — reachable only if an operator granted filesystem-write
+  to an untrusted component, but a known-issue we were carrying as an `ignore` in `deny.toml`. Bumped both
+  `wasmtime` and `wasmtime-wasi` to **46.0.1** (the latest major); the component-model API was stable
+  across the bump, so **zero code changes** were needed in `transform.rs` / `screen.rs` / `effectful.rs`.
+  Removed the `RUSTSEC-2026-0188` ignore entirely — it's *fixed*, not suppressed. WASM runtime tests
+  (transform + screen) green, full suite green. One fewer known-issue on the books.
+
+>>>>>>> Stashed changes
 - **2026-07-20 - Hardening: seal-direct backfill retries a transient RPC failure instead of aborting.**
   The §5 dogfood surfaced it live: a single `--seal-direct` window that hit a 403 from one endpoint (while
   the others throttled under concurrency) aborted the *entire* backfill. A per-attempt fetch already fails

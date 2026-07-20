@@ -642,6 +642,7 @@ async fn build_nest(
         factory: factory.clone(),
         children: ChildRegistry::new(),
         finality,
+        metrics: METRICS.nest(&config.nest.name),
         addresses,
         topic0s,
         start_block,
@@ -1137,6 +1138,9 @@ struct NestIngest {
     factory: Option<Arc<FactorySet>>,
     children: ChildRegistry,
     finality: Finality,
+    /// Per-nest metrics handle (SEC-9): nest-scoped updates go here, which also feed the process-global
+    /// aggregates. In a roost each nest gets its own, keyed by name.
+    metrics: Arc<crate::metrics::NestMetrics>,
     addresses: Vec<String>,
     topic0s: Vec<String>,
     /// The nest's earliest vendored deployment block (the min of the contracts' `start_block`s), or
@@ -1449,8 +1453,8 @@ impl NestIngest {
 
         let removed = self.store.rollback_to(ancestor)?;
         self.store.set_meta(LAST_BLOCK_KEY, &ancestor.to_string())?;
-        METRICS.inc_reorgs();
-        METRICS.set_last_block(ancestor);
+        self.metrics.inc_reorgs();
+        self.metrics.set_last_block(ancestor);
         tracing::warn!(
             "reorg detected: rolled back to block {ancestor} (removed {removed} entities)"
         );
@@ -1600,8 +1604,8 @@ impl NestIngest {
             checkpoint.as_ref().map(|(b, h)| (*b, h.as_str())),
             to,
         )?;
-        METRICS.set_last_block(to);
-        METRICS.add_rows_decoded(stored as u64);
+        self.metrics.set_last_block(to);
+        self.metrics.add_rows_decoded(stored as u64);
         if stored > 0 {
             // Per-window detail is debug: the live progress line (RFC-0015 slice 3) is the
             // user-facing narrative during catch-up, and this fires once per window — pure spam at
@@ -1628,6 +1632,7 @@ impl NestIngest {
             &self.store,
             finalized_through,
             snapshot.as_deref(),
+            &self.metrics,
         ) {
             tracing::warn!("sealing failed: {e:#}");
         }
@@ -1846,6 +1851,7 @@ fn maybe_seal(
     store: &Store,
     finalized_through: u64,
     registry_snapshot: Option<&str>,
+    metrics: &crate::metrics::NestMetrics,
 ) -> Result<()> {
     if finalized_through == 0 {
         return Ok(());
@@ -1883,8 +1889,8 @@ fn maybe_seal(
                 SEALED_THROUGH_KEY,
                 &ceiling.to_string(),
             )?;
-            METRICS.set_sealed_through(ceiling);
-            METRICS.add_rows_sealed(summary.rows as u64);
+            metrics.set_sealed_through(ceiling);
+            metrics.add_rows_sealed(summary.rows as u64);
             // Debug, not info: over a from-history backfill nearly every window seals, so this is
             // per-window spam. The sealed watermark is in `/metrics` (SEALED_THROUGH) for observability.
             tracing::debug!(
@@ -1896,7 +1902,7 @@ fn maybe_seal(
         None => {
             // Finalized range with no transfers — just advance the watermark.
             store.set_meta(SEALED_THROUGH_KEY, &ceiling.to_string())?;
-            METRICS.set_sealed_through(ceiling);
+            metrics.set_sealed_through(ceiling);
             tracing::debug!(
                 "blocks {from}..={ceiling} finalized with no transfers; watermark advanced"
             );
