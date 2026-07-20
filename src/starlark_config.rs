@@ -107,7 +107,10 @@ struct NestFileLoader<'a> {
 
 impl<'a> NestFileLoader<'a> {
     fn new(globals: &'a Globals, dir: &Path) -> Result<Self> {
-        let nest_dir = dir.to_path_buf();
+        // Canonicalize first: a relative `--dir graph-network-nest` has an empty `.parent()`, which
+        // would leave the catalogue root blank and break every `//pkg:file` load. Absolutise so the
+        // parent is always a real directory.
+        let nest_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         let catalogue_root = match std::env::var_os(CATALOGUE_ENV) {
             Some(v) => PathBuf::from(v),
             None => nest_dir
@@ -557,6 +560,22 @@ nest(name = "entry", chain = "mainnet", rpc_urls = ["u"])
             .unwrap_err()
             .to_string();
         assert!(err.contains("outside the nest.star host"), "got: {err}");
+    }
+
+    /// Regression: a bare relative `--dir graph-network` has an *empty* `Path::parent()`, which used
+    /// to leave the catalogue root blank and break every `//pkg:file` load. `NestFileLoader::new`
+    /// canonicalizes first, so even a single-component relative dir yields a real, absolute catalogue
+    /// root. (`src` exists relative to the crate root where tests run — a single relative component.)
+    #[test]
+    fn relative_nest_dir_gets_a_real_catalogue_root() {
+        let globals = GlobalsBuilder::standard().with(nest_builtins).build();
+        let loader = NestFileLoader::new(&globals, Path::new("src")).unwrap();
+        assert!(
+            loader.catalogue_root.is_absolute(),
+            "catalogue root must be absolute, got {:?}",
+            loader.catalogue_root
+        );
+        assert!(loader.catalogue_root.parent().is_some());
     }
 
     /// `..` traversal and absolute escapes are refused before any file is read.

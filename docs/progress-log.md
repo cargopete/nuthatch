@@ -2,6 +2,22 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-20 - RFC-0018 §5: dogfooded on the real horizon-nest / graph-network-nest — fork → instance,
+  proven byte-identical; plus the bug it caught.** The RFC's acceptance case was a measured, byte-identical
+  fork: `graph-network-nest` differed from `horizon-nest` by exactly one line (`name =`). Made it real:
+  horizon gained the §1 brain (a `semantic.toml` describing all 12 authored views + the key event tables)
+  and was reauthored as Starlark (`lib.star` defining a `graph_horizon(name, ...)` factory + a thin
+  `nest.star` entry); graph-network became a **6-line `load()`-based instance** of it (−29 lines of
+  duplicated `nuthatch.toml`, +6 of `nest.star`). Parity proven at three levels: **config** (a resolved
+  `graph-network` Config is byte-identical to horizon's original TOML, modulo name), **counts** (a
+  bounded Arbitrum backfill of both, then a per-table row-count digest over a pinned finalized range —
+  identical across all 21 non-empty event tables), and **content** (md5 of the ordered reward-row content
+  matched: `3bb7965d…`, 613 rows, 9 indexers on both). Pointing the feature at the exact repos it was built
+  for immediately caught a real bug: `NestFileLoader` computed the catalogue root as `nest_dir.parent()`,
+  which is empty for a relative `--dir graph-network-nest`, breaking every `//pkg:file` load — fixed by
+  canonicalizing the nest dir first (+ regression test). This is the whole thesis demonstrated end to end:
+  one reusable, semantically-described unit; its instances share the logic instead of forking it.
+
 - **2026-07-20 - RFC-0018 §2b: `load()` composition — reuse a nest instead of forking it.** §2a made
   config *computable*; §2b makes it *composable*, delivering the RFC's headline property in full: a
   nest is a function, not a fork. A `nest.star` can now `load()` a factory function another nest
