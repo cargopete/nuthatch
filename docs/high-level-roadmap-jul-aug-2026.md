@@ -46,6 +46,20 @@ From conversations, lightly de-duplicated:
 
 ---
 
+## Execution context — who builds, who runs
+
+- **We build and validate on modest kit:** the MacBook (primary), a couple of VPSes, and (via
+  Tailscale) the ThinkPad — `ssh pepe@pepe-thinkpad.tailb0627.ts.net`. Everything here must be buildable
+  and integration-testable there: embedded on one machine, or the distributed stack under docker-compose
+  on a VPS or two.
+- **GraphOps runs it at scale.** When the work lands, Chris / GraphOps runs it on GraphOps infra. We do
+  **not** self-provision a production fleet or archive nodes.
+- **Consequence for sequencing:** "infra-gated" in this doc means **dependency-gated** (an RFC waiting on
+  another RFC's substrate), **not hardware-gated**. The distributed mode (0022) is a compose stack we
+  exercise on a VPS — not blocked on hardware to exist. The only genuinely hardware-heavy pieces (a
+  synced archive node for 0003/0014; 0023's tier-3 eth_call fallback source) are GraphOps-infra concerns
+  to hand off, never blockers we self-host.
+
 ## Notes → thread coverage map
 
 Every raw note, mapped to where it's handled — so nothing is orphaned. (Reconciled 2026-07-21.)
@@ -307,7 +321,7 @@ cost, not part of the definition.
 | **0019** | Nest registry & distribution — publish/pull, private nests, S3-backed bundle store, registry-auth | 0012 | ✅ clean |
 | **0020** | Nest lifecycle & the N-1 upgrade — compat/breaking, schema-diff, segment reuse, endpoint aliasing | 0012, 0018 §1, 0019 | ✅ clean, high value |
 | **0021** | Multichain roost (Decision A) — one runtime, N per-chain cursors, per-cursor budget & isolation | 0012, 0009 | ✅ settled (embedded; buildable now) |
-| **0022** | Distributed scaled mode (Decision B) — read/write plane split, writer pool, query-FE tier, control-plane DB, nest resolution, runtime-secret injection | 0013, 0019, 0021 | ✅ settled scope; infra-heavy |
+| **0022** | Distributed scaled mode (Decision B) — read/write plane split, writer pool, query-FE tier, control-plane DB, nest resolution, runtime-secret injection | 0013, 0019, 0021 | ✅ settled scope; **dependency-gated** (0013-scaled + 0021), distributed compose build — not hardware-gated |
 | **0023** | Contract state (eth_call) — derive-first view recipes + metadata cache (tiers 1+2); pinned-block fallback + hosted verifiable cache designed (tiers 3+4) | 0018 §1, 0001, 0019; adj. 0003/0014 | ✅ settled (tiers 1+2 buildable; executor = note vs 0014) |
 
 _Note: split the old 0021 into **0021 (multichain roost, embedded)** and **0022 (distributed scaled

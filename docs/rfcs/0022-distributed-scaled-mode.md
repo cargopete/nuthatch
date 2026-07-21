@@ -11,7 +11,10 @@
 - Blocks: an operator like **GraphOps running nuthatch directly at fleet scale**, without building a
   bespoke platform layer on top.
 - Nature: design RFC. **Design now, build later** — the design is committable today; the *build* is
-  infra-heavy (external hot store, multiple machines) and follows RFC-0013's scaled-side and RFC-0021.
+  **dependency-gated** (RFC-0013's scaled-side external hot store + DataFusion federation, and
+  RFC-0021's per-chain cursor), **not hardware-gated**. It's a distributed multi-service stack we
+  build and integration-test under docker-compose on the MacBook/VPSes; **GraphOps runs it at scale**
+  (see the roadmap's Execution-context note). Never blocked on a node to exist.
 - Origin: roadmap thread 2, Decision B (`docs/high-level-roadmap-jul-aug-2026.md`), authorized
   2026-07-21.
 
