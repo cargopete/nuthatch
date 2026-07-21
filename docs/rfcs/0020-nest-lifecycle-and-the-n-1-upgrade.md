@@ -4,8 +4,12 @@
   **slice 2a** (atomic serving-swap mechanism), **slice 2b** — the full compatible hot-upgrade:
   `await_catchup_and_flip` (concurrent re-index + atomic flip, proven e2e) **and** the `nest upgrade`
   CLI wrapping the flow (classify → refuse breaking → serve old + index new concurrently → flip → retire
-  old, with C1 fate-sharing). Pending: **3** (breaking → new endpoint + deprecation), **4** (segment
-  reuse — the true no-re-index optimization).
+  old, with C1 fate-sharing), and **slice 3** — the breaking path: `nest upgrade` on a breaking update
+  serves both versions on distinct endpoints (old at root, `Deprecation`-headered + `Link` to successor;
+  new under `/next`), run concurrently, no flip, so downstream migrate on their clock before the old is
+  sunset. **The N-1 problem is functionally solved** — every update, compatible or breaking, is painless.
+  Pending: **slice 4** (segment reuse — the no-*re-index* optimization, so a compatible update reuses
+  sealed content-addressed segments instead of re-indexing).
 - Author: Pete (cargopete)
 - Date: 2026-07-21
 - Depends on: RFC-0012 (a nest version *is* a content-addressed bundle), RFC-0019 (the registry that

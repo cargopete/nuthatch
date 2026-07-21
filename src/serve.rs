@@ -146,6 +146,46 @@ pub async fn run_shared(listen: &str, shared: SharedNest) -> Result<()> {
     bind_and_serve(listen, router(shared)).await
 }
 
+/// Serve **two versions** of a nest on distinct endpoints behind one listener (RFC-0020 slice 3, the
+/// breaking path). The OLD version stays at its existing **root** path — unchanged, so current
+/// consumers keep working — but every response now carries a `Deprecation: true` header and a `Link`
+/// to its successor; the NEW version is served under `new_prefix` (e.g. `/next`). Both index
+/// concurrently and neither flips: downstream migrate from the old endpoint to the new on their own
+/// clock, then the operator sunsets the old. The deprecation signal is standards-shaped (RFC 8594).
+pub async fn run_two_versions(
+    listen: &str,
+    old: SharedNest,
+    new_prefix: &str,
+    new: SharedNest,
+) -> Result<()> {
+    bind_and_serve(listen, two_version_router(old, new_prefix, new)).await
+}
+
+/// The two-version app (RFC-0020 slice 3): old at the root, wrapped in a `Deprecation`/`Link` layer;
+/// new nested under `new_prefix`. Split out of [`run_two_versions`] so it's testable over HTTP.
+pub fn two_version_router(old: SharedNest, new_prefix: &str, new: SharedNest) -> Router {
+    let successor = format!("{new_prefix}/");
+    let deprecate = axum::middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let successor = successor.clone();
+            async move {
+                let mut resp = next.run(req).await;
+                let headers = resp.headers_mut();
+                headers.insert("deprecation", axum::http::HeaderValue::from_static("true"));
+                if let Ok(link) = axum::http::HeaderValue::from_str(&format!(
+                    "<{successor}>; rel=\"successor-version\""
+                )) {
+                    headers.insert("link", link);
+                }
+                resp
+            }
+        },
+    );
+    Router::new()
+        .nest(new_prefix, router(new))
+        .merge(router(old).layer(deprecate))
+}
+
 /// Serve many nests behind one listener (RFC-0012 roost, slice 1): a `/nests` roster plus every nest's
 /// full API under its `/<name>/…` prefix. Chain identity and the cursor are still per-nest at this
 /// slice (the shared cursor is slice 2); this lands the routing + per-nest isolation of the serving

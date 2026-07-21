@@ -93,6 +93,7 @@ async fn main() -> Result<()> {
                     std::path::PathBuf::from(&a.dir),
                     std::path::PathBuf::from(&a.to),
                     a.listen,
+                    a.new_endpoint,
                     a.rpc,
                     a.seal_direct,
                     a.concurrency,

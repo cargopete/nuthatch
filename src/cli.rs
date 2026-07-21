@@ -207,9 +207,15 @@ pub struct NestUpgradeArgs {
     #[arg(long)]
     pub to: String,
 
-    /// Address to serve on. The endpoint stays the same across the flip — this is the whole point.
+    /// Address to serve on. For a compatible update the endpoint stays the same across the flip; for a
+    /// breaking one the old version stays here (deprecated) and the new is served under `--new-endpoint`.
     #[arg(long, default_value = "127.0.0.1:8288")]
     pub listen: String,
+
+    /// For a BREAKING update, the path prefix the new version is served under while the old stays at
+    /// root (deprecated). Default `next` → served at `/next`. Ignored for a compatible update.
+    #[arg(long, default_value = "next")]
+    pub new_endpoint: String,
 
     /// Override `rpc_urls` at runtime (repeatable); tried ahead of the configured endpoints.
     #[arg(long)]

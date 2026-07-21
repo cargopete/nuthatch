@@ -160,10 +160,12 @@ who need more — none of it in the way of the happy path:
   and `load <file|dir>` need no registry at all. (S3 backend: build with `--features object-store`.)
 - **Safe upgrades — no resync tax** (RFC-0020). `nuthatch nest diff <old> <new>` classifies a nest
   update as *compatible* (additive only) or *breaking* (a consumer-observable change); `nuthatch nest
-  upgrade --to <new>` then **hot-swaps a compatible update with zero downtime** — it serves the old
-  version, indexes the new one concurrently, and atomically flips the endpoint the moment the new one
-  catches up. Updating a nest stops being a subgraph-style genesis resync, and the served address never
-  changes. A breaking update is refused (it needs a new endpoint — the deprecation-window path is next).
+  upgrade --to <new>` then handles either kind. A **compatible** update is **hot-swapped with zero
+  downtime** — it serves the old version, indexes the new one concurrently, and atomically flips the
+  endpoint the moment the new one catches up, so the served address never changes. A **breaking** update
+  instead serves the new version on a new endpoint (`/next`) alongside the old — which keeps working, now
+  carrying a `Deprecation` header — so downstream migrate on their own clock before the old is sunset.
+  Either way, updating a nest stops being a subgraph-style genesis resync.
 - **Metrics.** Prometheus `/metrics` — tip lag, rows decoded/sealed, reorgs, query counts, RSS.
 
 ---

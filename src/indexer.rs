@@ -95,6 +95,7 @@ pub async fn upgrade(
     old_dir: PathBuf,
     new_dir: PathBuf,
     listen: String,
+    new_endpoint: String,
     rpc_override: Vec<String>,
     seal_direct: bool,
     concurrency: usize,
@@ -104,23 +105,27 @@ pub async fn upgrade(
     let old_config = Config::load(&old_dir)?;
     let new_config = Config::load(&new_dir)?;
 
-    // Gate: a breaking update must not be hot-swapped — it needs a new versioned endpoint (slice 3).
     let verdict = crate::lifecycle::classify_paths(&old_dir, &new_dir)?;
-    if verdict.verdict == crate::lifecycle::Verdict::Breaking {
-        let reasons: Vec<String> = verdict.breaking_changes().map(|c| c.describe()).collect();
-        anyhow::bail!(
-            "refusing to hot-swap a BREAKING update: a consumer-observable change must be served on a \
-             NEW versioned endpoint, run alongside the old so downstream migrate on their clock \
-             (RFC-0020 slice 3). Breaking change(s):\n  - {}",
-            reasons.join("\n  - ")
+    let breaking = verdict.verdict == crate::lifecycle::Verdict::Breaking;
+    if breaking {
+        tracing::info!(
+            breaking = verdict.breaking_changes().count(),
+            "breaking update — serving the new version on a new endpoint alongside the deprecated old"
+        );
+    } else {
+        tracing::info!(
+            additive = verdict.additive_changes().count(),
+            "compatible update — hot-upgrading with zero downtime"
         );
     }
-    tracing::info!(
-        additive = verdict.additive_changes().count(),
-        "compatible update — hot-upgrading with zero downtime"
+    // The new version is served under `/<new_endpoint>` in the breaking case; normalized to one leading
+    // slash, no trailing.
+    let new_prefix = format!(
+        "/{}",
+        new_endpoint.trim_start_matches('/').trim_end_matches('/')
     );
 
-    // A compatible update never changes chains, so one source feeds both indexers.
+    // Neither a compatible nor a breaking update changes chains, so one source feeds both indexers.
     let rpc_urls = crate::rpc::merge_rpcs(&rpc_override, old_config.nest.rpc_urls.clone());
     let endpoint_count = rpc_urls.len();
     let source: Arc<dyn Source> = Arc::new(RpcClient::new(rpc_urls)?);
@@ -128,7 +133,7 @@ pub async fn upgrade(
     let admin_enabled = admin_enabled(no_admin, &listen);
     let admin_token = admin_required_token(admin_enabled, &listen);
 
-    // OLD serves immediately; NEW backfills concurrently.
+    // Both versions index concurrently.
     let old_rt = spawn_nest(
         source.clone(),
         old_dir,
@@ -156,51 +161,72 @@ pub async fn upgrade(
 
     let old_store = old_rt.state.store.clone();
     let new_store = new_rt.state.store.clone();
-    let new_state = new_rt.state; // handed to the flip
-    let shared = serve::SharedNest::new(old_rt.state);
+    let new_state = new_rt.state; // consumed by whichever path runs
+    let old_shared = serve::SharedNest::new(old_rt.state);
     let mut ingest_old = old_rt.ingest;
     let mut ingest_new = new_rt.ingest;
     let old_alert = old_rt.alert_worker;
     let new_alert = new_rt.alert_worker;
 
-    let mut serve_task = {
-        let shared = shared.clone();
-        tokio::spawn(async move { serve::run_shared(&listen, shared).await })
-    };
-    let mut flip_task = {
-        let shared = shared.clone();
-        let old_store = old_store.clone();
-        let new_store = new_store.clone();
-        tokio::spawn(async move {
-            await_catchup_and_flip(&shared, &old_store, &new_store, new_state, UPGRADE_POLL).await
-        })
-    };
-
-    // Phase 1 — old + new both live. Any task dying fails loudly (C1). The flip completing → phase 2.
-    let result = tokio::select! {
-        r = &mut serve_task => join_task("serving", r),
-        j = &mut ingest_old => join_task("old indexing", j),
-        j = &mut ingest_new => join_task("new indexing", j),
-        f = &mut flip_task => match f {
-            Ok(Ok(())) => {
-                tracing::info!("hot-upgrade flip complete — retiring the old version's indexer");
-                // The old indexer is now intentionally retired; its cancellation is NOT a failure.
-                ingest_old.abort();
-                // Phase 2 — only the new version + serving remain.
-                tokio::select! {
-                    r = &mut serve_task => join_task("serving", r),
-                    j = &mut ingest_new => join_task("new indexing", j),
+    let result = if breaking {
+        // Slice 3 — serve BOTH on distinct endpoints, no flip: old stays at root (deprecated), new
+        // under `new_prefix`. Both persist; the operator sunsets the old when downstream have migrated.
+        let new_shared = serve::SharedNest::new(new_state);
+        let mut serve_task = {
+            let old_shared = old_shared.clone();
+            tokio::spawn(async move {
+                serve::run_two_versions(&listen, old_shared, &new_prefix, new_shared).await
+            })
+        };
+        let r = tokio::select! {
+            r = &mut serve_task => join_task("serving", r),
+            j = &mut ingest_old => join_task("old indexing", j),
+            j = &mut ingest_new => join_task("new indexing", j),
+        };
+        serve_task.abort();
+        r
+    } else {
+        // Slice 2b — serve old, index new, atomically flip once caught up, retire old.
+        let mut serve_task = {
+            let shared = old_shared.clone();
+            tokio::spawn(async move { serve::run_shared(&listen, shared).await })
+        };
+        let mut flip_task = {
+            let shared = old_shared.clone();
+            let old_store = old_store.clone();
+            let new_store = new_store.clone();
+            tokio::spawn(async move {
+                await_catchup_and_flip(&shared, &old_store, &new_store, new_state, UPGRADE_POLL)
+                    .await
+            })
+        };
+        // Phase 1 — old + new both live. Any task dying fails loudly (C1). The flip completing → phase 2.
+        let r = tokio::select! {
+            r = &mut serve_task => join_task("serving", r),
+            j = &mut ingest_old => join_task("old indexing", j),
+            j = &mut ingest_new => join_task("new indexing", j),
+            f = &mut flip_task => match f {
+                Ok(Ok(())) => {
+                    tracing::info!("hot-upgrade flip complete — retiring the old version's indexer");
+                    // The old indexer is now intentionally retired; its cancellation is NOT a failure.
+                    ingest_old.abort();
+                    // Phase 2 — only the new version + serving remain.
+                    tokio::select! {
+                        r = &mut serve_task => join_task("serving", r),
+                        j = &mut ingest_new => join_task("new indexing", j),
+                    }
                 }
-            }
-            Ok(Err(e)) => Err(e.context("hot-upgrade flip")),
-            Err(e) => Err(anyhow::anyhow!("flip task failed: {e}")),
-        },
+                Ok(Err(e)) => Err(e.context("hot-upgrade flip")),
+                Err(e) => Err(anyhow::anyhow!("flip task failed: {e}")),
+            },
+        };
+        serve_task.abort();
+        flip_task.abort();
+        r
     };
 
     ingest_old.abort();
     ingest_new.abort();
-    serve_task.abort();
-    flip_task.abort();
     if let Some(w) = old_alert {
         w.abort();
     }

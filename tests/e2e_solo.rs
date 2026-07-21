@@ -399,3 +399,102 @@ async fn compatible_hot_upgrade_flips_backing_after_catchup() {
     old_rt.ingest.abort();
     new_rt.ingest.abort();
 }
+
+/// RFC-0020 slice 3 — the breaking path: two versions served on distinct endpoints over one listener.
+/// The OLD version stays at the root (its consumers unchanged) but every response carries a
+/// `Deprecation: true` header + a `Link` to the successor; the NEW version is served under `/next` and
+/// is not deprecated. Distinct nest aliases (`usdc` vs `usdcv2`) make the two schemas tell-apart-able.
+#[tokio::test]
+async fn breaking_upgrade_serves_both_versions_with_old_deprecated() {
+    let old_dir = tempfile::tempdir().unwrap();
+    let new_dir = tempfile::tempdir().unwrap();
+    let old_cfg = scaffold_nest(old_dir.path(), "usdc", USDC);
+    let new_cfg = scaffold_nest(new_dir.path(), "usdcv2", USDC);
+
+    // One block so both indexers have something to chew; `/schema` itself comes from the registry.
+    let tape = Arc::new(TapeSource::new());
+    let (a1, a2) = (account(1), account(2));
+    tape.insert_block(
+        1,
+        transfers_block(
+            1,
+            0,
+            1_700_000_001,
+            USDC,
+            &[(a1.as_str(), a2.as_str(), 100)],
+        ),
+    );
+    tape.advance_tip_to(1);
+
+    let old_rt = indexer::spawn_nest(
+        tape.clone(),
+        old_dir.path().to_path_buf(),
+        old_cfg,
+        None,
+        false,
+        1,
+        Some(2),
+        false,
+        None,
+    )
+    .await
+    .expect("spawn old");
+    let new_rt = indexer::spawn_nest(
+        tape.clone(),
+        new_dir.path().to_path_buf(),
+        new_cfg,
+        None,
+        false,
+        1,
+        Some(2),
+        false,
+        None,
+    )
+    .await
+    .expect("spawn new");
+
+    let app = serve::two_version_router(
+        serve::SharedNest::new(old_rt.state),
+        "/next",
+        serve::SharedNest::new(new_rt.state),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    // Old at root: its schema, plus a Deprecation header pointing at the successor.
+    let old = client.get(format!("{base}/schema")).send().await.unwrap();
+    assert_eq!(old.headers().get("deprecation").unwrap(), "true");
+    assert!(old
+        .headers()
+        .get("link")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("successor-version"));
+    let old_body = old.text().await.unwrap();
+    assert!(old_body.contains("usdc__"), "old schema served at root");
+    assert!(!old_body.contains("usdcv2__"), "root is the OLD version");
+
+    // New under /next: its (different) schema, and NOT deprecated.
+    let new = client
+        .get(format!("{base}/next/schema"))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        new.headers().get("deprecation").is_none(),
+        "the new endpoint is not deprecated"
+    );
+    let new_body = new.text().await.unwrap();
+    assert!(
+        new_body.contains("usdcv2__"),
+        "new schema served under /next"
+    );
+
+    old_rt.ingest.abort();
+    new_rt.ingest.abort();
+    server.abort();
+}

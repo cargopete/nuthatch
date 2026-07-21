@@ -2,6 +2,18 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-21 - RFC-0020 slice 3: the breaking path — new endpoint + deprecation.** A breaking update
+  is no longer refused: `nest upgrade` now serves **both** versions on distinct endpoints over one
+  listener — the OLD stays at the root (its consumers unchanged) but every response carries a
+  `Deprecation: true` header + a `Link` to the successor (RFC 8594-shaped); the NEW is served under
+  `--new-endpoint` (default `/next`). Both index concurrently, neither flips, so downstream migrate on
+  their own clock before the operator sunsets the old. `serve::two_version_router` composes it (old at
+  root under a deprecation layer, new nested under its prefix); `upgrade` now branches on the verdict
+  (compatible → flip; breaking → serve-both), sharing one source and the C1 fate-sharing select.
+  **The N-1 problem is functionally solved** — every update, compatible or breaking, is painless.
+  Verified with an HTTP e2e: old `/schema` carries the deprecation header + successor link and serves the
+  old schema; new `/next/schema` serves the different schema, un-deprecated. 224 lib + 4 e2e green,
+  clippy + fmt clean. README + roadmap updated. Pending: slice 4 (segment reuse).
 - **2026-07-21 - RFC-0020 slice 2b-ii: `nest upgrade` — the compatible hot-swap, user-facing.** Wires
   the proven flip into a command: `nuthatch nest upgrade --dir <old> --to <new>` classifies the update,
   **refuses a breaking one** (clear message naming the change — it needs a new endpoint, slice 3), and
