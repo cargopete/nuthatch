@@ -5,10 +5,12 @@ use anyhow::{Context, Result};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::sse::{Event, KeepAlive, Sse},
     response::IntoResponse,
     routing::get,
     Json, Router,
 };
+use futures::stream;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -92,6 +94,7 @@ pub fn router(state: AppState) -> Router {
         .route("/nest", get(nest))
         .route("/_admin", get(admin_index))
         .route("/_admin/", get(admin_index))
+        .route("/_admin/events", get(admin_events))
         // Count every served request for `/metrics` (the operator's billing signal).
         .layer(axum::middleware::from_fn(count_request))
         .with_state(state)
@@ -278,10 +281,13 @@ async fn ready() -> impl IntoResponse {
     (code, Json(body)).into_response()
 }
 
-async fn summary(State(s): State<AppState>) -> impl IntoResponse {
+/// The live status payload — nest identity, tip/sealed watermarks, and the IVM view counts. Built once
+/// here and served two ways: as the `GET /` JSON body, and as each frame of the `/_admin/events` SSE
+/// stream, so the polled and pushed surfaces can never disagree.
+fn summary_value(s: &AppState) -> Value {
     let count = s.store.count().unwrap_or(0);
     let last_block = s.store.get_meta("last_block").ok().flatten();
-    Json(json!({
+    json!({
         "name": "nuthatch",
         "chain": s.chain,
         "address": s.address,
@@ -306,7 +312,44 @@ async fn summary(State(s): State<AppState>) -> impl IntoResponse {
             "/exposure/{address}",
             "/flags?kind=threshold|velocity",
         ],
-    }))
+    })
+}
+
+async fn summary(State(s): State<AppState>) -> impl IntoResponse {
+    Json(summary_value(&s))
+}
+
+/// How often the `/_admin/events` SSE stream pushes a fresh status frame. Matches the 2 s cadence the
+/// admin UI used to poll at, so the live view feels identical — just server-pushed, not client-pulled.
+const SSE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// `GET /_admin/events` — a Server-Sent Events stream of the status summary, pushed every
+/// [`SSE_INTERVAL`], so the admin UI updates live without polling (RFC-0010 Part A). Gated exactly like
+/// the admin page: 404 when the admin UI is disabled, and off-localhost it requires a valid `?token=`.
+/// Each frame is byte-identical to `GET /` (both call [`summary_value`]). Purely a serving-layer read —
+/// nothing here touches the ingest/decode data path.
+async fn admin_events(State(s): State<AppState>, Query(q): Query<AdminQuery>) -> impl IntoResponse {
+    if !s.admin_enabled {
+        return (StatusCode::NOT_FOUND, "admin UI disabled").into_response();
+    }
+    if let Some(required) = &s.admin_token {
+        if !q.token.as_deref().is_some_and(|t| ct_eq(t, required)) {
+            return (StatusCode::UNAUTHORIZED, "admin events require a valid ?token=").into_response();
+        }
+    }
+    // `unfold` carries the state and a `first` flag: emit immediately, then once per interval. Cloning
+    // `AppState` per frame is cheap — its fields are `Arc`/handle types, not owned data.
+    let stream = stream::unfold((s, true), |(s, first)| async move {
+        if !first {
+            tokio::time::sleep(SSE_INTERVAL).await;
+        }
+        let ev = Event::default().data(summary_value(&s).to_string());
+        Some((Ok::<_, std::convert::Infallible>(ev), (s, false)))
+    });
+    // Keep-alive comment every 15 s so an idle proxy doesn't close a quiet stream between frames.
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
 }
 
 /// List every table and its columns (the decoded data model).
@@ -1003,6 +1046,63 @@ mod tests {
         assert!(
             !ADMIN_HTML.contains("http://") && !ADMIN_HTML.contains("https://"),
             "admin UI makes no external requests (same-origin only)"
+        );
+        // The status view is server-pushed (SSE) with a polling fallback — not poll-only.
+        assert!(ADMIN_HTML.contains("EventSource"), "admin UI uses SSE");
+        assert!(ADMIN_HTML.contains("_admin/events"), "admin UI subscribes to the events stream");
+        assert!(ADMIN_HTML.contains("startPolling"), "admin UI keeps a polling fallback");
+    }
+
+    #[tokio::test]
+    async fn admin_events_gated_like_the_admin_page() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path(), SQL_MAX_CONCURRENCY);
+
+        // A pushed frame is byte-identical to `GET /`: both go through `summary_value`.
+        let v = summary_value(&state);
+        assert_eq!(v["name"], "nuthatch");
+        assert!(v.get("last_block").is_some(), "frame carries the tip watermark");
+        assert!(v["views"].is_array(), "frame lists the IVM views");
+
+        let tok = |t: Option<&str>| {
+            Query(AdminQuery {
+                token: t.map(str::to_string),
+            })
+        };
+
+        // Localhost, no token required → the stream opens.
+        assert_eq!(
+            admin_events(State(state.clone()), tok(None))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::OK
+        );
+        // Admin disabled → 404, exactly like the page.
+        state.admin_enabled = false;
+        assert_eq!(
+            admin_events(State(state.clone()), tok(None))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        // Off-localhost token enforced (SEC-5): missing → 401, correct → 200.
+        state.admin_enabled = true;
+        state.admin_token = Some("s3cret".into());
+        assert_eq!(
+            admin_events(State(state.clone()), tok(None))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            admin_events(State(state), tok(Some("s3cret")))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::OK
         );
     }
 }
