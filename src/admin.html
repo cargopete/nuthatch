@@ -128,27 +128,43 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if(tab==='nest') loadNest();
 });
 
-// ---- status (polled) ----
+// ---- status (live via SSE, falling back to polling) ----
 const STAT_KEYS = [
   ['entities','hot rows'], ['tables','tables'], ['holders','holders'],
   ['exposure_entries','exposure'], ['velocity_buckets','velocity'], ['alert_outbox','alert outbox'],
 ];
-async function poll(){
-  try {
-    const s = await api('/');
-    $('#nest').textContent = (s.name||'nest') + ' · ' + (s.chain||'');
-    $('#tip').textContent = 'tip ' + fmt(s.last_block);
-    $('#sealed').textContent = fmt(s.sealed_through);
-    $('#dot').classList.add('live');
-    const lag = (s.last_block && s.sealed_through) ? (s.last_block - s.sealed_through) : null;
-    $('#lag').textContent = lag===null ? '—' : fmt(lag)+' blk';
-    const g = STAT_KEYS.filter(([k]) => k in s).map(([k,label]) =>
-      `<div class="stat"><div class="k">${label}</div><div class="v">${fmt(s[k])}</div></div>`).join('');
-    $('#stats').innerHTML = g + `<div class="stat"><div class="k">views</div><div class="v" style="font-size:12px">${(s.views||[]).join('<br>')||'—'}</div></div>`;
-  } catch(e){ $('#dot').classList.remove('live'); }
+function render(s){
+  $('#nest').textContent = (s.name||'nest') + ' · ' + (s.chain||'');
+  $('#tip').textContent = 'tip ' + fmt(s.last_block);
+  $('#sealed').textContent = fmt(s.sealed_through);
+  $('#dot').classList.add('live');
+  const lag = (s.last_block && s.sealed_through) ? (s.last_block - s.sealed_through) : null;
+  $('#lag').textContent = lag===null ? '—' : fmt(lag)+' blk';
+  const g = STAT_KEYS.filter(([k]) => k in s).map(([k,label]) =>
+    `<div class="stat"><div class="k">${label}</div><div class="v">${fmt(s[k])}</div></div>`).join('');
+  $('#stats').innerHTML = g + `<div class="stat"><div class="k">views</div><div class="v" style="font-size:12px">${(s.views||[]).join('<br>')||'—'}</div></div>`;
 }
-setInterval(() => { if(tab==='status' && !document.hidden) poll(); }, 2000);
-poll();
+async function poll(){
+  try { render(await api('/')); } catch(e){ $('#dot').classList.remove('live'); }
+}
+// Prefer a server-pushed stream; degrade to 2s polling if EventSource can't connect. The events URL is
+// derived from this page's own path, so it's correct whether served solo (/_admin/) or under a roost
+// prefix (/<nest>/_admin/); the ?token carries through for off-localhost admin auth.
+let polling = null;
+function startPolling(){
+  if(polling) return;
+  polling = setInterval(() => { if(tab==='status' && !document.hidden) poll(); }, 2000);
+  poll();
+}
+(function startLive(){
+  if(!('EventSource' in window)){ startPolling(); return; }
+  const base = location.pathname.replace(/_admin\/?$/, '');
+  let es;
+  try { es = new EventSource(base + '_admin/events' + location.search); }
+  catch(_){ startPolling(); return; }
+  es.onmessage = (e) => { try { render(JSON.parse(e.data)); } catch(_){} };
+  es.onerror = () => { es.close(); startPolling(); };
+})();
 
 // ---- tables ----
 let curTable = null;
