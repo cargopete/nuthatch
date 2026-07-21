@@ -165,7 +165,9 @@ who need more — none of it in the way of the happy path:
   endpoint the moment the new one catches up, so the served address never changes. A **breaking** update
   instead serves the new version on a new endpoint (`/next`) alongside the old — which keeps working, now
   carrying a `Deprecation` header — so downstream migrate on their own clock before the old is sunset.
-  Either way, updating a nest stops being a subgraph-style genesis resync.
+  Either way, updating a nest stops being a subgraph-style genesis resync — and when a compatible
+  update's decode is unchanged, the new version **mounts the old's sealed content-addressed segments**
+  instead of re-indexing history at all: a true no-re-index upgrade subgraphs structurally can't do.
 - **Metrics.** Prometheus `/metrics` — tip lag, rows decoded/sealed, reorgs, query counts, RSS.
 
 ---

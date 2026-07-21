@@ -498,3 +498,119 @@ async fn breaking_upgrade_serves_both_versions_with_old_deprecated() {
     new_rt.ingest.abort();
     server.abort();
 }
+
+/// RFC-0020 slice 4 — segment reuse: a compatible update whose decode is unchanged mounts the old
+/// version's sealed segments instead of re-indexing. Here a fresh nest, given ONLY the old's segments +
+/// watermark (never having indexed a block itself), serves the sealed history — the true no-re-index
+/// path, and a capability subgraphs structurally lack (their storage isn't content-addressed).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compatible_upgrade_reuses_sealed_segments_when_decode_unchanged() {
+    use nuthatch::{lifecycle, store::Store};
+
+    let old = tempfile::tempdir().unwrap();
+    let new = tempfile::tempdir().unwrap();
+    // Same alias → same decode + same table names, so reuse is valid (a view/semantic-only update).
+    let cfg = scaffold_nest(old.path(), "usdc", USDC);
+    scaffold_nest(new.path(), "usdc", USDC);
+    for d in [old.path(), new.path()] {
+        std::fs::write(
+            d.join("schema.json"),
+            r#"{"registry_hash":"0xnest","tables":[]}"#,
+        )
+        .unwrap();
+    }
+
+    // Index ten blocks and seal [1,5] into the OLD version — inside a scope so every redb handle drops
+    // before reuse reopens it (redb is single-writer).
+    {
+        let tape = Arc::new(TapeSource::new());
+        let (a1, a2) = (account(1), account(2));
+        for b in 1..=10u64 {
+            tape.insert_block(
+                b,
+                transfers_block(
+                    b,
+                    0,
+                    1_700_000_000 + b,
+                    USDC,
+                    &[(a1.as_str(), a2.as_str(), (100 * b) as u128)],
+                ),
+            );
+        }
+        tape.advance_tip_to(10);
+        let rt = indexer::spawn_nest(
+            tape.clone(),
+            old.path().to_path_buf(),
+            cfg,
+            None,
+            false,
+            1,
+            Some(2),
+            false,
+            None,
+        )
+        .await
+        .expect("spawn old");
+        let store = rt.state.store.clone();
+        assert!(
+            wait_until(POLL_TIMEOUT, || store
+                .get_meta("last_block")
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some("10"))
+            .await,
+            "old did not index to the tip"
+        );
+        tape.advance_finalized_to(5);
+        tape.insert_block(11, empty_block(11, 0, 1_700_000_100));
+        tape.advance_tip_to(11);
+        assert!(
+            wait_until(POLL_TIMEOUT, || store.sealed_through() >= 5).await,
+            "old did not seal [1,5]"
+        );
+        rt.ingest.abort();
+        let _ = rt.ingest.await;
+        drop(store);
+    }
+
+    // Mount the old's sealed segments into the fresh new nest.
+    match lifecycle::reuse_segments(old.path(), new.path()).unwrap() {
+        lifecycle::ReuseOutcome::Reused {
+            sealed_through,
+            segments,
+        } => {
+            assert_eq!(sealed_through, 5, "watermark carried over");
+            assert!(segments >= 1, "at least one segment reused");
+        }
+        other => panic!("expected Reused, got {other:?}"),
+    }
+
+    // The new nest now serves the reused sealed history WITHOUT ever having indexed a block.
+    assert!(new.path().join("segments/manifest.json").exists());
+    {
+        let new_store = Store::open(&new.path().join("nuthatch.redb")).unwrap();
+        assert_eq!(
+            new_store.sealed_through(),
+            5,
+            "new resumes past the reused range"
+        );
+    }
+    let rows = analytics::query(
+        new.path(),
+        &format!(
+            "SELECT block_number FROM \"{}\" ORDER BY block_number",
+            transfer_table("usdc")
+        ),
+    )
+    .unwrap();
+    let blocks: BTreeSet<u64> = rows
+        .iter()
+        .map(|r| r["block_number"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        blocks,
+        (1..=5).collect::<BTreeSet<u64>>(),
+        "the fresh new nest serves exactly the reused sealed segments"
+    );
+}

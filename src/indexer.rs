@@ -125,6 +125,27 @@ pub async fn upgrade(
         new_endpoint.trim_start_matches('/').trim_end_matches('/')
     );
 
+    // Slice 4 — for a compatible update whose decode is unchanged, mount the old version's sealed
+    // segments into the new nest so it resumes *past* that range instead of re-indexing history (the
+    // true no-re-index optimization). A changed decode falls back to a normal index. Done before either
+    // indexer opens the stores (redb is single-writer).
+    if !breaking {
+        match crate::lifecycle::reuse_segments(&old_dir, &new_dir)? {
+            crate::lifecycle::ReuseOutcome::Reused {
+                sealed_through,
+                segments,
+            } => tracing::info!(
+                sealed_through,
+                segments,
+                "reusing the old version's sealed segments — the new version resumes past block \
+                 {sealed_through} instead of re-indexing history"
+            ),
+            crate::lifecycle::ReuseOutcome::NotReusable(why) => {
+                tracing::info!("segment reuse skipped: {why} — the new version will index history")
+            }
+        }
+    }
+
     // Neither a compatible nor a breaking update changes chains, so one source feeds both indexers.
     let rpc_urls = crate::rpc::merge_rpcs(&rpc_override, old_config.nest.rpc_urls.clone());
     let endpoint_count = rpc_urls.len();

@@ -231,6 +231,91 @@ pub fn caught_up(new_head: Option<u64>, old_head: Option<u64>) -> bool {
     matches!(new_head, Some(n) if n >= old_head.unwrap_or(0))
 }
 
+/// The result of attempting segment reuse for a compatible upgrade (RFC-0020 slice 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReuseOutcome {
+    /// Decode unchanged — the old version's sealed segments were mounted into the new nest and its
+    /// sealed watermark set, so the new indexer resumes past this range instead of re-indexing history.
+    Reused {
+        sealed_through: u64,
+        segments: usize,
+    },
+    /// Not reusable — the new version must index history itself. Carries a human reason.
+    NotReusable(String),
+}
+
+/// The decode-registry content hash a nest's `schema.json` pins — the key that decides segment reuse.
+/// `None` if there's no `schema.json` or it lacks the field.
+fn schema_registry_hash(dir: &Path) -> Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct Head {
+        #[serde(default)]
+        registry_hash: Option<String>,
+    }
+    let Ok(raw) = std::fs::read_to_string(schema_path(dir)) else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_str::<Head>(&raw)
+        .ok()
+        .and_then(|h| h.registry_hash))
+}
+
+/// The true no-*re-index* optimization (RFC-0020 slice 4): when a compatible update leaves the **decode
+/// registry unchanged**, the old version's sealed segments are byte-identical to what the new version
+/// would produce, so mount them into the new nest instead of re-indexing. Copies `old/segments/*` →
+/// `new/segments/` and sets the new store's sealed watermark, so the new indexer resumes *past* the
+/// reused range (`resume_from_watermark`). A changed decode, or nothing sealed yet, falls back to a
+/// normal index — [`ReuseOutcome::NotReusable`]. Content-addressing makes this sound: reused segments
+/// carry their own hashes and are re-verifiable; this is a capability subgraphs structurally lack.
+///
+/// Call this **before** either version's indexer opens the stores (redb is single-writer).
+pub fn reuse_segments(old_dir: &Path, new_dir: &Path) -> Result<ReuseOutcome> {
+    let old_hash = schema_registry_hash(old_dir)?;
+    if old_hash.is_none() || old_hash != schema_registry_hash(new_dir)? {
+        return Ok(ReuseOutcome::NotReusable(
+            "decode registry changed — history must be re-indexed with the new decoding".into(),
+        ));
+    }
+
+    let old_seg = old_dir.join(crate::seal::SEGMENTS_DIR);
+    if !old_seg.join(crate::seal::MANIFEST_FILE).exists() {
+        return Ok(ReuseOutcome::NotReusable(
+            "nothing sealed yet in the old version — nothing to reuse".into(),
+        ));
+    }
+
+    // Copy every sealed file (the manifest + each content-addressed .parquet) into the new nest.
+    let new_seg = new_dir.join(crate::seal::SEGMENTS_DIR);
+    std::fs::create_dir_all(&new_seg).with_context(|| format!("creating {}", new_seg.display()))?;
+    let mut segments = 0usize;
+    for entry in std::fs::read_dir(&old_seg)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            let name = entry.file_name();
+            std::fs::copy(entry.path(), new_seg.join(&name))
+                .with_context(|| format!("copying segment {}", name.to_string_lossy()))?;
+            if name != std::ffi::OsStr::new(crate::seal::MANIFEST_FILE) {
+                segments += 1;
+            }
+        }
+    }
+
+    // Set the new store's sealed watermark so its indexer resumes past the reused range. Opened and
+    // dropped here, before the indexer opens it (redb is single-writer).
+    let old_sealed = {
+        let s = crate::store::Store::open(&old_dir.join(crate::config::DB_FILE))?;
+        s.sealed_through()
+    };
+    {
+        let s = crate::store::Store::open(&new_dir.join(crate::config::DB_FILE))?;
+        s.set_meta("sealed_through", &old_sealed.to_string())?;
+    }
+    Ok(ReuseOutcome::Reused {
+        sealed_through: old_sealed,
+        segments,
+    })
+}
+
 /// `nuthatch nest diff <old> <new>`: classify an update between two nests (each a nest dir or a
 /// `schema.json` path) and print the verdict with its reasons. Slice 1 is decision-only — it prints
 /// what a later slice will *act* on (compatible → same endpoint; breaking → a new one).
@@ -296,6 +381,39 @@ mod tests {
         let c = verdict(&base(), &base());
         assert_eq!(c.verdict, Verdict::Compatible);
         assert!(c.changes.is_empty());
+    }
+
+    #[test]
+    fn reuse_refused_when_decode_changes_or_nothing_sealed() {
+        let old = tempfile::tempdir().unwrap();
+        let new = tempfile::tempdir().unwrap();
+        std::fs::write(
+            old.path().join("schema.json"),
+            r#"{"registry_hash":"0xAAA","tables":[]}"#,
+        )
+        .unwrap();
+        // Different decode hash → not reusable, before touching any store or segments.
+        std::fs::write(
+            new.path().join("schema.json"),
+            r#"{"registry_hash":"0xBBB","tables":[]}"#,
+        )
+        .unwrap();
+        match reuse_segments(old.path(), new.path()).unwrap() {
+            ReuseOutcome::NotReusable(why) => {
+                assert!(why.contains("decode registry changed"), "{why}")
+            }
+            other => panic!("expected NotReusable, got {other:?}"),
+        }
+        // Same decode hash but nothing sealed in the old version → still nothing to reuse.
+        std::fs::write(
+            new.path().join("schema.json"),
+            r#"{"registry_hash":"0xAAA","tables":[]}"#,
+        )
+        .unwrap();
+        match reuse_segments(old.path(), new.path()).unwrap() {
+            ReuseOutcome::NotReusable(why) => assert!(why.contains("nothing sealed"), "{why}"),
+            other => panic!("expected NotReusable (nothing sealed), got {other:?}"),
+        }
     }
 
     #[test]

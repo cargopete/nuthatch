@@ -2,6 +2,19 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-21 - RFC-0020 slice 4: segment reuse — the true no-re-index upgrade. RFC-0020 complete.**
+  The final slice, and the one subgraphs structurally can't have: when a compatible update leaves the
+  **decode registry unchanged** (a view/semantic/serving-only change), the old version's sealed segments
+  are byte-identical to what the new would produce, so `nest upgrade` **mounts them** instead of
+  re-indexing. `lifecycle::reuse_segments` copies `old/segments/*` → `new/segments/` (content-addressed
+  Parquet + manifest) and sets the new store's sealed watermark, so the new indexer resumes *past* that
+  range (`resume_from_watermark`). Guarded on `schema.json`'s `registry_hash` equality (a changed decode,
+  or nothing sealed, falls back to a normal index); run before either indexer opens the stores (redb
+  single-writer). Wired into `upgrade`'s compatible path. **Proven**: an e2e seals [1,5] in an old nest,
+  then a **fresh** nest that never indexed a block — given only the reused segments + watermark — serves
+  exactly blocks 1–5. Content-addressing makes it sound: reused segments carry their own hashes and stay
+  re-verifiable. **RFC-0020 Implemented (all 4 slices) — the N-1 problem is solved.** 2 new tests, 225
+  lib + 5 e2e green, clippy + fmt clean. README + roadmap updated.
 - **2026-07-21 - RFC-0020 slice 3: the breaking path — new endpoint + deprecation.** A breaking update
   is no longer refused: `nest upgrade` now serves **both** versions on distinct endpoints over one
   listener — the OLD stays at the root (its consumers unchanged) but every response carries a
