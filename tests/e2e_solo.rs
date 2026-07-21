@@ -204,7 +204,7 @@ async fn serves_over_real_http() {
     // Bind our own listener and serve the real router on a task.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = serve::router(rt.state);
+    let app = serve::router(serve::SharedNest::new(rt.state));
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();

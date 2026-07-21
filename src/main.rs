@@ -85,10 +85,9 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
-            cli::NestWhat::Diff(a) => lifecycle::diff_cli(
-                std::path::Path::new(&a.old),
-                std::path::Path::new(&a.new),
-            ),
+            cli::NestWhat::Diff(a) => {
+                lifecycle::diff_cli(std::path::Path::new(&a.old), std::path::Path::new(&a.new))
+            }
         },
         cli::Command::SkillRefs => {
             nuthatch::skill::write_refs(std::path::Path::new("."))?;

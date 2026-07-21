@@ -66,8 +66,7 @@ fn validate_token(t: &str) -> Result<()> {
     if t == "." || t == ".." {
         bail!("{t:?} is not a valid name/version");
     }
-    if t
-        .chars()
+    if t.chars()
         .any(|c| matches!(c, '/' | '\\' | '@') || c.is_control())
     {
         bail!("{t:?} contains an illegal character (no `/`, `\\`, `@`, or control chars)");
@@ -266,7 +265,13 @@ pub async fn publish_cli(registry: &str, bundle_file: &Path, as_ref: Option<&str
         }
         None => (None, None),
     };
-    let out = publish(store.as_ref(), bundle_file, name.as_deref(), version.as_deref()).await?;
+    let out = publish(
+        store.as_ref(),
+        bundle_file,
+        name.as_deref(),
+        version.as_deref(),
+    )
+    .await?;
     println!("✓ published {}@{}", out.name, out.version);
     println!("  hash:  {}", out.hash);
     println!(
@@ -278,7 +283,11 @@ pub async fn publish_cli(registry: &str, bundle_file: &Path, as_ref: Option<&str
 
 /// `nuthatch nest load <name[@version]> --registry <path>`: resolve, fetch, verify, and install a nest
 /// from a store. The fetched blob is verified against the resolved hash by the RFC-0012 install path.
-pub async fn load_from_registry(registry: &str, reference: &str, target: Option<&Path>) -> Result<()> {
+pub async fn load_from_registry(
+    registry: &str,
+    reference: &str,
+    target: Option<&Path>,
+) -> Result<()> {
     let store = open(registry)?;
     let r = NestRef::parse(reference)?;
     let (hash, bytes) = pull(store.as_ref(), &r).await?;
@@ -351,7 +360,9 @@ mod object_store_impl {
                 anyhow::anyhow!("{subject} not found in this registry")
             }
             object_store::Error::PermissionDenied { .. }
-            | object_store::Error::Unauthenticated { .. } => anyhow::anyhow!(access_denied(subject)),
+            | object_store::Error::Unauthenticated { .. } => {
+                anyhow::anyhow!(access_denied(subject))
+            }
             other => anyhow::Error::new(other).context(subject.to_string()),
         }
     }
@@ -384,7 +395,10 @@ mod object_store_impl {
         async fn set_ref(&self, name: &str, version: &str, hash: &str) -> Result<()> {
             let key = self.ref_key(name, version);
             self.inner
-                .put(&key, object_store::PutPayload::from(hash.as_bytes().to_vec()))
+                .put(
+                    &key,
+                    object_store::PutPayload::from(hash.as_bytes().to_vec()),
+                )
                 .await
                 .map_err(|e| map_obj_err(e, &format!("nest '{name}@{version}'")))?;
             Ok(())
@@ -564,8 +578,12 @@ abi = "abis/c.json"
         let h1 = write_bundle_fixture(&f1, "v1");
 
         // Publish v1 twice → idempotent (same blob, no error), latest = h1.
-        publish(store.as_ref(), &f1, Some("n"), Some("1.0.0")).await.unwrap();
-        publish(store.as_ref(), &f1, Some("n"), Some("1.0.0")).await.unwrap();
+        publish(store.as_ref(), &f1, Some("n"), Some("1.0.0"))
+            .await
+            .unwrap();
+        publish(store.as_ref(), &f1, Some("n"), Some("1.0.0"))
+            .await
+            .unwrap();
         assert_eq!(store.get_ref("n", "latest").await.unwrap(), h1);
 
         // A *different* bundle (distinct inputs → distinct content address) published as v2 → both
@@ -573,8 +591,13 @@ abi = "abis/c.json"
         let b2 = tempfile::tempdir().unwrap();
         let f2 = b2.path().join("b.bundle");
         let h2 = write_bundle_fixture(&f2, "v2");
-        assert_ne!(h1, h2, "distinct inputs must yield distinct content addresses");
-        publish(store.as_ref(), &f2, Some("n"), Some("2.0.0")).await.unwrap();
+        assert_ne!(
+            h1, h2,
+            "distinct inputs must yield distinct content addresses"
+        );
+        publish(store.as_ref(), &f2, Some("n"), Some("2.0.0"))
+            .await
+            .unwrap();
         assert_eq!(store.get_ref("n", "1.0.0").await.unwrap(), h1);
         assert_eq!(store.get_ref("n", "2.0.0").await.unwrap(), h2);
         assert_eq!(store.get_ref("n", "latest").await.unwrap(), h2);

@@ -4708,6 +4708,7 @@ dependencies = [
  "alloy-json-abi",
  "alloy-primitives",
  "anyhow",
+ "arc-swap",
  "arrow 56.2.1",
  "async-trait",
  "axum",

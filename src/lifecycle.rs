@@ -31,8 +31,14 @@ pub enum Verdict {
 pub enum Change {
     TableAdded(String),
     TableRemoved(String),
-    ColumnAdded { table: String, column: String },
-    ColumnRemoved { table: String, column: String },
+    ColumnAdded {
+        table: String,
+        column: String,
+    },
+    ColumnRemoved {
+        table: String,
+        column: String,
+    },
     ColumnRetyped {
         table: String,
         column: String,

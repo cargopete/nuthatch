@@ -2,6 +2,17 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-21 - RFC-0020 slice 2a: the atomic serving-swap mechanism (+ a repo-wide `fmt` fix).** The
+  primitive a compatible hot-swap needs: a `SharedNest` handle (lock-free `arc-swap`) wraps the
+  `AppState` backing one served endpoint, and the router binds *it* instead of a fixed state. Every
+  request resolves the current version through axum `FromRef`, so `SharedNest::swap()` **atomically
+  re-points the endpoint at a new version** — no rebind, no dropped request (in-flight requests finish
+  on the version they started on), and **zero handler changes** (all ~18 `State<AppState>` handlers are
+  untouched; `FromRef` does the work). Cost: one atomic load + the per-request `AppState` clone axum
+  already did — footprint/latency-neutral. Decision-only-no-more: this lands the *mechanism*; slice 2b's
+  "index the new version, flip when caught up" orchestration will drive it. Also fixed the `fmt` CI
+  failure the RFC-0019 merges introduced (repo-wide `cargo fmt`). 1 new test (swap is observed through
+  `current()` and `FromRef`), 223 lib tests green, clippy clean.
 - **2026-07-21 - RFC-0020 slice 1: the compatible-vs-breaking classifier.** The first piece of killing
   the subgraph resync tax: `nuthatch nest diff <old> <new>` classifies a nest update over its schema
   surface (`schema.json` — the decoded event tables + columns a consumer queries). **Compatible** =

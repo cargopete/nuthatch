@@ -71,10 +71,46 @@ pub struct AppState {
     pub sql_gate: Arc<Semaphore>,
 }
 
-/// Build a nest's router — every per-nest route plus the request-count layer, bound to `state`. Split
-/// out of [`run`] so a roost (RFC-0012) can mount many of these under `/<nest>/…` prefixes; a solo
-/// `dev` serves exactly one at the root. Identical routes either way — a nest can't tell it's co-hosted.
-pub fn router(state: AppState) -> Router {
+/// A hot-swappable handle to the `AppState` backing one served endpoint (RFC-0020 slice 2). The router
+/// binds this instead of a fixed `AppState`; every request resolves the *current* version through
+/// [`FromRef`](axum::extract::FromRef), so a compatible upgrade can **atomically re-point** the
+/// endpoint at a new version with no rebind and no dropped request (in-flight requests finish against
+/// the version they started on). Cheap: a lock-free atomic load plus the same per-request `AppState`
+/// clone axum already does. The flip is the mechanism slice 2b's "index new, swap when caught up"
+/// orchestration drives; this slice lands and proves the mechanism.
+#[derive(Clone)]
+pub struct SharedNest(Arc<arc_swap::ArcSwap<AppState>>);
+
+impl SharedNest {
+    /// A handle initially backing `state`.
+    pub fn new(state: AppState) -> SharedNest {
+        SharedNest(Arc::new(arc_swap::ArcSwap::from_pointee(state)))
+    }
+
+    /// Atomically re-point this endpoint at a new backing version. The next request sees it.
+    pub fn swap(&self, state: AppState) {
+        self.0.store(Arc::new(state));
+    }
+
+    /// The current backing (a cheap `Arc` clone) — what serving resolves per request.
+    pub fn current(&self) -> Arc<AppState> {
+        self.0.load_full()
+    }
+}
+
+// Lets every existing `State<AppState>` handler stay untouched: axum resolves `AppState` from the
+// swappable `SharedNest` per request, always seeing the current version.
+impl axum::extract::FromRef<SharedNest> for AppState {
+    fn from_ref(shared: &SharedNest) -> AppState {
+        (*shared.0.load_full()).clone()
+    }
+}
+
+/// Build a nest's router — every per-nest route plus the request-count layer, bound to a swappable
+/// [`SharedNest`]. Split out of [`run`] so a roost (RFC-0012) can mount many of these under
+/// `/<nest>/…` prefixes; a solo `dev` serves exactly one at the root. Identical routes either way — a
+/// nest can't tell it's co-hosted, nor that its backing can be hot-swapped underneath it.
+pub fn router(backing: SharedNest) -> Router {
     Router::new()
         .route("/", get(summary))
         .route("/health", get(|| async { "ok" }))
@@ -97,11 +133,11 @@ pub fn router(state: AppState) -> Router {
         .route("/_admin/events", get(admin_events))
         // Count every served request for `/metrics` (the operator's billing signal).
         .layer(axum::middleware::from_fn(count_request))
-        .with_state(state)
+        .with_state(backing)
 }
 
 pub async fn run(listen: &str, state: AppState) -> Result<()> {
-    bind_and_serve(listen, router(state)).await
+    bind_and_serve(listen, router(SharedNest::new(state))).await
 }
 
 /// Serve many nests behind one listener (RFC-0012 roost, slice 1): a `/nests` roster plus every nest's
@@ -127,7 +163,7 @@ pub async fn run_roost(
     for (name, state) in nests {
         // `Router::nest` re-roots the whole per-nest router under `/<name>`, so `/lodestar/tables`,
         // `/lodestar/sql`, `/lodestar/_admin/` … all resolve to that nest's isolated state.
-        app = app.nest(&format!("/{name}"), router(state));
+        app = app.nest(&format!("/{name}"), router(SharedNest::new(state)));
     }
     bind_and_serve(listen, app).await
 }
@@ -918,6 +954,29 @@ mod tests {
             admin_token: None,
             nest_info: Arc::new(json!({ "name": "t" })),
         }
+    }
+
+    /// The RFC-0020 hot-swap mechanism: re-pointing a `SharedNest` atomically changes what serving
+    /// resolves — both `current()` and the per-request `FromRef` a handler goes through — with no
+    /// rebind. This is what lets a compatible upgrade flip an endpoint's backing underneath live
+    /// traffic (slice 2b drives the flip; this proves the mechanism).
+    #[tokio::test]
+    async fn shared_nest_swaps_the_backing_atomically() {
+        use axum::extract::FromRef;
+        let d1 = tempfile::tempdir().unwrap();
+        let mut v1 = test_state(d1.path(), 1);
+        v1.address = "0xv1".into();
+        let shared = SharedNest::new(v1);
+        assert_eq!(shared.current().address, "0xv1");
+        assert_eq!(AppState::from_ref(&shared).address, "0xv1");
+
+        // Flip to a new backing version — same handle, next request sees v2.
+        let d2 = tempfile::tempdir().unwrap();
+        let mut v2 = test_state(d2.path(), 1);
+        v2.address = "0xv2".into();
+        shared.swap(v2);
+        assert_eq!(shared.current().address, "0xv2");
+        assert_eq!(AppState::from_ref(&shared).address, "0xv2");
     }
 
     /// When the analytical gate is saturated, `/sql` fails fast with 503 rather than piling on.
