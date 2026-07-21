@@ -306,6 +306,19 @@ impl Store {
             .map(|v| v.value().to_string()))
     }
 
+    /// The highest block this nest has indexed — the catch-up signal a hot upgrade polls (RFC-0020
+    /// slice 2b). Takes the max of the hot-store `last_block` watermark and the sealed watermark, so it
+    /// is correct whether the nest is tip-following or mid `seal-direct` backfill (which bypasses the
+    /// hot store). `None` before anything is indexed.
+    pub fn indexed_head(&self) -> Result<Option<u64>> {
+        let hot = self
+            .get_meta("last_block")?
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let head = hot.max(self.sealed_through());
+        Ok((head > 0).then_some(head))
+    }
+
     /// All recorded checkpoints, highest block first — for walking back to a common ancestor.
     pub fn checkpoints_desc(&self) -> Result<Vec<(u64, String)>> {
         let rtx = self.db.begin_read()?;

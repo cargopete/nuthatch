@@ -84,6 +84,33 @@ pub struct NestRuntime {
     pub alert_worker: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Poll until the new version's indexed head reaches the old version's, then **atomically flip** the
+/// served backing to the new version (RFC-0020 slice 2b, the compatible hot-swap). Old and new indexers
+/// run concurrently until this returns; the caller aborts the old ingest afterwards. `poll` bounds how
+/// often the two heads are compared.
+pub async fn await_catchup_and_flip(
+    shared: &serve::SharedNest,
+    old_store: &crate::store::Store,
+    new_store: &crate::store::Store,
+    new_state: serve::AppState,
+    poll: std::time::Duration,
+) -> Result<()> {
+    loop {
+        let old_head = old_store.indexed_head()?;
+        let new_head = new_store.indexed_head()?;
+        if crate::lifecycle::caught_up(new_head, old_head) {
+            tracing::info!(
+                ?old_head,
+                ?new_head,
+                "new version caught up — hot-swapping the served backing (RFC-0020)"
+            );
+            shared.swap(new_state);
+            return Ok(());
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
 /// Run the indexing pipeline against any `Source` and serve the API — the source-agnostic entry both
 /// front-ends share. Decode → hot store → seal → IVM → serve is identical regardless of whether tips
 /// arrive by RPC polling or in-process from a reth ExEx.

@@ -312,3 +312,90 @@ async fn serves_over_real_http() {
     }
     server.abort();
 }
+
+/// RFC-0020 slice 2b — the compatible hot-upgrade: two real `spawn_nest` indexers (old + new version)
+/// run concurrently against the same scripted chain; the endpoint serves the OLD version until the NEW
+/// one catches up, then `await_catchup_and_flip` atomically re-points the served backing to the new
+/// version. Deterministic (no network, no sleeps driving the pipeline) — the old/new backings are told
+/// apart by their `dir`. This is the full concurrent-reindex-then-flip proven end to end.
+#[tokio::test]
+async fn compatible_hot_upgrade_flips_backing_after_catchup() {
+    let old_dir = tempfile::tempdir().unwrap();
+    let new_dir = tempfile::tempdir().unwrap();
+    let old_cfg = scaffold_nest(old_dir.path(), "usdc", USDC);
+    let new_cfg = scaffold_nest(new_dir.path(), "usdc", USDC);
+
+    // One scripted chain both versions follow: five blocks, one USDC transfer each.
+    let tape = Arc::new(TapeSource::new());
+    let (a1, a2) = (account(1), account(2));
+    for b in 1..=5u64 {
+        tape.insert_block(
+            b,
+            transfers_block(
+                b,
+                0,
+                1_700_000_000 + b,
+                USDC,
+                &[(a1.as_str(), a2.as_str(), (100 * b) as u128)],
+            ),
+        );
+    }
+    tape.advance_tip_to(5);
+
+    let old_rt = indexer::spawn_nest(
+        tape.clone(),
+        old_dir.path().to_path_buf(),
+        old_cfg,
+        None,
+        false,
+        1,
+        Some(2),
+        false,
+        None,
+    )
+    .await
+    .expect("spawn old");
+    let new_rt = indexer::spawn_nest(
+        tape.clone(),
+        new_dir.path().to_path_buf(),
+        new_cfg,
+        None,
+        false,
+        1,
+        Some(2),
+        false,
+        None,
+    )
+    .await
+    .expect("spawn new");
+
+    let old_store = old_rt.state.store.clone();
+    let new_store = new_rt.state.store.clone();
+    let new_state = new_rt.state; // handed to the flip
+    let shared = serve::SharedNest::new(old_rt.state);
+
+    // Before the flip, the endpoint is backed by the OLD version.
+    assert_eq!(shared.current().dir.as_path(), old_dir.path());
+
+    // Concurrent re-index + atomic flip: returns once the new version has caught up to the old.
+    tokio::time::timeout(
+        POLL_TIMEOUT,
+        indexer::await_catchup_and_flip(
+            &shared,
+            &old_store,
+            &new_store,
+            new_state,
+            Duration::from_millis(20),
+        ),
+    )
+    .await
+    .expect("flip timed out")
+    .expect("flip");
+
+    // After the flip, the SAME endpoint is now backed by the NEW version, caught up to the tip.
+    assert_eq!(shared.current().dir.as_path(), new_dir.path());
+    assert_eq!(new_store.indexed_head().unwrap(), Some(5));
+
+    old_rt.ingest.abort();
+    new_rt.ingest.abort();
+}

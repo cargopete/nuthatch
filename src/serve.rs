@@ -137,7 +137,13 @@ pub fn router(backing: SharedNest) -> Router {
 }
 
 pub async fn run(listen: &str, state: AppState) -> Result<()> {
-    bind_and_serve(listen, router(SharedNest::new(state))).await
+    run_shared(listen, SharedNest::new(state)).await
+}
+
+/// Serve a caller-held [`SharedNest`] — the variant a hot upgrade uses so it can keep the handle and
+/// atomically flip the backing (RFC-0020 slice 2b) while serving stays up on the same listener.
+pub async fn run_shared(listen: &str, shared: SharedNest) -> Result<()> {
+    bind_and_serve(listen, router(shared)).await
 }
 
 /// Serve many nests behind one listener (RFC-0012 roost, slice 1): a `/nests` roster plus every nest's

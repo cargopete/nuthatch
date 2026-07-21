@@ -1,9 +1,11 @@
 # RFC-0020: Nest lifecycle and the N-1 upgrade — kill the subgraph resync tax
 
-- Status: **Accepted** (2026-07-21) — **slice 1** (compatible/breaking classifier + `nest diff`) and
-  **slice 2a** (the atomic serving-swap mechanism: `SharedNest` re-points an endpoint's backing with no
-  rebind, via axum `FromRef` so no handler changes) shipped 2026-07-21; **slice 2b** (index-new-then-
-  flip orchestration), 3 (breaking → new endpoint + deprecation), 4 (segment reuse) pending.
+- Status: **Accepted** (2026-07-21) — shipped 2026-07-21: **slice 1** (classifier + `nest diff`),
+  **slice 2a** (atomic serving-swap mechanism), **slice 2b core** (concurrent re-index + atomic flip:
+  `await_catchup_and_flip` runs the old+new indexers together and flips when the new catches up —
+  proven end-to-end with two real indexers over a scripted chain). Pending: **slice 2b-ii** (the
+  `nest upgrade` CLI wrapper wiring the flow with fate-sharing + old-teardown), **3** (breaking → new
+  endpoint + deprecation), **4** (segment reuse).
 - Author: Pete (cargopete)
 - Date: 2026-07-21
 - Depends on: RFC-0012 (a nest version *is* a content-addressed bundle), RFC-0019 (the registry that

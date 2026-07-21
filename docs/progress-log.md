@@ -2,6 +2,20 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-21 - RFC-0020 slice 2b (core): the concurrent re-index + atomic flip, proven end-to-end.**
+  The compatible hot-upgrade Chief chose (full concurrent): `await_catchup_and_flip` runs the **old and
+  new versions' indexers together**, serving the old backing, and **atomically flips** the endpoint to
+  the new version once it catches up — zero downtime, the consumer's endpoint never changes. Catch-up is
+  a new `Store::indexed_head()` (max of the hot `last_block` and sealed watermarks, correct whether tip-
+  following or seal-direct backfilling) fed to a `caught_up(new, old)` predicate that requires the new
+  version to have *actually* indexed (`Some`) before flipping — else it fired prematurely at t=0 when
+  both heads were empty (caught in the e2e, fixed). `serve::run_shared` serves a caller-held
+  `SharedNest` so the runtime keeps the flip handle. **Proven deterministically**: an e2e stands up two
+  real `spawn_nest` indexers over one scripted `TapeSource`, serves the old, and asserts the SAME
+  endpoint's backing flips old→new (told apart by `dir`) once the new reaches the tip. Runs two hot
+  stores during the overlap — the density cost accepted for decode-changed generality. Pending: the
+  `nest upgrade` CLI wrapper (2b-ii). 3 new tests (caught_up, indexed_head via the e2e, the flip e2e),
+  224 lib + 3 e2e green, clippy + fmt clean.
 - **2026-07-21 - RFC-0020 slice 2a: the atomic serving-swap mechanism (+ a repo-wide `fmt` fix).** The
   primitive a compatible hot-swap needs: a `SharedNest` handle (lock-free `arc-swap`) wraps the
   `AppState` backing one served endpoint, and the router binds *it* instead of a fixed state. Every

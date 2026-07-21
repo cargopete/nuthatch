@@ -212,15 +212,30 @@ fn schema_path(p: &Path) -> PathBuf {
     }
 }
 
-/// `nuthatch nest diff <old> <new>`: classify an update between two nests (each a nest dir or a
-/// `schema.json` path) and print the verdict with its reasons. Slice 1 is decision-only — it prints
-/// what a later slice will *act* on (compatible → same endpoint; breaking → a new one).
-pub fn diff_cli(old: &Path, new: &Path) -> Result<()> {
+/// Classify an update between two nests, each given as a nest directory or a `schema.json` path.
+/// Shared by `nest diff` (slice 1) and the hot-upgrade gate (slice 2b).
+pub fn classify_paths(old: &Path, new: &Path) -> Result<Classification> {
     let old_json = std::fs::read_to_string(schema_path(old))
         .with_context(|| format!("reading old schema from {}", old.display()))?;
     let new_json = std::fs::read_to_string(schema_path(new))
         .with_context(|| format!("reading new schema from {}", new.display()))?;
-    let c = classify_schemas(&old_json, &new_json)?;
+    classify_schemas(&old_json, &new_json)
+}
+
+/// Has the new version's indexed head reached the old version's? The flip condition a compatible hot
+/// upgrade polls (RFC-0020 slice 2b): serving can atomically swap once the new version is at least as
+/// current as the old, with no visible regression. The new version must have **actually indexed**
+/// (`Some`) — waiting for that avoids a premature flip before the new indexer commits anything; a
+/// missing old head counts as 0 (nothing to catch up to).
+pub fn caught_up(new_head: Option<u64>, old_head: Option<u64>) -> bool {
+    matches!(new_head, Some(n) if n >= old_head.unwrap_or(0))
+}
+
+/// `nuthatch nest diff <old> <new>`: classify an update between two nests (each a nest dir or a
+/// `schema.json` path) and print the verdict with its reasons. Slice 1 is decision-only — it prints
+/// what a later slice will *act* on (compatible → same endpoint; breaking → a new one).
+pub fn diff_cli(old: &Path, new: &Path) -> Result<()> {
+    let c = classify_paths(old, new)?;
 
     let additive = c.additive_changes().count();
     match c.verdict {
@@ -281,6 +296,19 @@ mod tests {
         let c = verdict(&base(), &base());
         assert_eq!(c.verdict, Verdict::Compatible);
         assert!(c.changes.is_empty());
+    }
+
+    #[test]
+    fn caught_up_predicate() {
+        assert!(caught_up(Some(100), Some(100)), "reached");
+        assert!(caught_up(Some(101), Some(100)), "ahead");
+        assert!(!caught_up(Some(99), Some(100)), "behind");
+        assert!(
+            !caught_up(None, None),
+            "new not started yet — don't flip prematurely"
+        );
+        assert!(!caught_up(None, Some(1)), "new not started, old has data");
+        assert!(caught_up(Some(1), None), "new started, old empty");
     }
 
     #[test]
