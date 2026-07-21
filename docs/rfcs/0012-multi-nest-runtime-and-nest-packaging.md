@@ -212,8 +212,52 @@ A nest blob is the nest's **authored inputs**, canonicalised and content-address
 There is deliberately **no default Nuthatch-hosted registry**. A hosted nest registry
 or marketplace would be a gated service / phone-home, which the brief forbids and this
 RFC does not walk into. If such a thing is ever wanted it is a separate conversation and
-almost certainly *GraphOps'* layer, not core's. `pack` (produce a blob from a nest dir)
-and `mount` (resolve + verify + install a blob) are the only two verbs core owns.
+almost certainly *GraphOps'* layer, not core's. `bundle` (produce a `.bundle` from a nest
+dir) and `load` (resolve + verify + install one) are the only two verbs core owns.
+
+#### 5a. Load-by-name via a BYO index (Layer 2 — designed 2026-07-21, next slice)
+
+The crates.io/npm *feel* — `nest load <name>` instead of a raw hash/URL — is achievable
+**without** crossing the line above, because a registry index is just another entry in the
+BYO transport list, not a service core runs. Core gains name *resolution*; it still hosts
+nothing.
+
+- **The index is a static file.** A registry is a directory (or any static host) containing
+  `.bundle` files plus an `index.json`:
+  ```json
+  {
+    "registry_format_version": 1,
+    "nests": {
+      "horizon": {
+        "latest": "0.1.0",
+        "versions": {
+          "0.1.0": { "bundle": "horizon-3c2ebe243ac9.bundle",
+                     "hash": "3c2ebe243ac9…", "generator": "0.5.0" }
+        }
+      }
+    }
+  }
+  ```
+  `bundle` is **relative to the index**, so the whole registry dir is portable — serve it from
+  S3, a GitHub release, a plain file server, or `file://` a local dir. The content address
+  (`hash`) is the truth; `version` is a human label. Resolution is still a hash-verified
+  `load` under the hood — the index only maps a name to a hash+location.
+- **Read side (`load <name>[@version]`):** resolve name → `{bundle, hash}` in a configured
+  registry (a URL prefix or a local dir, BYO — default none), fetch the `.bundle`, and verify
+  by `hash` exactly as `load <url>` does today. No token to read, no telemetry, degrades to
+  plain `load <url|file>` when no registry is configured.
+- **Publish side stays out of a hosted service.** Core does **not** upload or run a registry.
+  A `nest index <dir> --into <registry-dir>` helper (optional) only *writes local files* — it
+  copies the `.bundle` into a local registry dir and updates that dir's `index.json`. The
+  operator then hosts that dir however they like (git, S3, a VPS). "Publishing" is
+  copy-a-file-to-your-host, documented as a recipe — never a call home.
+- **Why this is safe:** the index is data, not a dependency; the registry URL is configurable
+  with no default; reads need no auth; and every install is still content-addressed and
+  hash-verified. It honours §5's line — core resolves, GraphOps (or you, on your VPS) hosts.
+
+_Status: designed, not built. The read side (load-by-name) needs no infra and is the first
+buildable slice; the `nest index` helper is a local-files convenience; any hosted registry is
+the operator's VPS, not core's._
 
 ### 6. Serving surface
 
