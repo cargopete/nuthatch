@@ -150,11 +150,14 @@ who need more — none of it in the way of the happy path:
 - **Roost — many nests, one runtime** (RFC-0012). Host many contracts/nests on the same chain in one
   process, sharing a single cursor and one `getLogs` per window — N nests for roughly one nest's RPC
   cost, with per-nest isolation and a per-runtime footprint budget.
-- **Nest bundles — bundle one, load it anywhere.** `nuthatch nest bundle` packs a nest's authored
-  inputs into one portable, content-addressed `.bundle` file; `nest load <bundle-or-url>` verifies and
-  installs it — regenerating the decode registry and asserting it matches — so anyone can run your
-  *exact* nest from a file or a URL, hash-verified. Self-hosted-first: no registry required (a shared
-  index is roadmap).
+- **Nest bundles + registry — bundle one, publish it, load it anywhere.** `nuthatch nest bundle` packs
+  a nest's authored inputs into one portable, content-addressed `.bundle`; `nest load <bundle-or-url>`
+  verifies and installs it — regenerating the decode registry and asserting it matches — so anyone runs
+  your *exact* nest, hash-verified. Share at scale with a **registry** (RFC-0019): `nest publish <bundle>
+  --registry <path|s3://…> --as name@version`, then `nest load name@version --registry …` — a filesystem
+  path or any S3-compatible bucket (MinIO/S3/R2, via `AWS_*` env), with **private nests** behind your
+  bucket's auth. Self-hosted-first: the registry is decoupled and never mandatory — a self-built bundle
+  and `load <file|dir>` need no registry at all. (S3 backend: build with `--features object-store`.)
 - **Metrics.** Prometheus `/metrics` — tip lag, rows decoded/sealed, reorgs, query counts, RSS.
 
 ---

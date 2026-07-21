@@ -2,6 +2,16 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-21 - RFC-0019 slice 3: private nests — access denied, said out loud.** A private nest is a
+  bundle only the credentialed can fetch; the mechanism is the store's (S3 bucket policy / filesystem
+  perms), so this slice is about *legibility*: a rejected/absent-credential read now surfaces a clear
+  "this nest is private, or your registry credential was rejected (check AWS_* / directory permissions)"
+  — **distinct from "not found"**, so a private nest never masquerades as absent. Both backends route
+  denials through one shared message: `ObjStore` maps `PermissionDenied`/`Unauthenticated`, `FsStore`
+  maps `io::ErrorKind::PermissionDenied`. Auth itself stays delegated (S3 = `AWS_*` env, FS = perms) —
+  no bespoke credential store, and bundles remain secret-free (runtime creds are RFC-0022 injection).
+  **RFC-0019 complete** (all 3 slices). 9 distribution tests (incl. a root-guarded FS permission test)
+  across both build configs; 214 lib tests green; clippy clean. README updated.
 - **2026-07-21 - RFC-0019 slice 2: the S3 object-store registry backend.** The same `BundleStore`
   contract, now over an S3-compatible bucket (`--registry s3://bucket/prefix`) — MinIO/S3/R2 via `AWS_*`
   env (incl. `AWS_ENDPOINT`). `open()` dispatches by scheme: `s3://`/`memory://` → the object store,

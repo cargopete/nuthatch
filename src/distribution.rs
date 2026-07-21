@@ -75,6 +75,17 @@ fn validate_token(t: &str) -> Result<()> {
     Ok(())
 }
 
+/// The message shown when a registry *denies* access — a private nest fetched (or published) without a
+/// credential, or with one the store rejected (RFC-0019 §3). Kept in one place so every backend says
+/// the same helpful thing, and distinct from "not found" so a private nest never masquerades as absent.
+fn access_denied(subject: &str) -> String {
+    format!(
+        "{subject}: access denied by the registry — this nest is private, or your registry credential \
+         was rejected. For S3, check your AWS_* env (keys, region, AWS_ENDPOINT); for a filesystem \
+         registry, check directory permissions."
+    )
+}
+
 /// A content-addressed bundle store: immutable blobs keyed by hash, plus a thin name→hash index. Both
 /// a local directory ([`FsStore`]) and an S3 bucket ([`ObjectStore`]) implement this; callers never see
 /// which. Async because object storage is — the FS impl just does its (fast) sync work in an async fn.
@@ -133,9 +144,7 @@ impl BundleStore for FsStore {
 
     async fn get_blob(&self, hash: &str) -> Result<Vec<u8>> {
         let path = self.blob_path(hash);
-        std::fs::read(&path).with_context(|| {
-            format!("blob {hash} not found in registry (no {})", path.display())
-        })
+        std::fs::read(&path).map_err(|e| map_io_err(e, &format!("blob {hash}"), &path))
     }
 
     async fn set_ref(&self, name: &str, version: &str, hash: &str) -> Result<()> {
@@ -150,10 +159,22 @@ impl BundleStore for FsStore {
 
     async fn get_ref(&self, name: &str, version: &str) -> Result<String> {
         let path = self.ref_path(name, version);
-        let hash = std::fs::read_to_string(&path).with_context(|| {
-            format!("nest '{name}@{version}' not found in this registry")
-        })?;
-        Ok(hash.trim().to_string())
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| map_io_err(e, &format!("nest '{name}@{version}'"), &path))?;
+        Ok(raw.trim().to_string())
+    }
+}
+
+/// Map a filesystem read error into a legible registry error: a missing file is "not found", a
+/// permission error is the shared [`access_denied`] message (a private FS registry), anything else
+/// keeps its context. Read-side only — where the private-vs-absent distinction matters to a puller.
+fn map_io_err(e: std::io::Error, subject: &str, path: &Path) -> anyhow::Error {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => {
+            anyhow::anyhow!("{subject} not found in this registry")
+        }
+        std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(access_denied(subject)),
+        _ => anyhow::Error::new(e).context(format!("reading {}", path.display())),
     }
 }
 
@@ -320,6 +341,21 @@ mod object_store_impl {
         }
     }
 
+    /// Map an object-store error into a legible registry error: `NotFound` → "not found",
+    /// `PermissionDenied`/`Unauthenticated` (a private bucket, missing/rejected creds) → the shared
+    /// [`access_denied`] message, anything else keeps its context. So a private nest fails *loudly* and
+    /// distinctly, never as a bare "not found".
+    fn map_obj_err(e: object_store::Error, subject: &str) -> anyhow::Error {
+        match e {
+            object_store::Error::NotFound { .. } => {
+                anyhow::anyhow!("{subject} not found in this registry")
+            }
+            object_store::Error::PermissionDenied { .. }
+            | object_store::Error::Unauthenticated { .. } => anyhow::anyhow!(access_denied(subject)),
+            other => anyhow::Error::new(other).context(subject.to_string()),
+        }
+    }
+
     #[async_trait]
     impl BundleStore for ObjStore {
         async fn put_blob(&self, hash: &str, bytes: &[u8]) -> Result<()> {
@@ -331,18 +367,17 @@ mod object_store_impl {
             self.inner
                 .put(&key, object_store::PutPayload::from(bytes.to_vec()))
                 .await
-                .with_context(|| format!("writing blob {hash}"))?;
+                .map_err(|e| map_obj_err(e, &format!("blob {hash}")))?;
             Ok(())
         }
 
         async fn get_blob(&self, hash: &str) -> Result<Vec<u8>> {
             let key = self.blob_key(hash);
-            let got = self.inner.get(&key).await.map_err(|e| match e {
-                object_store::Error::NotFound { .. } => {
-                    anyhow::anyhow!("blob {hash} not found in registry")
-                }
-                other => anyhow::Error::new(other).context("fetching blob"),
-            })?;
+            let got = self
+                .inner
+                .get(&key)
+                .await
+                .map_err(|e| map_obj_err(e, &format!("blob {hash}")))?;
             Ok(got.bytes().await.context("reading blob bytes")?.to_vec())
         }
 
@@ -351,18 +386,17 @@ mod object_store_impl {
             self.inner
                 .put(&key, object_store::PutPayload::from(hash.as_bytes().to_vec()))
                 .await
-                .with_context(|| format!("writing ref {name}@{version}"))?;
+                .map_err(|e| map_obj_err(e, &format!("nest '{name}@{version}'")))?;
             Ok(())
         }
 
         async fn get_ref(&self, name: &str, version: &str) -> Result<String> {
             let key = self.ref_key(name, version);
-            let got = self.inner.get(&key).await.map_err(|e| match e {
-                object_store::Error::NotFound { .. } => {
-                    anyhow::anyhow!("nest '{name}@{version}' not found in this registry")
-                }
-                other => anyhow::Error::new(other).context("resolving ref"),
-            })?;
+            let got = self
+                .inner
+                .get(&key)
+                .await
+                .map_err(|e| map_obj_err(e, &format!("nest '{name}@{version}'")))?;
             let raw = got.bytes().await.context("reading ref")?;
             Ok(String::from_utf8(raw.to_vec())
                 .context("ref is not valid utf-8")?
@@ -442,6 +476,46 @@ abi = "abis/c.json"
         // Unknown ref and unknown blob both fail loudly.
         assert!(store.get_ref("n", "9.9.9").await.is_err());
         assert!(store.get_blob("deadbeef").await.is_err());
+    }
+
+    #[test]
+    fn access_denied_message_is_helpful_and_distinct() {
+        let m = access_denied("nest 'secret@1.0.0'");
+        assert!(m.contains("private"), "got: {m}");
+        assert!(m.contains("AWS_"), "got: {m}");
+        assert!(m.contains("access denied"), "got: {m}");
+        // Distinct from "not found" so a private nest never reads as merely absent.
+        assert!(!m.contains("not found"), "got: {m}");
+    }
+
+    /// A filesystem registry whose ref file we can't read (a private FS registry) surfaces the clear
+    /// "access denied / private" message, not a bare "not found". Root bypasses file perms, so skip
+    /// there; perms are restored so the tempdir cleans up regardless.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_store_maps_permission_denied_to_a_clear_message() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let store = FsStore::new(root.path());
+        store.set_ref("secret", "1.0.0", "abc123").await.unwrap();
+        let path = root.path().join("index/secret/1.0.0");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            // Running as root — file perms don't apply; the test can't be meaningful.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).ok();
+            return;
+        }
+        let err = store
+            .get_ref("secret", "1.0.0")
+            .await
+            .unwrap_err()
+            .to_string();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).ok();
+        assert!(err.contains("access denied"), "got: {err}");
+        assert!(
+            !err.contains("not found"),
+            "a denied read must not read as absent; got: {err}"
+        );
     }
 
     #[tokio::test]

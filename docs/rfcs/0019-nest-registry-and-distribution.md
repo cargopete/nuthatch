@@ -1,8 +1,9 @@
 # RFC-0019: The nest registry and distribution — publish, pull, private nests
 
-- Status: **Accepted** (2026-07-21) — **slices 1–2 shipped 2026-07-21**: slice 1 (FsStore + publish/
-  load + refs), slice 2 (S3 `ObjectStore` behind `--features object-store`). Slice 3 (private nests +
-  auth) pending.
+- Status: **Implemented** (2026-07-21) — all three slices: slice 1 (FsStore + publish/load + refs),
+  slice 2 (S3 `ObjectStore` behind `--features object-store`), slice 3 (private nests + auth: 401/403 →
+  a clear "private / credential rejected" message, distinct from "not found"). Live MinIO/S3 integration
+  verification is a VPS run (in-memory + FS paths are unit-covered).
 - Author: Pete (cargopete)
 - Date: 2026-07-21
 - Depends on: RFC-0012 (content-addressed `.bundle` — the artifact this distributes; identity,
