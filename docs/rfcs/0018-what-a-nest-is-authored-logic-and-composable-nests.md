@@ -1,8 +1,18 @@
 # RFC-0018: What a nest is — first-class authored logic (SQL views) and composable, parameterized nests (Starlark)
 
-- Status: Draft (v1)
+- Status: **§1 Implemented · §2 (Starlark) retired · §3 deferred** (updated 2026-07-21)
 - Author: Pete (cargopete)
 - Date: 2026-07-19
+- Update (2026-07-21): **§2 (Starlark composition) is retired as an authoring path, and the two-nest
+  graph dogfood is dropped.** First-party nests are `horizon-nest` and `uniswap-v3-nest` — different
+  protocols with nothing shared, both authored in plain `nuthatch.toml`, so the fork-vs-instance
+  problem §2 solved no longer exists (there is nothing to reuse across). `horizon-nest` reverted from
+  `lib.star`/`nest.star` to `nuthatch.toml`, **keeping** the §1 `semantic.toml` meaning-layer and
+  `views/` (they validate clean under `check`); the redundant `graph-network-nest` fork is binned (see
+  RFC-0011). **§5 collapses** to "horizon is the single §1 exemplar." The Starlark front-end
+  (`src/starlark_config.rs`) remains shipped-but-unused in the binary; removing it is an optional
+  future footprint cleanup, not part of this decision. §1 stands on its own — which was always the
+  layering's whole point.
 - Depends on: RFC-0001 (generalized decode + the nest as the unit), RFC-0012 (content-addressed
   packaging — the nest as a reproducible blob), RFC-0013 §3 (SQL-over-the-tip: the DuckDB hot∪cold
   union these views ride on), RFC-0016 (the semantic layer these views live beside, and the
