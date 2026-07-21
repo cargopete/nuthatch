@@ -45,6 +45,8 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
+tar = "0.4"
+tempfile = "3"
 rustyline = "18.0.1"
 starlark = "0.14"
 
@@ -55,7 +57,6 @@ exex = []
 
 [dev-dependencies]
 proptest = "1"
-tempfile = "3"
 
 [profile.release]
 lto = "thin"

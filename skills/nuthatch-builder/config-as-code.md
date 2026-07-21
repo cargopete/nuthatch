@@ -121,7 +121,7 @@ library/entry split being enforced, not a bug. Keep instantiation in the entry.
 2. **Only the fields listed above** — an unknown field is a load error, not a silent no-op.
 3. **It resolves to a `Config`, then stops.** The interpreter runs once at `nuthatch dev` / mount time
    and is dropped; it never touches the data path, so determinism in the core is untouched.
-4. **Everything downstream is identical.** `pack`, mount, semantic layer, views — all operate on the
+4. **Everything downstream is identical.** `bundle`, load, semantic layer, views — all operate on the
    resolved config and neither know nor care that it came from Starlark.
 
 If you find yourself wanting logic a `nest.star` can't express, that's the signal you're reaching past

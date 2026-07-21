@@ -150,9 +150,11 @@ who need more — none of it in the way of the happy path:
 - **Roost — many nests, one runtime** (RFC-0012). Host many contracts/nests on the same chain in one
   process, sharing a single cursor and one `getLogs` per window — N nests for roughly one nest's RPC
   cost, with per-nest isolation and a per-runtime footprint budget.
-- **Nest blobs.** `nuthatch nest pack` turns a nest's authored inputs into a content-addressed,
-  reproducible deploy unit; `nest mount <blob>` verifies and installs it (regenerating the decode
-  registry and asserting it matches).
+- **Nest bundles — bundle one, load it anywhere.** `nuthatch nest bundle` packs a nest's authored
+  inputs into one portable, content-addressed `.bundle` file; `nest load <bundle-or-url>` verifies and
+  installs it — regenerating the decode registry and asserting it matches — so anyone can run your
+  *exact* nest from a file or a URL, hash-verified. Self-hosted-first: no registry required (a shared
+  index is roadmap).
 - **Metrics.** Prometheus `/metrics` — tip lag, rows decoded/sealed, reorgs, query counts, RSS.
 
 ---

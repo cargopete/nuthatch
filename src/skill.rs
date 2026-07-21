@@ -68,7 +68,7 @@ fn render_command(cmd: &clap::Command, path: &str, out: &mut String) {
         }
     }
 
-    // Nested subcommands (e.g. `roost dev`, `nest pack`) render under their parent's path.
+    // Nested subcommands (e.g. `roost dev`, `nest bundle`) render under their parent's path.
     let mut subs: Vec<_> = cmd.get_subcommands().collect();
     subs.sort_by_key(|c| c.get_name());
     for sub in subs {

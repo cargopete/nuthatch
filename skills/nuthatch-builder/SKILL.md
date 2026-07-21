@@ -39,7 +39,7 @@ nuthatch sql "SELECT count(*), sum(value_dec) FROM usdc__transfer"
   repetitive config in code, or `load()` one nest to extend another instead of forking it. Read only if
   a nest's config wants a loop or composition.
 - **[workflows.md](workflows.md)** — the recipes: init→dev→sql, add a contract, factories, publish a
-  nest (pack/mount), run a roost, wire an AI client.
+  nest (bundle/load), run a roost, wire an AI client.
 - **[views.md](views.md)** — a nest's logic layer: authoring `views/*.sql` derivations, describing them
   in `semantic.toml`, and the reserved-word / big-int / hot∪cold footguns.
 - **[compliance.md](compliance.md)** — labels, sanctions lists, screening, flags, exposure, the signed

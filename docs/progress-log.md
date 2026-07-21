@@ -2,6 +2,26 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-21 - RFC-0012: nest packaging becomes first-class — `bundle` a nest, `load` it anywhere.**
+  The packaging verbs are renamed and the artifact is now a single portable file: `nest pack` → **`nest
+  bundle`** (produces one content-addressed `.bundle` — a tar of the manifest + authored inputs;
+  `--as-dir` keeps the old unpacked-dir form for inspection), and `nest mount` → **`nest load`**, which
+  now resolves a `.bundle` file, an `http(s)` URL to one, *or* an unpacked dir → verify → install. The
+  rename also kills two collisions: `nuthatch pack` is the compliance pack (RFC-0008) and roost still
+  *mounts* nests. This closes the "shareable nest" gap: a nest is now one file you can drop on any static
+  host, and anyone runs your *exact* nest with `nest load <url>`, hash-verified (every file checked
+  against the manifest, decode registry reproduced from the inputs). Identity is unchanged — the blob
+  hash is still over the canonical manifest, so the tar's byte layout is immaterial. Self-hosted-first by
+  construction; a URL is the only network touch and only when you pass one. Added a `tar` dep (+
+  `tempfile` promoted to a runtime dep for the extract-to-temp path) and CLI `tip:` hints for the niche
+  flow. **Every agent-facing surface synced in lockstep** — the builder skill (`cli-reference.md`
+  regenerated, `workflows.md`/`SKILL.md`/`config-as-code.md`), README, and RFC updated, so the skill
+  never teaches a command that no longer exists. Verified live: `bundle` on horizon-nest → a 262 KB
+  `.bundle` (17 files) → `load` reinstalls it with the registry reproduced ✓. 203 lib tests green (incl.
+  a bundle→load roundtrip), clippy + fmt clean. Next: the optional crates.io-style registry index
+  (self-hosted-first, no mandatory service). _Also this session: beacon-proxy + EIP-1822 ABI
+  introspection (#116), live admin SSE (#115), single-graph-nest doc reconcile (#113)._
+
 - **2026-07-20 - Hardening: chunk the `block_timestamps` batch (RPC batch-size limits).** Third find from
   building the Uniswap-v3 nest: a dense window needing 1447 distinct block timestamps was sent as a single
   1447-item `eth_getBlockByNumber` JSON-RPC batch, which the provider (a real dedicated Arbitrum node)

@@ -49,7 +49,7 @@ pub struct RoostMeta {
     /// owns the chain connection). Overridable at runtime with `--rpc`.
     pub rpc_urls: Vec<String>,
     /// The mounted nests, by directory name under `nests/`. (A future slice resolves blob hashes here
-    /// via `nest mount`; slice 1 takes plain directory names already present on disk.)
+    /// via `nest load`; slice 1 takes plain directory names already present on disk.)
     pub nests: Vec<String>,
     /// Resident-set ceiling for the whole roost, in MB (RFC-0012 §3 — the footprint budget is
     /// per-runtime). A mount whose *projected* RSS exceeds this is refused before it starts. Absent →

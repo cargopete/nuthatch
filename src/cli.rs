@@ -113,36 +113,44 @@ pub struct NestArgs {
 
 #[derive(Subcommand)]
 pub enum NestWhat {
-    /// Pack a nest directory into a content-addressed blob: its authored inputs (config, ABIs, views,
-    /// labels, skills) plus a `manifest.json` pinning the expected decode-registry hash. Prints the
-    /// blob hash — the nest's content address.
-    Pack(NestPackArgs),
-    /// Verify a nest blob and install it as a runnable nest directory. Checks the manifest format, each
-    /// file's hash, and that the decode registry regenerated from the inputs matches the manifest.
-    Mount(NestMountArgs),
+    /// Bundle a nest into one portable, content-addressed `.bundle` file — its authored inputs (config,
+    /// ABIs, views, labels, skills) plus a `manifest.json` pinning the expected decode-registry hash.
+    /// Share the `.bundle` anywhere (a URL, a file); anyone can `load` it to run your exact nest,
+    /// verified by hash. Prints the bundle's content address.
+    Bundle(NestBundleArgs),
+    /// Load a bundle: verify a `.bundle` (or a URL to one, or an unpacked bundle dir) and install it as
+    /// a runnable nest. Checks the manifest format, every file's hash, and that the decode registry
+    /// regenerated from the inputs matches the manifest — so a loaded nest decodes exactly as authored.
+    Load(NestLoadArgs),
 }
 
 #[derive(Args)]
-pub struct NestPackArgs {
-    /// Nest directory to pack.
+pub struct NestBundleArgs {
+    /// Nest directory to bundle.
     #[arg(default_value = ".")]
     pub dir: String,
 
-    /// Output blob directory (default: `<nest-name>-<hash>.nest` beside the nest).
+    /// Output path for the `.bundle` (default: `<nest-name>-<hash>.bundle` beside the nest). With
+    /// `--as-dir`, an unpacked bundle *directory* is written here instead of a single file.
     #[arg(long)]
     pub out: Option<String>,
+
+    /// Write an unpacked bundle directory instead of a single `.bundle` file (handy for inspecting a
+    /// bundle's contents).
+    #[arg(long)]
+    pub as_dir: bool,
 }
 
 #[derive(Args)]
-pub struct NestMountArgs {
-    /// Blob directory to mount (a `nest pack` output).
-    pub blob: String,
+pub struct NestLoadArgs {
+    /// The bundle to load: a `.bundle` file, an `http(s)://` URL to one, or an unpacked bundle directory.
+    pub bundle: String,
 
     /// Target directory to install the nest into (default: the nest's name).
     #[arg(long)]
     pub dir: Option<String>,
 
-    /// Assert the blob's content-address hash equals this value before installing.
+    /// Assert the bundle's content-address hash equals this value before installing.
     #[arg(long)]
     pub expect: Option<String>,
 }

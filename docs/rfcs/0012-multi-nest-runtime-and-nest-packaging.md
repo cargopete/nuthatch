@@ -5,6 +5,15 @@
   operators docs. Verified live on Arbitrum (two nests, one cursor, ~110 MB resident). One open
   acceptance item: a sustained byte-identical-vs-solo table-parity run (holds by construction — the
   shared cursor runs the same per-window code as solo `dev`).
+- Update (2026-07-21): the two packaging verbs are renamed and the artifact is now a **single portable
+  file**. `nest pack` → **`nest bundle`** (writes a content-addressed `.bundle`; `--as-dir` keeps the
+  old unpacked-dir form), and `nest mount` → **`nest load`** (installs a `.bundle` file, an `http(s)`
+  URL to one, or an unpacked dir). The rename also disambiguates the two former `pack`/`mount`
+  collisions — `nuthatch pack` is the compliance pack (RFC-0008) and roost still *mounts* nests.
+  Identity, verification, and the registry-reproduce check are unchanged — the `.bundle` is just a tar
+  of the same manifest+inputs, so the blob hash is still over the canonical manifest. This is the
+  "first-class shareable nest" layer; an optional self-hosted-first registry index (crates.io-style, no
+  mandatory service) is the next slice.
 - Author: Pete (cargopete)
 - Date: 2026-07-17
 - Depends on: RFC-0001 (Implemented — decode registry, nest toml), RFC-0009

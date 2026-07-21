@@ -61,12 +61,14 @@ factory events).
 A nest is a self-contained, content-addressed deploy unit — ABIs vendored, config + semantics pinned.
 
 ```sh
-nuthatch nest pack .                  # → a <name>-<hash>.nest blob; prints the content-address
-nuthatch nest mount ./my-nest.nest    # verifies every file hash + re-derives the decode registry
+nuthatch nest bundle .                     # → a <name>-<hash>.bundle file; prints the content-address
+nuthatch nest load ./my-nest.bundle        # verifies every file hash + re-derives the decode registry
+# load also accepts an http(s):// URL to a .bundle, so a nest is shareable from any static host:
+nuthatch nest load https://host/my-nest.bundle --expect <hash>
 ```
 
-`mount` fails loudly if the inputs don't reproduce the manifest's registry hash — same inputs + same
-generator → same decode, verifiably. `semantic.toml` travels in the blob and is hash-checked too.
+`load` fails loudly if the inputs don't reproduce the manifest's registry hash — same inputs + same
+generator → same decode, verifiably. `semantic.toml` travels in the bundle and is hash-checked too.
 
 You can also `init --from <git-url|dir>` to start from a published nest instead of an address.
 
