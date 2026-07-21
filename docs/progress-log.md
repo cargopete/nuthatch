@@ -2,6 +2,18 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-21 - RFC-0021 slice 1: the multichain roost — one isolated cursor per chain.** A roost can
+  now host nests across **multiple chains** in one runtime: `roost.toml` gains `[[chains]]` (each chain +
+  its own rpc_urls), nests declare their own chain, and `group_by_chain` groups them — **one isolated
+  cursor per distinct chain** (a `spawn_roost` each, its own source/tip/finality/reorg). The RSS budget
+  is now **per active-chain cursor** (RFC-0021 §0, already reflected in CLAUDE.md), checked per group.
+  `dev` fate-shares the server with *every* cursor via `select_all` — any cursor's death fails the whole
+  roost (C1, per-cursor). `--rpc` is refused for a multichain roost (ambiguous). **Capability, not
+  mandate**: a single-chain roost (top-level `chain`) is the N=1 case and stays **byte-identical to
+  solo** (roost-parity e2e green). The single-cursor law holds per chain — never multiplex two chains
+  behind one cursor. 4 new tests (grouping, two-chain, top-level+[[chains]] conflict, single→one
+  endpoint); 227 lib + 6 e2e green, clippy + fmt clean. Pending: a live two-chain run + a cross-cursor
+  reorg-isolation property test.
 - **2026-07-21 - RFC-0020 slice 4: segment reuse — the true no-re-index upgrade. RFC-0020 complete.**
   The final slice, and the one subgraphs structurally can't have: when a compatible update leaves the
   **decode registry unchanged** (a view/semantic/serving-only change), the old version's sealed segments

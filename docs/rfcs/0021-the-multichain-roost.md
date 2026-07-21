@@ -1,6 +1,10 @@
 # RFC-0021: The multichain roost — one runtime, many chains, one cursor each
 
-- Status: **Accepted** (2026-07-21) — §0 brief amendment applied to `CLAUDE.md` 2026-07-21
+- Status: **Accepted** (2026-07-21) — §0 brief amendment applied to `CLAUDE.md` 2026-07-21. **Slice 1
+  shipped 2026-07-21**: multichain config (`[[chains]]`), `group_by_chain` (one isolated cursor per
+  chain), the per-cursor runtime (one `spawn_roost` per chain, fate-shared via `select_all`), and the
+  **per-cursor RSS budget**. Single-chain roosts stay byte-identical to solo (parity e2e green). Pending:
+  a live two-chain run + a cross-cursor reorg-isolation property test.
 - Author: Pete (cargopete)
 - Date: 2026-07-21
 - Depends on: RFC-0012 (the roost — one runtime, many nests, shared serving; and the per-nest isolation

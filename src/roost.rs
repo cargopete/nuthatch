@@ -1,4 +1,10 @@
-//! The roost (RFC-0012 §1–4): one runtime hosting many nests on the same chain. Slice 1 landed the
+//! The roost (RFC-0012 §1–4; multichain per RFC-0021): one runtime hosting many nests across **one or
+//! more chains** — one isolated cursor per distinct chain (`group_by_chain` → a `spawn_roost` each),
+//! held to a **per-cursor** RSS budget. A single-chain roost (top-level `chain`) is the N=1 case, still
+//! byte-identical to solo `dev`. The single-cursor law holds per chain: never multiplex two chains
+//! behind one cursor. Below is the original RFC-0012 single-chain history.
+//!
+//! (RFC-0012) one runtime hosting many nests on the same chain. Slice 1 landed the
 //! **layout + serving surface** — a `roost.toml` naming the chain and the mounted nests, a `/nests`
 //! roster, and every nest's full API under a `/<name>/…` prefix. Slice 2a landed the **shared cursor**:
 //! `dev` now drives all nests from ONE `indexer::spawn_roost` task — one `getLogs` per window fanned
@@ -29,36 +35,54 @@ pub const ROOST_FILE: &str = "roost.toml";
 /// standalone nest is today.
 pub const NESTS_DIR: &str = "nests";
 
-/// A roost manifest: the shared chain identity plus the list of mounted nests. Chain identity is
-/// hoisted **here**, above the per-nest configs, because it is what the shared cursor is keyed on — a
-/// roost is one chain by definition (a second chain is a second cursor is a second process).
+/// A roost manifest: the mounted nests plus the chain(s) they follow. A roost may host nests across
+/// **one or more chains** (RFC-0021) — one isolated cursor per distinct chain. The single-chain form
+/// keeps the top-level `chain`/`chain_id`/`rpc_urls`; a multichain roost lists its chains under
+/// `[[chains]]` and lets each nest declare its own chain. The single-cursor law holds **per chain**:
+/// never multiplex two chains behind one cursor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Roost {
     pub roost: RoostMeta,
+    /// Multichain: each chain the roost serves, with its own RPC endpoints (RFC-0021). Mutually
+    /// exclusive with the top-level `chain`/`chain_id`. Empty → the single-chain top-level form.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chains: Vec<ChainEndpoint>,
+}
+
+/// One chain a roost follows, plus how to reach it — a cursor's substrate (RFC-0021).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChainEndpoint {
+    pub chain: String,
+    pub chain_id: u64,
+    #[serde(default)]
+    pub rpc_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoostMeta {
     /// Human name for the roost (logging/roster only).
     pub name: String,
-    /// The shared chain the cursor follows. Every mounted nest's `[nest].chain` must equal this.
-    pub chain: String,
-    /// The shared chain id. Every mounted nest's `[nest].chain_id` must equal this.
-    pub chain_id: u64,
-    /// RPC endpoints for the shared chain (a nest's own `rpc_urls` are ignored in a roost — the roost
-    /// owns the chain connection). Overridable at runtime with `--rpc`.
+    /// Single-chain form: the one chain the cursor follows. Omit (with `chain_id`) for a multichain
+    /// roost that declares its chains under `[[chains]]` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain: Option<String>,
+    /// Single-chain form: the one chain id. Omit for a multichain roost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<u64>,
+    /// Single-chain form: RPC endpoints for the one chain. Overridable at runtime with `--rpc`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rpc_urls: Vec<String>,
-    /// The mounted nests, by directory name under `nests/`. (A future slice resolves blob hashes here
-    /// via `nest load`; slice 1 takes plain directory names already present on disk.)
+    /// The mounted nests, by directory name under `nests/`.
     pub nests: Vec<String>,
-    /// Resident-set ceiling for the whole roost, in MB (RFC-0012 §3 — the footprint budget is
-    /// per-runtime). A mount whose *projected* RSS exceeds this is refused before it starts. Absent →
-    /// the CLAUDE.md 2 GB budget ([`DEFAULT_MAX_RSS_MB`]).
+    /// Resident-set ceiling **per active-chain cursor**, in MB (RFC-0021 — the footprint budget is
+    /// per-cursor; a roost's total is Σ cursors). A cursor whose *projected* RSS exceeds this is refused
+    /// before it starts. Absent → the CLAUDE.md 2 GB budget ([`DEFAULT_MAX_RSS_MB`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_rss_mb: Option<u64>,
 }
 
-/// The default roost RSS ceiling: the CLAUDE.md ≤2 GB per-runtime budget.
+/// The default per-cursor RSS ceiling: the CLAUDE.md ≤2 GB budget (RFC-0021 — now per active-chain
+/// cursor, not per whole runtime).
 pub const DEFAULT_MAX_RSS_MB: u64 = 2048;
 
 // A deliberately rough, *honest* per-runtime footprint model (RFC-0012 §3). These are order-of-
@@ -128,26 +152,84 @@ impl Roost {
     pub fn nest_dir(dir: &Path, name: &str) -> PathBuf {
         dir.join(NESTS_DIR).join(name)
     }
+
+    /// The chains this roost serves, each with its RPC endpoints (RFC-0021). A single-chain roost
+    /// synthesizes one entry from the top-level `chain`/`chain_id`/`rpc_urls`; a multichain roost
+    /// returns its `[[chains]]`. Errors if both forms are present (ambiguous) or neither (no chain).
+    pub fn chain_endpoints(&self) -> Result<Vec<ChainEndpoint>> {
+        let has_top = self.roost.chain.is_some() || self.roost.chain_id.is_some();
+        if !self.chains.is_empty() {
+            if has_top {
+                bail!(
+                    "roost '{}' declares both a top-level chain and [[chains]] — use one form",
+                    self.roost.name
+                );
+            }
+            return Ok(self.chains.clone());
+        }
+        match (self.roost.chain.clone(), self.roost.chain_id) {
+            (Some(chain), Some(chain_id)) => Ok(vec![ChainEndpoint {
+                chain,
+                chain_id,
+                rpc_urls: self.roost.rpc_urls.clone(),
+            }]),
+            _ => bail!(
+                "roost '{}' declares no chain — set [roost] chain/chain_id/rpc_urls, or [[chains]]",
+                self.roost.name
+            ),
+        }
+    }
 }
 
-/// Load a mounted nest's config and assert it belongs to this roost's chain. A chain (or chain-id)
-/// mismatch is a hard error: a different chain needs its own roost (its own cursor), so co-mounting it
-/// here would silently break the single-cursor model in slice 2.
-fn load_mounted_nest(roost_dir: &Path, roost: &RoostMeta, name: &str) -> Result<(PathBuf, Config)> {
+/// A chain's cursor unit (RFC-0021): the endpoint (RPC) plus the mounted nests that follow that chain.
+/// Each becomes one isolated cursor — the single-cursor law, held per chain.
+#[derive(Debug)]
+pub struct ChainGroup {
+    pub endpoint: ChainEndpoint,
+    pub nests: Vec<(String, PathBuf, Config)>,
+}
+
+/// Load a mounted nest's config (chain grouping is validated by [`group_by_chain`], not here).
+fn load_mounted_nest(roost_dir: &Path, name: &str) -> Result<(PathBuf, Config)> {
     let dir = Roost::nest_dir(roost_dir, name);
     let config = Config::load(&dir)
         .with_context(|| format!("loading mounted nest '{name}' from {}", dir.display()))?;
-    if config.nest.chain != roost.chain || config.nest.chain_id != roost.chain_id {
-        bail!(
-            "nest '{name}' is on {} (chain_id {}) but this roost is {} (chain_id {}) — a different \
-             chain needs its own roost",
-            config.nest.chain,
-            config.nest.chain_id,
-            roost.chain,
-            roost.chain_id
-        );
-    }
     Ok((dir, config))
+}
+
+/// Group loaded nests by their declared chain, matching each to a roost chain endpoint (RFC-0021).
+/// A nest whose chain the roost doesn't declare is a hard error; declared-but-unused chains are dropped
+/// (a cursor with no nests is pointless). Deterministic order (endpoints as declared).
+pub fn group_by_chain(
+    endpoints: &[ChainEndpoint],
+    mounted: Vec<(String, PathBuf, Config)>,
+) -> Result<Vec<ChainGroup>> {
+    let mut groups: Vec<ChainGroup> = endpoints
+        .iter()
+        .map(|e| ChainGroup {
+            endpoint: e.clone(),
+            nests: Vec::new(),
+        })
+        .collect();
+    for (name, path, config) in mounted {
+        let idx = groups.iter().position(|g| {
+            g.endpoint.chain == config.nest.chain && g.endpoint.chain_id == config.nest.chain_id
+        });
+        match idx {
+            Some(i) => groups[i].nests.push((name, path, config)),
+            None => bail!(
+                "nest '{name}' is on {} (chain_id {}), which this roost doesn't declare — add it under \
+                 [[chains]] (or [roost] chain/chain_id)",
+                config.nest.chain,
+                config.nest.chain_id
+            ),
+        }
+    }
+    groups.retain(|g| !g.nests.is_empty());
+    if groups.is_empty() {
+        bail!("roost mounts nests but none matched a declared chain");
+    }
+    Ok(groups)
 }
 
 /// `nuthatch roost dev <dir>`: bring up every mounted nest and serve them behind one listener.
@@ -170,76 +252,112 @@ pub async fn dev(
 ) -> Result<()> {
     let roost = Roost::load(&dir)?;
     let meta = &roost.roost;
-    tracing::info!(
-        "roost '{}' on {} (chain_id {}): mounting {} nest(s) — one shared cursor",
-        meta.name,
-        meta.chain,
-        meta.chain_id,
-        meta.nests.len(),
-    );
+    let endpoints = roost.chain_endpoints()?;
 
-    // The roost owns the chain connection: `--rpc` overrides win, else the roost's configured
-    // endpoints. ONE source (cursor) drives every nest (RFC-0012 §2 — the density win).
-    let rpc_urls = rpc::merge_rpcs(&rpc_override, meta.rpc_urls.clone());
-    if rpc_urls.is_empty() {
-        bail!(
-            "roost '{}' has no rpc_urls (set them in {ROOST_FILE} or pass --rpc)",
-            meta.name
-        );
-    }
-    let concurrency = indexer::safe_backfill_concurrency(rpc_urls.len(), concurrency);
-    let admin_enabled = indexer::admin_enabled(no_admin, &listen);
-    let admin_token = indexer::admin_required_token(admin_enabled, &listen);
-
-    // Load + chain-validate every mounted nest up front, and estimate each one's footprint. A failure
-    // to mount any nest fails the whole roost — better a loud refusal at startup than a roost silently
-    // serving a subset. Static and factory nests may be co-mounted (slice 2b); the cursor handles demux.
+    // Load every mounted nest, then group by chain — one isolated cursor per distinct chain (RFC-0021).
     let mut mounted = Vec::with_capacity(meta.nests.len());
-    let mut estimates: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     for name in &meta.nests {
-        let (nest_path, config) = load_mounted_nest(&dir, meta, name)?;
-        // Exposure view only spins up when the nest actually has labeled addresses (§3 estimate).
-        let has_labels = !crate::labels::load(&nest_path).is_empty();
-        estimates.insert(name.clone(), estimate_nest_rss_mb(&config, has_labels));
+        let (nest_path, config) = load_mounted_nest(&dir, name)?;
         mounted.push((name.clone(), nest_path, config));
     }
+    let groups = group_by_chain(&endpoints, mounted)?;
 
-    // Per-runtime footprint budget (RFC-0012 §3): refuse a mount whose *projected* RSS exceeds
-    // `max_rss` before it starts — density is RAM-bounded, not free. The projection is a rough estimate
-    // (the `/nests` roster reports the real RSS alongside); the refusal is a real gate.
-    let max_rss = meta.max_rss_mb.unwrap_or(DEFAULT_MAX_RSS_MB);
-    let projected: u64 = ROOST_BASE_RSS_MB + estimates.values().sum::<u64>();
-    tracing::info!(
-        "roost footprint: ~{projected} MB projected (base {ROOST_BASE_RSS_MB} MB + {} nest(s)); budget {max_rss} MB",
-        estimates.len()
-    );
-    if projected > max_rss {
+    // `--rpc` is ambiguous once a roost spans chains (which chain would it override?). Allow it only for
+    // a single-chain roost; a multichain roost sets rpc_urls per chain under [[chains]].
+    if !rpc_override.is_empty() && groups.len() > 1 {
         bail!(
-            "roost '{}' projects ~{projected} MB but max_rss is {max_rss} MB — raise max_rss in \
-             {ROOST_FILE}, drop a nest, or split into two roosts",
-            meta.name
+            "--rpc is ambiguous for a multichain roost ({} chains) — set rpc_urls per chain under [[chains]]",
+            groups.len()
         );
     }
+    tracing::info!(
+        "roost '{}': mounting {} nest(s) across {} chain(s) — one isolated cursor per chain",
+        meta.name,
+        meta.nests.len(),
+        groups.len(),
+    );
 
-    // One shared source, one shared-cursor ingestion task driving all nests through the same per-window
-    // code a solo `dev` runs (so per-nest tables are byte-identical to running each nest alone).
-    let source: Arc<dyn Source> = Arc::new(RpcClient::new(rpc_urls)?);
-    let (states, mut ingest, alert_workers) = indexer::spawn_roost(
-        source,
-        mounted,
-        backfill,
-        seal_direct,
-        concurrency,
-        window_override,
-        admin_enabled,
-        admin_token,
-    )
-    .await
-    .with_context(|| format!("bringing up roost '{}'", meta.name))?;
+    let admin_enabled = indexer::admin_enabled(no_admin, &listen);
+    let admin_token = indexer::admin_required_token(admin_enabled, &listen);
+    // The RSS budget is now **per active-chain cursor** (RFC-0021), not per whole runtime.
+    let max_rss = meta.max_rss_mb.unwrap_or(DEFAULT_MAX_RSS_MB);
 
-    // Roster (`GET /nests`) built from the mounted states, with per-nest footprint attribution (§3)
-    // and the roost's real resident set alongside the projection so operators can calibrate.
-    let roster_entries: Vec<_> = states
+    // Bring up one cursor per chain group: its own source + `spawn_roost`, isolated tip/finality/reorg,
+    // and held to the per-cursor RSS budget. A cursor's failure is the whole roost's failure (fate-share).
+    let mut all_states: Vec<(String, crate::serve::AppState)> = Vec::new();
+    let mut ingests: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::new();
+    let mut alert_workers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let mut estimates: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut roost_total_mb = ROOST_BASE_RSS_MB;
+
+    for group in groups {
+        let rpc_urls = rpc::merge_rpcs(&rpc_override, group.endpoint.rpc_urls.clone());
+        if rpc_urls.is_empty() {
+            bail!(
+                "roost '{}' chain {} has no rpc_urls (set them under [[chains]], or pass --rpc for a \
+                 single-chain roost)",
+                meta.name,
+                group.endpoint.chain
+            );
+        }
+        let concurrency = indexer::safe_backfill_concurrency(rpc_urls.len(), concurrency);
+
+        // Per-cursor footprint budget (RFC-0021): this chain's nests must fit ≤ max_rss.
+        let mut cursor_mb = 0u64;
+        for (name, path, config) in &group.nests {
+            let has_labels = !crate::labels::load(path).is_empty();
+            let mb = estimate_nest_rss_mb(config, has_labels);
+            estimates.insert(name.clone(), mb);
+            cursor_mb += mb;
+        }
+        tracing::info!(
+            "roost cursor on {} (chain_id {}): {} nest(s), ~{cursor_mb} MB projected; budget {max_rss} MB/cursor",
+            group.endpoint.chain,
+            group.endpoint.chain_id,
+            group.nests.len(),
+        );
+        if cursor_mb > max_rss {
+            bail!(
+                "roost '{}' cursor on {} projects ~{cursor_mb} MB but max_rss is {max_rss} MB/cursor — \
+                 raise max_rss, drop a nest, or move it to another roost",
+                meta.name,
+                group.endpoint.chain
+            );
+        }
+        roost_total_mb += cursor_mb;
+
+        // One source + one shared cursor per chain — per-nest tables stay byte-identical to solo `dev`.
+        let source: Arc<dyn Source> = Arc::new(RpcClient::new(rpc_urls)?);
+        let (states, ingest, alerts) = indexer::spawn_roost(
+            source,
+            group.nests,
+            backfill,
+            seal_direct,
+            concurrency,
+            window_override,
+            admin_enabled,
+            admin_token.clone(),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "bringing up roost '{}' cursor on {}",
+                meta.name, group.endpoint.chain
+            )
+        })?;
+        all_states.extend(states);
+        ingests.push(ingest);
+        alert_workers.extend(alerts);
+    }
+
+    tracing::info!(
+        "roost footprint: ~{roost_total_mb} MB projected across {} cursor(s)",
+        ingests.len()
+    );
+
+    // Roster (`GET /nests`) across every cursor's nests, with per-nest footprint attribution and the
+    // roost's real resident set alongside the projection so operators can calibrate.
+    let roster_entries: Vec<_> = all_states
         .iter()
         .map(|(name, state)| {
             serde_json::json!({
@@ -254,24 +372,27 @@ pub async fn dev(
         .collect();
     let roster = serde_json::json!({
         "roost": meta.name,
-        "chain": meta.chain,
-        "projected_rss_mb": projected,
-        "max_rss_mb": max_rss,
+        "chains": endpoints.iter().map(|e| e.chain.clone()).collect::<Vec<_>>(),
+        "projected_rss_mb": roost_total_mb,
+        "max_rss_mb_per_cursor": max_rss,
         "rss_bytes": crate::metrics::rss_bytes(),
         "nests": roster_entries,
     });
 
-    // Fate-share the server with the single shared ingestion task: whichever ends first decides the
-    // exit, and an ingestion error/panic propagates out (never serve stale data as if healthy).
+    // Fate-share the server with every cursor: whichever ends first decides the exit, and any cursor's
+    // error/panic propagates out (never serve stale data as if healthy) — the single-failure-boundary
+    // rule, held per cursor. `select_all` over `&mut` handles so the rest stay abortable afterwards.
     let result = tokio::select! {
-        r = crate::serve::run_roost(&listen, roster, states) => r,
-        joined = &mut ingest => match joined {
+        r = crate::serve::run_roost(&listen, roster, all_states) => r,
+        (joined, _idx, _rest) = futures::future::select_all(ingests.iter_mut()) => match joined {
             Ok(inner) => inner,
-            Err(e) if e.is_panic() => Err(anyhow::anyhow!("roost ingestion loop panicked")),
-            Err(e) => Err(anyhow::anyhow!("roost ingestion loop task failed: {e}")),
+            Err(e) if e.is_panic() => Err(anyhow::anyhow!("a roost ingestion loop panicked")),
+            Err(e) => Err(anyhow::anyhow!("a roost ingestion loop task failed: {e}")),
         },
     };
-    ingest.abort();
+    for h in &ingests {
+        h.abort();
+    }
     for w in &alert_workers {
         w.abort();
     }
@@ -307,25 +428,93 @@ mod tests {
         std::fs::write(nest.join("abi.json"), "[]").unwrap();
     }
 
+    /// Write a nest dir on a given chain under a roost (for multichain grouping tests).
+    fn write_nest_dir(roost_dir: &Path, name: &str, chain: &str, chain_id: u64) {
+        let nest = Roost::nest_dir(roost_dir, name);
+        std::fs::create_dir_all(&nest).unwrap();
+        std::fs::write(
+            nest.join(CONFIG_FILE),
+            format!(
+                "[nest]\nname = \"{name}\"\nchain = \"{chain}\"\nchain_id = {chain_id}\nrpc_urls = []\n\n\
+                 [[contracts]]\nalias = \"t\"\naddress = \"0x0000000000000000000000000000000000000001\"\nabi = \"abi.json\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(nest.join("abi.json"), "[]").unwrap();
+    }
+
+    fn mounted(roost_dir: &Path, name: &str) -> (String, PathBuf, Config) {
+        let (p, c) = load_mounted_nest(roost_dir, name).unwrap();
+        (name.to_string(), p, c)
+    }
+
     #[test]
     fn loads_a_valid_roost() {
         let d = tempfile::tempdir().unwrap();
         write_roost(d.path(), "arbitrum-one", 42161, "arbitrum-one", 42161);
         let r = Roost::load(d.path()).unwrap();
-        assert_eq!(r.roost.chain, "arbitrum-one");
+        assert_eq!(r.roost.chain.as_deref(), Some("arbitrum-one"));
         assert_eq!(r.roost.nests, vec!["a"]);
+        // A single-chain roost resolves to exactly one endpoint.
+        assert_eq!(r.chain_endpoints().unwrap().len(), 1);
     }
 
     #[test]
-    fn rejects_a_nest_on_the_wrong_chain() {
+    fn rejects_a_nest_whose_chain_isnt_declared() {
         let d = tempfile::tempdir().unwrap();
-        // Roost says arbitrum-one; the nest claims mainnet → hard error.
+        // Roost declares arbitrum-one; the nest claims mainnet → hard error at grouping.
         write_roost(d.path(), "arbitrum-one", 42161, "mainnet", 1);
         let roost = Roost::load(d.path()).unwrap();
-        let err = load_mounted_nest(d.path(), &roost.roost, "a")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("needs its own roost"), "got: {err}");
+        let err = group_by_chain(
+            &roost.chain_endpoints().unwrap(),
+            vec![mounted(d.path(), "a")],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("doesn't declare"), "got: {err}");
+    }
+
+    #[test]
+    fn multichain_roost_groups_nests_by_chain() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join(ROOST_FILE),
+            "[roost]\nname = \"multi\"\nnests = [\"a\", \"b\"]\n\n\
+             [[chains]]\nchain = \"base\"\nchain_id = 8453\nrpc_urls = [\"http://base\"]\n\n\
+             [[chains]]\nchain = \"arbitrum-one\"\nchain_id = 42161\nrpc_urls = [\"http://arb\"]\n",
+        )
+        .unwrap();
+        write_nest_dir(d.path(), "a", "base", 8453);
+        write_nest_dir(d.path(), "b", "arbitrum-one", 42161);
+        let roost = Roost::load(d.path()).unwrap();
+        let endpoints = roost.chain_endpoints().unwrap();
+        assert_eq!(endpoints.len(), 2, "two declared chains");
+        let groups = group_by_chain(
+            &endpoints,
+            vec![mounted(d.path(), "a"), mounted(d.path(), "b")],
+        )
+        .unwrap();
+        assert_eq!(groups.len(), 2, "one cursor per chain");
+        for g in &groups {
+            assert_eq!(g.nests.len(), 1, "each chain has its one nest");
+        }
+    }
+
+    #[test]
+    fn rejects_both_top_level_and_multichain_forms() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join(ROOST_FILE),
+            "[roost]\nname = \"x\"\nchain = \"base\"\nchain_id = 8453\nrpc_urls = [\"u\"]\nnests = [\"a\"]\n\n\
+             [[chains]]\nchain = \"arbitrum-one\"\nchain_id = 42161\nrpc_urls = [\"v\"]\n",
+        )
+        .unwrap();
+        let roost = Roost::load(d.path()).unwrap();
+        let err = roost.chain_endpoints().unwrap_err().to_string();
+        assert!(
+            err.contains("both a top-level chain and [[chains]]"),
+            "got: {err}"
+        );
     }
 
     #[test]

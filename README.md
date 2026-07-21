@@ -147,9 +147,12 @@ who need more — none of it in the way of the happy path:
   endpoint never blocks indexing.
 - **Built-in admin UI.** A self-contained page at `/_admin/` — status, tables, view/nest inspector.
   Localhost-open; off-localhost it requires a token per request.
-- **Roost — many nests, one runtime** (RFC-0012). Host many contracts/nests on the same chain in one
-  process, sharing a single cursor and one `getLogs` per window — N nests for roughly one nest's RPC
-  cost, with per-nest isolation and a per-runtime footprint budget.
+- **Roost — many nests, one runtime, one or more chains** (RFC-0012, RFC-0021). Host many nests in one
+  process; nests on the same chain share a single cursor and one `getLogs` per window (N nests for
+  roughly one nest's RPC cost), and a roost can span **multiple chains** with **one isolated cursor per
+  chain** — a Base nest and an Arbitrum nest in one runtime. Per-nest isolation, and a footprint budget
+  **per active-chain cursor** (≤2 GB). A capability, not a mandate: one-chain-per-roost stays the simple
+  default.
 - **Nest bundles + registry — bundle one, publish it, load it anywhere.** `nuthatch nest bundle` packs
   a nest's authored inputs into one portable, content-addressed `.bundle`; `nest load <bundle-or-url>`
   verifies and installs it — regenerating the decode registry and asserting it matches — so anyone runs
