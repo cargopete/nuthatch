@@ -4727,6 +4727,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "starlark",
+ "tar",
  "tempfile",
  "tokio",
  "toml 0.8.23",

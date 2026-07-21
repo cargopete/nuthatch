@@ -113,36 +113,44 @@ pub struct NestArgs {
 
 #[derive(Subcommand)]
 pub enum NestWhat {
-    /// Pack a nest directory into a content-addressed blob: its authored inputs (config, ABIs, views,
-    /// labels, skills) plus a `manifest.json` pinning the expected decode-registry hash. Prints the
-    /// blob hash — the nest's content address.
-    Pack(NestPackArgs),
-    /// Verify a nest blob and install it as a runnable nest directory. Checks the manifest format, each
-    /// file's hash, and that the decode registry regenerated from the inputs matches the manifest.
-    Mount(NestMountArgs),
+    /// Lay an *egg*: pack a nest into one portable, content-addressed `.egg` file — its authored inputs
+    /// (config, ABIs, views, labels, skills) plus a `manifest.json` pinning the expected decode-registry
+    /// hash. Share the `.egg` anywhere (a URL, a file); anyone can `hatch` it to run your exact nest,
+    /// verified by hash. Prints the egg's content address.
+    Egg(NestEggArgs),
+    /// Hatch an egg: verify a `.egg` (or a URL to one, or an unpacked blob dir) and install it as a
+    /// runnable nest. Checks the manifest format, every file's hash, and that the decode registry
+    /// regenerated from the inputs matches the manifest — so a hatched nest decodes exactly as authored.
+    Hatch(NestHatchArgs),
 }
 
 #[derive(Args)]
-pub struct NestPackArgs {
-    /// Nest directory to pack.
+pub struct NestEggArgs {
+    /// Nest directory to lay an egg from.
     #[arg(default_value = ".")]
     pub dir: String,
 
-    /// Output blob directory (default: `<nest-name>-<hash>.nest` beside the nest).
+    /// Output path for the `.egg` (default: `<nest-name>-<hash>.egg` beside the nest). With
+    /// `--as-dir`, an unpacked blob *directory* is written here instead of a single file.
     #[arg(long)]
     pub out: Option<String>,
+
+    /// Write an unpacked blob directory instead of a single `.egg` file (the old layout; handy for
+    /// inspecting a blob's contents).
+    #[arg(long)]
+    pub as_dir: bool,
 }
 
 #[derive(Args)]
-pub struct NestMountArgs {
-    /// Blob directory to mount (a `nest pack` output).
-    pub blob: String,
+pub struct NestHatchArgs {
+    /// The egg to hatch: a `.egg` file, an `http(s)://` URL to one, or an unpacked blob directory.
+    pub egg: String,
 
     /// Target directory to install the nest into (default: the nest's name).
     #[arg(long)]
     pub dir: Option<String>,
 
-    /// Assert the blob's content-address hash equals this value before installing.
+    /// Assert the egg's content-address hash equals this value before installing.
     #[arg(long)]
     pub expect: Option<String>,
 }

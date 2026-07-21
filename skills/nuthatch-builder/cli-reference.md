@@ -147,20 +147,21 @@ Serve the Model Context Protocol over stdio (bridges to a running `nuthatch dev`
 Package a nest as a content-addressed blob — the deploy unit (RFC-0012)
 
 
-## `nuthatch nest mount`
+## `nuthatch nest egg`
 
-Verify a nest blob and install it as a runnable nest directory. Checks the manifest format, each file's hash, and that the decode registry regenerated from the inputs matches the manifest
+Lay an *egg*: pack a nest into one portable, content-addressed `.egg` file — its authored inputs (config, ABIs, views, labels, skills) plus a `manifest.json` pinning the expected decode-registry hash. Share the `.egg` anywhere (a URL, a file); anyone can `hatch` it to run your exact nest, verified by hash. Prints the egg's content address
 
-- `<BLOB>` — Blob directory to mount (a `nest pack` output)
+- `<DIR>` — Nest directory to lay an egg from
+- `--out <OUT>` — Output path for the `.egg` (default: `<nest-name>-<hash>.egg` beside the nest). With `--as-dir`, an unpacked blob *directory* is written here instead of a single file
+- `--as-dir` — Write an unpacked blob directory instead of a single `.egg` file (the old layout; handy for inspecting a blob's contents)
+
+## `nuthatch nest hatch`
+
+Hatch an egg: verify a `.egg` (or a URL to one, or an unpacked blob dir) and install it as a runnable nest. Checks the manifest format, every file's hash, and that the decode registry regenerated from the inputs matches the manifest — so a hatched nest decodes exactly as authored
+
+- `<EGG>` — The egg to hatch: a `.egg` file, an `http(s)://` URL to one, or an unpacked blob directory
 - `--dir <DIR>` — Target directory to install the nest into (default: the nest's name)
-- `--expect <EXPECT>` — Assert the blob's content-address hash equals this value before installing
-
-## `nuthatch nest pack`
-
-Pack a nest directory into a content-addressed blob: its authored inputs (config, ABIs, views, labels, skills) plus a `manifest.json` pinning the expected decode-registry hash. Prints the blob hash — the nest's content address
-
-- `<DIR>` — Nest directory to pack
-- `--out <OUT>` — Output blob directory (default: `<nest-name>-<hash>.nest` beside the nest)
+- `--expect <EXPECT>` — Assert the egg's content-address hash equals this value before installing
 
 ## `nuthatch pack`
 

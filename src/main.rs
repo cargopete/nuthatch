@@ -54,15 +54,19 @@ async fn main() -> Result<()> {
         cli::Command::Pack(args) => pack::run(args, &now_stamp()),
         cli::Command::Audit(args) => audit::run(args),
         cli::Command::Nest(args) => match args.what {
-            cli::NestWhat::Pack(a) => blob::pack(
+            cli::NestWhat::Egg(a) => blob::egg(
                 std::path::Path::new(&a.dir),
                 a.out.as_deref().map(std::path::Path::new),
+                a.as_dir,
             ),
-            cli::NestWhat::Mount(a) => blob::mount(
-                std::path::Path::new(&a.blob),
-                a.dir.as_deref().map(std::path::Path::new),
-                a.expect.as_deref(),
-            ),
+            cli::NestWhat::Hatch(a) => {
+                blob::hatch(
+                    &a.egg,
+                    a.dir.as_deref().map(std::path::Path::new),
+                    a.expect.as_deref(),
+                )
+                .await
+            }
         },
         cli::Command::SkillRefs => {
             nuthatch::skill::write_refs(std::path::Path::new("."))?;

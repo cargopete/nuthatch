@@ -1,6 +1,7 @@
-//! Content-addressed nest packaging (RFC-0012 §4): turn a nest directory into a **blob** — its
-//! *authored inputs* canonicalised and pinned by a Merkle-root hash, so a nest becomes a deploy unit
-//! (`nest pack` here; `nest mount` verifies + installs one, a later slice).
+//! Content-addressed nest packaging (RFC-0012 §4): turn a nest directory into an **egg** — its
+//! *authored inputs* canonicalised and pinned by a Merkle-root hash, so a nest becomes a portable
+//! deploy unit. `nest egg` lays a single `.egg` file (`egg` here); `nest hatch` verifies + installs
+//! one (`hatch`), resolving a `.egg` file, an `http(s)` URL, or an unpacked blob dir.
 //!
 //! The blob pins **inputs** (`nuthatch.toml`, ABIs, views, labels, skills, `schema.json`, `llms.txt`),
 //! never build artifacts (the generated decode registry) or sealed data (`segments/`, `nuthatch.redb`).
@@ -142,55 +143,105 @@ pub fn build_manifest(dir: &Path, skip_out: Option<&Path>) -> Result<Manifest> {
     })
 }
 
-/// `nuthatch nest pack <dir> [--out <path>]`: write a content-addressed blob of the nest — a directory
-/// holding the authored inputs plus `manifest.json`. Prints the blob hash. Default output dir is
-/// `<nest-name>-<hash12>.nest/` beside the nest.
-pub fn pack(dir: &Path, out: Option<&Path>) -> Result<()> {
-    // Compute the output path first so it can be excluded from the walk when it sits inside `dir`.
+/// `nuthatch nest egg <dir> [--out <path>] [--as-dir]`: lay an *egg* — a single portable,
+/// content-addressed `.egg` file holding the nest's authored inputs plus `manifest.json`. With
+/// `--as-dir`, write the old unpacked blob *directory* instead (handy for inspecting contents). Prints
+/// the egg's content address. Default output is `<nest-name>-<hash12>.egg` beside the nest.
+pub fn egg(dir: &Path, out: Option<&Path>, as_dir: bool) -> Result<()> {
     let manifest = build_manifest(dir, None)?;
     let hash = manifest.blob_hash();
-
-    let out_dir = match out {
-        Some(p) => p.to_path_buf(),
-        None => {
-            let parent = dir.parent().unwrap_or_else(|| Path::new("."));
-            parent.join(format!("{}-{}.nest", manifest.nest_name, &hash[..12]))
-        }
+    let default_out = |ext: &str| {
+        let parent = dir.parent().unwrap_or_else(|| Path::new("."));
+        parent.join(format!("{}-{}.{ext}", manifest.nest_name, &hash[..12]))
     };
 
-    // If the chosen output dir is *inside* the nest, rebuild the manifest excluding it (so the blob
-    // doesn't try to pack itself). Rare, but a foot-gun worth closing.
-    let (manifest, hash) = if out_dir.starts_with(dir) {
-        let m = build_manifest(dir, Some(&out_dir))?;
-        let h = m.blob_hash();
-        (m, h)
-    } else {
-        (manifest, hash)
-    };
+    if as_dir {
+        let out_dir = out
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| default_out("nest"));
+        // If the chosen output dir is *inside* the nest, rebuild the manifest excluding it (so the blob
+        // doesn't try to pack itself). Rare, but a foot-gun worth closing.
+        let (manifest, hash) = if out_dir.starts_with(dir) {
+            let m = build_manifest(dir, Some(&out_dir))?;
+            let h = m.blob_hash();
+            (m, h)
+        } else {
+            (manifest, hash)
+        };
+        write_blob_dir(dir, &out_dir, &manifest)?;
+        println!("laid egg (unpacked) for nest '{}'", manifest.nest_name);
+        println!("  dir:      {}", out_dir.display());
+        println!("  hash:     {hash}");
+        println!("  registry: {}", manifest.registry_hash);
+        println!("  files:    {}", manifest.files.len());
+        return Ok(());
+    }
 
-    std::fs::create_dir_all(&out_dir)
+    let out_file = out
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_out("egg"));
+    write_egg(dir, &manifest, &out_file)?;
+    println!("laid egg for nest '{}'", manifest.nest_name);
+    println!("  egg:      {}", out_file.display());
+    println!("  hash:     {hash}");
+    println!("  registry: {}", manifest.registry_hash);
+    println!("  files:    {}", manifest.files.len());
+    println!();
+    println!("tip: share this .egg (a URL, or the file). Anyone can run your exact nest with");
+    println!(
+        "     `nuthatch nest hatch <file-or-url>` — every file is verified against the manifest,"
+    );
+    println!(
+        "     and the decode registry is reproduced from the inputs. Pin it with `--expect {}`.",
+        &hash[..12]
+    );
+    Ok(())
+}
+
+/// Materialise a blob's files (from the nest `src`) plus `manifest.json` into `out_dir` — the unpacked
+/// on-disk layout shared by the `--as-dir` form and, tarred, the `.egg`.
+fn write_blob_dir(src: &Path, out_dir: &Path, manifest: &Manifest) -> Result<()> {
+    std::fs::create_dir_all(out_dir)
         .with_context(|| format!("creating blob dir {}", out_dir.display()))?;
     for f in &manifest.files {
-        let src = dir.join(&f.path);
         let dst = out_dir.join(&f.path);
         if let Some(p) = dst.parent() {
             std::fs::create_dir_all(p)?;
         }
-        std::fs::copy(&src, &dst).with_context(|| format!("copying {}", f.path))?;
+        std::fs::copy(src.join(&f.path), &dst).with_context(|| format!("copying {}", f.path))?;
     }
     // Pretty-print the *stored* manifest for human readability; the blob hash is over the canonical
     // (compact) bytes, so on-disk formatting never affects identity.
     std::fs::write(
         out_dir.join("manifest.json"),
-        serde_json::to_string_pretty(&manifest)?,
+        serde_json::to_string_pretty(manifest)?,
     )
     .context("writing manifest.json")?;
+    Ok(())
+}
 
-    println!("packed nest '{}'", manifest.nest_name);
-    println!("  blob:     {hash}");
-    println!("  registry: {}", manifest.registry_hash);
-    println!("  files:    {}", manifest.files.len());
-    println!("  out:      {}", out_dir.display());
+/// Write a single-file `.egg`: a tar of `manifest.json` + every manifest file, read from the nest
+/// `src`. The egg's *identity* is `manifest.blob_hash()` (over the canonical manifest), so the tar's
+/// own byte layout is immaterial — a hatch re-verifies each file against the manifest regardless.
+fn write_egg(src: &Path, manifest: &Manifest, out_file: &Path) -> Result<()> {
+    let file = std::fs::File::create(out_file)
+        .with_context(|| format!("creating egg {}", out_file.display()))?;
+    let mut ar = tar::Builder::new(file);
+
+    let manifest_bytes = serde_json::to_vec_pretty(manifest)?;
+    let mut header = tar::Header::new_gnu();
+    header.set_size(manifest_bytes.len() as u64);
+    header.set_mode(0o644);
+    header.set_mtime(0);
+    header.set_cksum();
+    ar.append_data(&mut header, "manifest.json", &manifest_bytes[..])
+        .context("adding manifest.json to egg")?;
+
+    for f in &manifest.files {
+        ar.append_path_with_name(src.join(&f.path), Path::new(&f.path))
+            .with_context(|| format!("adding {} to egg", f.path))?;
+    }
+    ar.finish().context("finalising egg")?;
     Ok(())
 }
 
@@ -201,17 +252,11 @@ pub fn load_manifest(blob_dir: &Path) -> Result<Manifest> {
     serde_json::from_str(&raw).context("parsing blob manifest")
 }
 
-/// `nuthatch nest mount <blob> [--dir <target>] [--expect <hash>]`: resolve a blob, verify it, and
-/// install it as a runnable nest directory. Verification is three-fold, all local, no network
-/// (RFC-0012 §5): the manifest's format version is understood, every file's bytes hash to what the
-/// manifest claims (integrity), and — after install — the decode registry *regenerated from the
-/// installed inputs* equals the manifest's `registry_hash` (the blob decodes as promised). With
-/// `--expect`, the blob's own content address is asserted too, so you mount *that* blob and no other.
-/// Join a **manifest-declared** relative path onto `base`, refusing anything that could escape it — a
-/// blob is a distributable, hash-resolved deploy unit (RFC-0012 §4/§5), so its file paths are untrusted
+/// Join a **manifest-declared** relative path onto `base`, refusing anything that could escape it — an
+/// egg is a distributable, hash-resolved deploy unit (RFC-0012 §4/§5), so its file paths are untrusted
 /// input. Only `Normal` path components are allowed: an absolute path (which `Path::join` would let
 /// *replace* the base), a `..` parent, a root/prefix, or a bare `.` are all rejected. This is the
-/// zip-slip / absolute-path-escape guard for `mount`.
+/// zip-slip / absolute-path-escape guard for `hatch`.
 fn checked_join(base: &Path, rel: &str) -> Result<PathBuf> {
     let rel_path = Path::new(rel);
     if rel_path.is_absolute() {
@@ -227,7 +272,65 @@ fn checked_join(base: &Path, rel: &str) -> Result<PathBuf> {
     Ok(base.join(rel_path))
 }
 
-pub fn mount(blob_dir: &Path, target: Option<&Path>, expect: Option<&str>) -> Result<()> {
+/// `nuthatch nest hatch <egg> [--dir <target>] [--expect <hash>]`: hatch an egg into a runnable nest.
+/// `egg` may be a `.egg` file, an `http(s)://` URL to one, or an already-unpacked blob directory. A URL
+/// or file is resolved to a local blob dir (fetch + untar), then verified and installed by
+/// [`install_verified`]. The fetch is the *only* network touch and only when you pass a URL — a local
+/// `.egg` or dir hatches fully offline.
+pub async fn hatch(egg: &str, target: Option<&Path>, expect: Option<&str>) -> Result<()> {
+    if egg.starts_with("http://") || egg.starts_with("https://") {
+        let bytes = reqwest::get(egg)
+            .await
+            .with_context(|| format!("fetching egg from {egg}"))?
+            .error_for_status()
+            .with_context(|| format!("fetching egg from {egg}"))?
+            .bytes()
+            .await
+            .context("reading fetched egg bytes")?;
+        let tmp = tempfile::tempdir().context("temp dir for fetched egg")?;
+        let egg_file = tmp.path().join("fetched.egg");
+        std::fs::write(&egg_file, &bytes).context("writing fetched egg")?;
+        let blob_dir = tmp.path().join("unpacked");
+        extract_egg(&egg_file, &blob_dir)?;
+        return install_verified(&blob_dir, target, expect);
+    }
+    let path = Path::new(egg);
+    if path.is_dir() {
+        // Already an unpacked blob directory (e.g. `egg --as-dir` output) — install straight from it.
+        return install_verified(path, target, expect);
+    }
+    if path.is_file() {
+        let tmp = tempfile::tempdir().context("temp dir for egg")?;
+        let blob_dir = tmp.path().join("unpacked");
+        extract_egg(path, &blob_dir)?;
+        return install_verified(&blob_dir, target, expect);
+    }
+    bail!("nothing to hatch at '{egg}' — expected a .egg file, an http(s):// URL, or a blob directory");
+}
+
+/// Untar a `.egg` into `dest`. `tar`'s `unpack` refuses entries that would escape `dest` (its own
+/// zip-slip guard); [`install_verified`] then re-checks every *manifest-declared* file with
+/// [`checked_join`], so extraction and install are both bounded — defence in depth on untrusted input.
+fn extract_egg(egg_file: &Path, dest: &Path) -> Result<()> {
+    let file = std::fs::File::open(egg_file)
+        .with_context(|| format!("opening egg {}", egg_file.display()))?;
+    std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+    tar::Archive::new(file)
+        .unpack(dest)
+        .with_context(|| format!("unpacking egg {}", egg_file.display()))?;
+    Ok(())
+}
+
+/// Verify a resolved blob directory and install it as a runnable nest. Verification is three-fold, all
+/// local (RFC-0012 §5): the manifest's format version is understood, every file's bytes hash to what
+/// the manifest claims (integrity), and — after install — the decode registry *regenerated from the
+/// installed inputs* equals the manifest's `registry_hash` (the nest decodes exactly as authored). With
+/// `expect`, the blob's own content address is asserted too, so you hatch *that* egg and no other.
+pub fn install_verified(
+    blob_dir: &Path,
+    target: Option<&Path>,
+    expect: Option<&str>,
+) -> Result<()> {
     let manifest = load_manifest(blob_dir)?;
 
     // Format gate — reject a blob authored by a newer nuthatch, exactly as `config.rs` rejects a newer
@@ -283,21 +386,26 @@ pub fn mount(blob_dir: &Path, target: Option<&Path>, expect: Option<&str>) -> Re
     verify_registry_reproduces(&target, &manifest)?;
 
     println!(
-        "mounted nest '{}' → {}",
+        "hatched nest '{}' → {}",
         manifest.nest_name,
         target.display()
     );
-    println!("  blob:     {hash}");
+    println!("  hash:     {hash}");
     println!(
         "  registry: {} (reproduced from inputs ✓)",
         manifest.registry_hash
     );
-    println!("  run:      nuthatch dev --dir {}", target.display());
+    println!();
+    println!(
+        "tip: it's yours to run — `nuthatch dev --dir {}`. It decodes byte-for-byte as the author",
+        target.display()
+    );
+    println!("     laid it (every file hashed, registry reproduced from inputs).");
     Ok(())
 }
 
-/// Verify that a nest dir's inputs reproduce the `registry_hash` a manifest claims — the check `mount`
-/// will run. Kept here so `pack` and mount share one definition of "does this blob decode as promised".
+/// Verify that a nest dir's inputs reproduce the `registry_hash` a manifest claims — the check `hatch`
+/// runs. Kept here so `egg` and hatch share one definition of "does this blob decode as promised".
 pub fn verify_registry_reproduces(dir: &Path, manifest: &Manifest) -> Result<()> {
     let config = Config::load(dir)?;
     let regen = hex::encode(DecodeRegistry::from_nest(dir, &config)?.hash());
@@ -345,7 +453,7 @@ mod tests {
             )
             .unwrap();
             let target = tempfile::tempdir().unwrap();
-            let err = mount(blob.path(), Some(target.path()), None)
+            let err = install_verified(blob.path(), Some(target.path()), None)
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -420,12 +528,12 @@ abi = "abis/c.json"
         let src = tempfile::tempdir().unwrap();
         write_nest(src.path());
         let blob = tempfile::tempdir().unwrap();
-        pack(src.path(), Some(blob.path())).unwrap();
+        egg(src.path(), Some(blob.path()), true).unwrap();
 
         let manifest = load_manifest(blob.path()).unwrap();
         let target = tempfile::tempdir().unwrap();
-        // Mount with the correct expected hash → installs a runnable nest whose registry reproduces.
-        mount(
+        // Install with the correct expected hash → a runnable nest whose registry reproduces.
+        install_verified(
             blob.path(),
             Some(target.path()),
             Some(&manifest.blob_hash()),
@@ -436,21 +544,57 @@ abi = "abis/c.json"
         verify_registry_reproduces(target.path(), &manifest).unwrap();
     }
 
+    #[tokio::test]
+    async fn egg_file_hatches_and_verifies() {
+        // The headline path: lay a single-file `.egg`, then hatch it from that file → a runnable nest,
+        // hash-verified, registry reproduced. Exercises write_egg → extract_egg → install_verified.
+        let src = tempfile::tempdir().unwrap();
+        write_nest(src.path());
+        let out = tempfile::tempdir().unwrap();
+        let egg_file = out.path().join("t.egg");
+        let manifest = build_manifest(src.path(), None).unwrap();
+        write_egg(src.path(), &manifest, &egg_file).unwrap();
+        assert!(egg_file.is_file(), "egg is a single file");
+
+        let target = tempfile::tempdir().unwrap();
+        let installed = target.path().join("nest");
+        hatch(
+            egg_file.to_str().unwrap(),
+            Some(&installed),
+            Some(&manifest.blob_hash()),
+        )
+        .await
+        .unwrap();
+        assert!(installed.join(CONFIG_FILE).exists());
+        assert!(installed.join("abis/c.json").exists());
+        verify_registry_reproduces(&installed, &manifest).unwrap();
+
+        // A wrong --expect is refused even via the file→hatch path.
+        let t2 = tempfile::tempdir().unwrap();
+        assert!(hatch(
+            egg_file.to_str().unwrap(),
+            Some(t2.path()),
+            Some("deadbeef")
+        )
+        .await
+        .is_err());
+    }
+
     #[test]
     fn mount_rejects_a_tampered_file_and_a_wrong_hash() {
         let src = tempfile::tempdir().unwrap();
         write_nest(src.path());
         let blob = tempfile::tempdir().unwrap();
-        pack(src.path(), Some(blob.path())).unwrap();
+        egg(src.path(), Some(blob.path()), true).unwrap();
 
         // Wrong expected hash → refuse before touching disk.
         let t0 = tempfile::tempdir().unwrap();
-        assert!(mount(blob.path(), Some(t0.path()), Some("deadbeef")).is_err());
+        assert!(install_verified(blob.path(), Some(t0.path()), Some("deadbeef")).is_err());
 
         // Tamper a file's bytes without updating the manifest → integrity check fails.
         std::fs::write(blob.path().join("llms.txt"), "tampered\n").unwrap();
         let t1 = tempfile::tempdir().unwrap();
-        let err = mount(blob.path(), Some(t1.path()), None)
+        let err = install_verified(blob.path(), Some(t1.path()), None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("corrupt"), "got: {err}");
@@ -461,7 +605,7 @@ abi = "abis/c.json"
         let src = tempfile::tempdir().unwrap();
         write_nest(src.path());
         let blob = tempfile::tempdir().unwrap();
-        pack(src.path(), Some(blob.path())).unwrap();
+        egg(src.path(), Some(blob.path()), true).unwrap();
         // Rewrite the manifest claiming a future format version.
         let mut m = load_manifest(blob.path()).unwrap();
         m.blob_format_version = BLOB_FORMAT_VERSION + 1;
@@ -471,7 +615,7 @@ abi = "abis/c.json"
         )
         .unwrap();
         let t = tempfile::tempdir().unwrap();
-        let err = mount(blob.path(), Some(t.path()), None)
+        let err = install_verified(blob.path(), Some(t.path()), None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("format v"), "got: {err}");
