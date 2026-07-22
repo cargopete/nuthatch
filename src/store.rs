@@ -605,7 +605,9 @@ mod tests {
         // The reorg path must roll the hot store back AND reset the watermark together - never across
         // two txns (a crash between would strand `last_block` at 12 and permanently skip the re-org'd
         // range). One call does both.
-        let removed = store.rollback_to_and_set_meta(11, "last_block", "11").unwrap();
+        let removed = store
+            .rollback_to_and_set_meta(11, "last_block", "11")
+            .unwrap();
         assert_eq!(removed, 4); // block 12's four entities dropped
         assert_eq!(store.count().unwrap(), 5); // blocks 10 + 11 survive
         assert!(store.get_block_hash(12).unwrap().is_none());

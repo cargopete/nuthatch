@@ -257,7 +257,12 @@ fn value_bytes(v: &Value) -> usize {
     match v {
         Value::String(s) => s.len(),
         Value::Array(a) => 8 + a.iter().map(value_bytes).sum::<usize>(),
-        Value::Object(o) => 8 + o.iter().map(|(k, x)| k.len() + value_bytes(x)).sum::<usize>(),
+        Value::Object(o) => {
+            8 + o
+                .iter()
+                .map(|(k, x)| k.len() + value_bytes(x))
+                .sum::<usize>()
+        }
         _ => 8,
     }
 }
@@ -1663,7 +1668,8 @@ template="pool"
         // or below the watermark the table view has no backing at all, so this returns Err - which
         // `rebuild_balances` treats identically to an empty result ("no cold seed"), leaving the hot
         // replay to own those rows exactly once. Either way, the sealed rows must NOT be folded in.
-        let stale = net_balances(dir.path(), "t__transfer", "from", "to", "value", 0).unwrap_or_default();
+        let stale =
+            net_balances(dir.path(), "t__transfer", "from", "to", "value", 0).unwrap_or_default();
         assert!(
             !stale.contains(&("0xa".to_string(), 100i128)),
             "a stale watermark must exclude not-yet-finalized segments from the cold fold"
@@ -1691,7 +1697,10 @@ template="pool"
             guard,
         )
         .unwrap();
-        assert!(out.truncated, "a wide result must be flagged truncated by the byte cap");
+        assert!(
+            out.truncated,
+            "a wide result must be flagged truncated by the byte cap"
+        );
         assert!(
             out.rows.len() < 100,
             "the byte cap must stop before materialising all 100 wide rows (got {})",
@@ -1700,7 +1709,15 @@ template="pool"
         assert!(!out.rows.is_empty());
 
         // A trusted, unguarded query (cap = None) is never byte-capped - it must return all rows.
-        let all = query(dir.path(), "SELECT repeat('A', 1000000) AS x FROM range(100)").unwrap();
-        assert_eq!(all.len(), 100, "unguarded trusted queries are not byte-capped");
+        let all = query(
+            dir.path(),
+            "SELECT repeat('A', 1000000) AS x FROM range(100)",
+        )
+        .unwrap();
+        assert_eq!(
+            all.len(),
+            100,
+            "unguarded trusted queries are not byte-capped"
+        );
     }
 }

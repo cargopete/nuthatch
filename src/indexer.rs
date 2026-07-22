@@ -1667,7 +1667,9 @@ impl NestIngest {
     /// (no labels / no velocity flag) reports healthy, so this only bites a genuinely crashed circuit.
     fn ensure_views_healthy(&self) -> Result<()> {
         if !self.balances.is_healthy() {
-            anyhow::bail!("the balance IVM circuit thread has died - refusing to serve a frozen view");
+            anyhow::bail!(
+                "the balance IVM circuit thread has died - refusing to serve a frozen view"
+            );
         }
         if !self.exposure.is_healthy() {
             anyhow::bail!("the exposure IVM circuit thread has died - refusing to serve frozen compliance data");
@@ -2351,7 +2353,14 @@ fn rebuild_balances(
     // segment yet has no view - that just means it has nothing cold to seed, so skip on error.
     let mut cold_addrs = 0usize;
     for (table, from_col, to_col, val_col) in &transfer_tables {
-        match crate::analytics::net_balances(dir, table, from_col, to_col, val_col, store.sealed_through()) {
+        match crate::analytics::net_balances(
+            dir,
+            table,
+            from_col,
+            to_col,
+            val_col,
+            store.sealed_through(),
+        ) {
             Ok(nets) => {
                 cold_addrs += nets.len();
                 for (addr, net) in nets {
@@ -2424,7 +2433,14 @@ fn rebuild_exposure(
     // Cold seed: pre-summed exposure per (address, label, direction), folded in DuckDB.
     let mut cold = 0usize;
     for (table, from_col, to_col, val_col) in &transfer_tables {
-        match crate::analytics::cold_exposure(dir, table, from_col, to_col, val_col, store.sealed_through()) {
+        match crate::analytics::cold_exposure(
+            dir,
+            table,
+            from_col,
+            to_col,
+            val_col,
+            store.sealed_through(),
+        ) {
             Ok(rows) => {
                 cold += rows.len();
                 for (key, amount, count) in rows {
@@ -2495,7 +2511,14 @@ fn rebuild_velocity(
 
     let mut cold = 0usize;
     for (table, from_col, val_col) in &transfer_tables {
-        match crate::analytics::cold_velocity(dir, table, from_col, val_col, window, store.sealed_through()) {
+        match crate::analytics::cold_velocity(
+            dir,
+            table,
+            from_col,
+            val_col,
+            window,
+            store.sealed_through(),
+        ) {
             Ok(rows) => {
                 cold += rows.len();
                 for (key, volume, count) in rows {
