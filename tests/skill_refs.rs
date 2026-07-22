@@ -73,3 +73,66 @@ fn flags_in(text: &str) -> BTreeSet<String> {
     }
     out
 }
+
+/// RFC-0017 §S1, extended per issue #137 (C2): every `nuthatch_*` metric name an authored skill file
+/// mentions must be a real series the binary emits. A stale metric name (`nuthatch_tip` for
+/// `nuthatch_tip_height`) is the same failure class as a hallucinated flag - an agent greps a scrape
+/// for a name that isn't there and concludes the nest is broken. The source of truth is
+/// `Metrics::render()`, exactly as `cli-reference.md` is the source of truth for flags.
+#[test]
+fn authored_files_only_mention_real_metrics() {
+    // The canonical set: every `nuthatch_*` name the exposition can emit. Register a nest first so the
+    // per-nest `nuthatch_nest_*` series are present in the render too.
+    nuthatch::metrics::METRICS.nest("__drift_probe__");
+    let real = metric_names_in(&nuthatch::metrics::METRICS.render());
+    assert!(real.contains("nuthatch_tip_height") && real.contains("nuthatch_rss_bytes"));
+
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir(skill_dir()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for metric in metric_names_in(&text) {
+            if !real.contains(&metric) {
+                offenders.push(format!("{name}: `{metric}` is not a real nuthatch metric"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "authored skill files reference nonexistent metrics:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Extract `nuthatch_<...>` metric-name tokens (lowercase/digit/underscore tail, trailing underscores
+/// trimmed so markdown emphasis doesn't leak in). Byte-based so it never slices a multibyte boundary.
+fn metric_names_in(text: &str) -> BTreeSet<String> {
+    const PREFIX: &[u8] = b"nuthatch_";
+    let mut out = BTreeSet::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(PREFIX) {
+            let start = i;
+            i += PREFIX.len();
+            while i < bytes.len()
+                && (bytes[i].is_ascii_lowercase() || bytes[i].is_ascii_digit() || bytes[i] == b'_')
+            {
+                i += 1;
+            }
+            let mut end = i;
+            while end > start + PREFIX.len() && bytes[end - 1] == b'_' {
+                end -= 1;
+            }
+            // The token is pure ASCII by construction, so this slice is always valid UTF-8.
+            out.insert(String::from_utf8_lossy(&bytes[start..end]).into_owned());
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
