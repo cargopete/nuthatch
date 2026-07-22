@@ -16,6 +16,7 @@ use anyhow::{anyhow, Context, Result};
 use dbsp::utils::Tup2;
 use dbsp::{IndexedZSetReader, OrdZSet, OutputHandle, RootCircuit, Runtime};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
 use std::sync::{Arc, RwLock};
 
@@ -125,6 +126,10 @@ enum Msg {
 pub struct BalanceView {
     tx: Sender<Msg>,
     balances: Arc<RwLock<HashMap<String, i128>>>,
+    /// Flips to `false` (permanently) if the circuit thread dies on an error - so the ingest loop can
+    /// surface a dead derived-view thread and fail loudly, instead of silently serving frozen balances
+    /// as if healthy (a dead task must surface, never be served over).
+    healthy: Arc<AtomicBool>,
 }
 
 impl BalanceView {
@@ -133,6 +138,8 @@ impl BalanceView {
         let (tx, rx) = channel::<Msg>();
         let balances = Arc::new(RwLock::new(HashMap::new()));
         let shared = balances.clone();
+        let healthy = Arc::new(AtomicBool::new(true));
+        let health = healthy.clone();
         std::thread::Builder::new()
             .name("nuthatch-ivm".into())
             .spawn(move || {
@@ -140,6 +147,7 @@ impl BalanceView {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::error!("IVM circuit failed to start: {e:#}");
+                        health.store(false, Ordering::SeqCst);
                         return;
                     }
                 };
@@ -149,6 +157,7 @@ impl BalanceView {
                             let mut map = shared.write().unwrap();
                             if let Err(e) = circuit.step(batch, &mut map) {
                                 tracing::error!("IVM step failed: {e:#}");
+                                health.store(false, Ordering::SeqCst);
                                 break;
                             }
                         }
@@ -161,7 +170,18 @@ impl BalanceView {
                 }
             })
             .context("failed to spawn IVM thread")?;
-        Ok(Self { tx, balances })
+        Ok(Self {
+            tx,
+            balances,
+            healthy,
+        })
+    }
+
+    /// Whether the IVM circuit thread is still alive and folding. `false` means it died on an error
+    /// (circuit start or a `step`); the ingest loop treats that as fatal rather than serving a frozen
+    /// view. (A clean shutdown drops the sender and exits the loop without flipping this.)
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::SeqCst)
     }
 
     /// Enqueue a weighted batch (built via `transfer_deltas`/`seed_delta`). Non-blocking; drops

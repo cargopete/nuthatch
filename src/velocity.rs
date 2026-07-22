@@ -18,6 +18,7 @@ use anyhow::{anyhow, Context, Result};
 use dbsp::utils::Tup2;
 use dbsp::{IndexedZSetReader, OrdZSet, OutputHandle, RootCircuit, Runtime};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
 use std::sync::{Arc, RwLock};
 
@@ -238,6 +239,9 @@ enum Msg {
 pub struct VelocityView {
     tx: Sender<Msg>,
     rows: Arc<RwLock<HashMap<String, (i128, i128)>>>,
+    /// Flips false if the circuit thread dies on an error, so the ingest loop can fail loudly rather
+    /// than serve frozen (and, for compliance, silently wrong) velocity flags. A disabled view stays healthy.
+    healthy: Arc<AtomicBool>,
 }
 
 impl VelocityView {
@@ -246,11 +250,13 @@ impl VelocityView {
     pub fn start(enabled: bool) -> Result<Self> {
         let (tx, rx) = channel::<Msg>();
         let rows = Arc::new(RwLock::new(HashMap::new()));
+        let healthy = Arc::new(AtomicBool::new(true));
         if !enabled {
             drop(rx);
-            return Ok(Self { tx, rows });
+            return Ok(Self { tx, rows, healthy });
         }
         let shared = rows.clone();
+        let health = healthy.clone();
         std::thread::Builder::new()
             .name("nuthatch-velocity".into())
             .spawn(move || {
@@ -258,6 +264,7 @@ impl VelocityView {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::error!("velocity circuit failed to start: {e:#}");
+                        health.store(false, Ordering::SeqCst);
                         return;
                     }
                 };
@@ -266,6 +273,7 @@ impl VelocityView {
                         Msg::Batch(batch) => {
                             if let Err(e) = circuit.step(batch) {
                                 tracing::error!("velocity step failed: {e:#}");
+                                health.store(false, Ordering::SeqCst);
                                 break;
                             }
                             let mut out = shared.write().unwrap();
@@ -284,7 +292,12 @@ impl VelocityView {
                 }
             })
             .context("failed to spawn velocity thread")?;
-        Ok(Self { tx, rows })
+        Ok(Self { tx, rows, healthy })
+    }
+
+    /// Whether the circuit thread is alive; `false` means it died on an error and the view is frozen.
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::SeqCst)
     }
 
     pub fn apply(&self, batch: VelocityBatch) {

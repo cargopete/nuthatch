@@ -111,6 +111,7 @@ fn run(
     // `allowed_directories` lockdown below is defense-in-depth (its runtime enforcement is
     // version-dependent in the bundled DuckDB).
     reject_file_access(sql)?;
+    reject_replacement_scan(sql)?;
 
     let conn = Connection::open_in_memory().context("failed to open DuckDB")?;
     conn.execute_batch(&format!(
@@ -295,6 +296,9 @@ const FORBIDDEN_FNS: &[&str] = &[
     "read_ndjson",
     "read_parquet",
     "parquet_scan",
+    "parquet_metadata",
+    "parquet_schema",
+    "parquet_kv_metadata",
     "csv_scan",
     "glob",
     "sniff_csv",
@@ -348,6 +352,38 @@ fn reject_file_access(sql: &str) -> Result<()> {
             let is_call = j < b.len() && b[j] == b'(';
             if boundary_before && is_call {
                 bail!("query uses forbidden filesystem/network function `{name}` - refused");
+            }
+            from = end;
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a DuckDB **replacement scan**: a bare string literal in table position (`FROM '/x.parquet'`,
+/// `JOIN '…'`) makes DuckDB read that file with *no function name* for [`reject_file_access`] to match,
+/// bypassing the denylist entirely. A legitimate query names a view or a subquery after FROM/JOIN, never
+/// a single-quoted string (a double-quoted identifier is fine and untouched) - so rejecting a
+/// single-quote as the first non-space token after a word-bounded FROM/JOIN closes the bypass without
+/// affecting real queries. Comments are stripped first, mirroring the denylist scan.
+fn reject_replacement_scan(sql: &str) -> Result<()> {
+    let cleaned = strip_all_sql_comments(sql).to_ascii_lowercase();
+    let b = cleaned.as_bytes();
+    let is_ident = |c: u8| c == b'_' || c.is_ascii_alphanumeric();
+    for kw in ["from", "join"] {
+        let mut from = 0;
+        while let Some(pos) = cleaned[from..].find(kw) {
+            let start = from + pos;
+            let end = start + kw.len();
+            let boundary_before = start == 0 || !is_ident(b[start - 1]);
+            let mut j = end;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            // A single-quote as the first token after a word-bounded FROM/JOIN is a file replacement
+            // scan. (If the keyword is part of a larger identifier, the next char is an ident char, not a
+            // quote, so this never false-positives on e.g. `fromage`.)
+            if boundary_before && j < b.len() && b[j] == b'\'' {
+                bail!("query reads a file via a `{kw} '…'` replacement scan - refused");
             }
             from = end;
         }
@@ -1226,6 +1262,31 @@ template="pool"
         )
         .unwrap();
         assert_eq!(ok.rows[0]["read_text"], Value::from(1u64));
+
+        // Replacement scans (SEC-2): a bare string literal in table position reads a file with no
+        // function name for the denylist to match - the previously-open bypass. Both a `FROM '<path>'`
+        // and a `JOIN '<path>'` must be refused, for an absolute path and the nest root alike.
+        assert!(
+            query_guarded(dir.path(), "SELECT * FROM '/etc/hosts'", guard).is_err(),
+            "a `FROM '<path>'` replacement scan must be refused"
+        );
+        assert!(query_guarded(dir.path(), "SELECT * FROM '/tmp/x.parquet'", guard).is_err());
+        assert!(query_guarded(
+            dir.path(),
+            r#"SELECT * FROM "t__e" JOIN '/etc/hosts' ON true"#,
+            guard
+        )
+        .is_err());
+        // Parquet metadata functions read a file too - now denylisted.
+        assert!(query_guarded(
+            dir.path(),
+            "SELECT * FROM parquet_metadata('/etc/hosts')",
+            guard
+        )
+        .is_err());
+        // A double-quoted identifier in table position (the legitimate form) is NOT a replacement scan
+        // and stays allowed - the guard keys on the single-quote, not the FROM keyword.
+        assert!(query_guarded(dir.path(), r#"SELECT count(*) FROM "t__e""#, guard).is_ok());
     }
 
     #[test]

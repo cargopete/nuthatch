@@ -50,10 +50,12 @@ tar = "0.4"
 tempfile = "3"
 rustyline = "18.0.1"
 starlark = "0.14"
-# RFC-0019 slice 2: the object-store (S3) registry backend. Optional + feature-gated so the default
-# embedded binary never pulls the S3/HTTP dep tree - the FsStore covers the self-hosted case, S3 is the
-# fleet path. Apache-2.0 (arrow-rs family). `aws` covers S3/MinIO/R2 via env config (AWS_ENDPOINT etc).
-object_store = { version = "0.11", optional = true, features = ["aws"] }
+# RFC-0019 slice 2: the object-store (S3) registry backend. `object_store` core is already in the tree
+# transitively (via dbsp/feldera-storage), so this optional dep only adds the `aws` S3/HTTP *transport*
+# when the feature is on - the FsStore covers the self-hosted case, S3 is the fleet path. Pinned to 0.12
+# to match dbsp's version so the subtree dedupes (a 0.11 pin duplicated the whole object_store tree).
+# Apache-2.0 (arrow-rs family). `aws` covers S3/MinIO/R2 via env config (AWS_ENDPOINT etc).
+object_store = { version = "0.12", optional = true, features = ["aws"] }
 url = { version = "2", optional = true }
 
 [features]

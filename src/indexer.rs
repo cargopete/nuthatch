@@ -1661,6 +1661,23 @@ impl NestIngest {
     /// nest already at or below `ancestor` (e.g. a still-backfilling nest in a roost while the tip
     /// reorgs) is a no-op - nothing above `ancestor` to undo, and its cursor must NOT be bumped up to
     /// `ancestor` (that would claim blocks it never indexed). Propagates the finality-violation bail.
+    /// Fail loudly if any derived-view circuit thread has died. A dead IVM thread silently freezes the
+    /// balance/exposure/velocity views while ingest keeps committing and serving - so a dead thread must
+    /// surface as a fatal ingest error, never be served over (audit: correctness M1). A disabled view
+    /// (no labels / no velocity flag) reports healthy, so this only bites a genuinely crashed circuit.
+    fn ensure_views_healthy(&self) -> Result<()> {
+        if !self.balances.is_healthy() {
+            anyhow::bail!("the balance IVM circuit thread has died - refusing to serve a frozen view");
+        }
+        if !self.exposure.is_healthy() {
+            anyhow::bail!("the exposure IVM circuit thread has died - refusing to serve frozen compliance data");
+        }
+        if !self.velocity.is_healthy() {
+            anyhow::bail!("the velocity IVM circuit thread has died - refusing to serve frozen compliance data");
+        }
+        Ok(())
+    }
+
     fn rollback_reorg(&mut self, ancestor: u64) -> Result<()> {
         // Retract the rolled-back transfers from the IVM view *before* dropping them from the hot
         // store - a reorg is just the same facts re-fed with weight −1.
@@ -1851,6 +1868,11 @@ impl NestIngest {
         self.balances.apply(deltas);
         self.exposure.apply(exp_deltas);
         self.velocity.apply(vel_deltas);
+        // A derived-view circuit thread that has died silently drops those applies and freezes
+        // `/balances` + the compliance flags while ingest keeps committing - stale data served as
+        // healthy. Surface it as fatal here (the dead-task-must-surface rule, extended to the IVM
+        // threads that were previously exempt).
+        self.ensure_views_healthy()?;
 
         // Live sanctions screening (RFC-0008 C2): screen this window's transfers against the
         // configured list snapshots and store `sanction_hit` annotations. They share the
