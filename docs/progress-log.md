@@ -14,6 +14,13 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   "nuthatch can't do the 70%" into "nuthatch derives what subgraphs pay an archive node to fetch." 3 new
   tests, 229 lib + 6 e2e green, clippy + fmt clean. Pending: more recipes (reserves, holders), tier 2
   (metadata cache), tiers 3–4 (eth_call fallback + hosted cache).
+- **2026-07-22 - RFC-0023 tier 1: the `reserves` recipe — Uniswap-V2 `getReserves()`, derived.** The
+  canonical AMM eth_call (a subgraph fetches it per swap), derived instead as the **latest `Sync` per
+  pair**: a `ROW_NUMBER() … PARTITION BY address ORDER BY block DESC` view over `{alias}__sync`. Needs
+  the nest to index `Sync(uint112,uint112)`; no eth_call, no archive node. Extended the tape harness with
+  `sync_block`/`sync_log`/`scaffold_pair_nest`. Derive-correctness proven by e2e: three Syncs
+  (1000/2000 → 1500/2500 → 1200/3000) yield current reserves (1200, 3000). `nuthatch recipe` now lists
+  four recipes. 232 lib + 7 e2e green, clippy + fmt clean.
 - **2026-07-22 - RFC-0024 (Draft): the eth_call execution engine — accepted design, deferred build.**
   Landed the design that realizes RFC-0023 §3/§4's deferred local-execution path: a **demand-driven
   state cache** (not a smaller archive node) — a nest touches the same slots at sequential blocks, so a

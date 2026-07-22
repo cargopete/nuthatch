@@ -614,6 +614,62 @@ async fn total_supply_recipe_derives_mints_minus_burns() {
     }
 }
 
+/// RFC-0023 tier 1 — the `reserves` recipe: Uniswap-V2 `getReserves()` derived as the **latest `Sync`
+/// per pair**. No eth_call — the thing an AMM subgraph fetches per swap, computed from the Sync events
+/// already indexed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reserves_recipe_derives_latest_sync_per_pair() {
+    use nuthatch::recipes;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = scaffold_pair_nest(dir.path(), "pool", USDC);
+    let tape = Arc::new(TapeSource::new());
+
+    // Three Syncs for the pool; the current reserves are the LATEST: (1200, 3000).
+    tape.insert_block(1, sync_block(1, 0, 1_700_000_001, USDC, &[(1000, 2000)]));
+    tape.insert_block(2, sync_block(2, 0, 1_700_000_002, USDC, &[(1500, 2500)]));
+    tape.insert_block(3, sync_block(3, 0, 1_700_000_003, USDC, &[(1200, 3000)]));
+    tape.advance_tip_to(3);
+    tape.advance_finalized_to(3);
+    tape.insert_block(4, empty_block(4, 0, 1_700_000_004));
+    tape.advance_tip_to(4);
+
+    let rt = indexer::spawn_nest(
+        tape.clone(),
+        dir.path().to_path_buf(),
+        cfg,
+        None,
+        false,
+        1,
+        Some(2),
+        false,
+        None,
+    )
+    .await
+    .expect("spawn_nest");
+    let store = rt.state.store.clone();
+    assert!(
+        wait_until(POLL_TIMEOUT, || store.sealed_through() >= 3).await,
+        "syncs did not seal"
+    );
+
+    let rows = analytics::query(dir.path(), &recipes::reserves_select("pool")).unwrap();
+    assert_eq!(rows.len(), 1, "one pair → one reserves row");
+    let num = |v: &serde_json::Value| -> String {
+        v.as_i64()
+            .map(|n| n.to_string())
+            .or_else(|| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| v.to_string())
+    };
+    assert_eq!(num(&rows[0]["reserve0"]), "1200", "latest Sync reserve0");
+    assert_eq!(num(&rows[0]["reserve1"]), "3000", "latest Sync reserve1");
+
+    rt.ingest.abort();
+    if let Some(w) = rt.alert_worker {
+        w.abort();
+    }
+}
+
 /// RFC-0020 slice 4 — segment reuse: a compatible update whose decode is unchanged mounts the old
 /// version's sealed segments instead of re-indexing. Here a fresh nest, given ONLY the old's segments +
 /// watermark (never having indexed a block itself), serves the sealed history — the true no-re-index

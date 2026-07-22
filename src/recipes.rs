@@ -35,7 +35,27 @@ pub const RECIPES: &[Recipe] = &[
         name: "holder_count",
         about: "number of non-zero holders, derived from Transfers — no eth_call",
     },
+    Recipe {
+        name: "reserves",
+        about: "Uniswap-V2 getReserves(): the latest Sync per pair (needs a `Sync` event) — no eth_call",
+    },
 ];
+
+/// The `SELECT` body of the `reserves` recipe: each pair's current reserves — the most recent `Sync`
+/// event per contract address. This is exactly what Uniswap-V2 `getReserves()` returns, derived from
+/// the `Sync(uint112,uint112)` events already indexed. Needs the nest to index the `Sync` event
+/// (`{alias}__sync`).
+pub fn reserves_select(alias: &str) -> String {
+    format!(
+        "SELECT address, \
+           TRY_CAST(reserve0 AS HUGEINT) AS reserve0, \
+           TRY_CAST(reserve1 AS HUGEINT) AS reserve1 \
+         FROM (SELECT address, reserve0, reserve1, \
+                 ROW_NUMBER() OVER (PARTITION BY address ORDER BY block_number DESC, log_index DESC) AS rn \
+               FROM \"{alias}__sync\") \
+         WHERE rn = 1"
+    )
+}
 
 /// A per-address net-balance subquery over `{alias}__transfer`: +value to `to`, −value from `from`
 /// (the same Σ(in) − Σ(out) the IVM balance view maintains). The building block for `balances` and
@@ -104,6 +124,13 @@ pub fn view_sql(name: &str, alias: &str) -> Result<String> {
              -- Transfer events already indexed. No eth_call. Query it: SELECT * FROM {alias}_holder_count\n\
              CREATE VIEW {alias}_holder_count AS\n{};\n",
             holder_count_select(alias)
+        )),
+        "reserves" => Ok(format!(
+            "-- Recipe: reserves (RFC-0023 tier 1) — Uniswap-V2 `getReserves()`, DERIVED as the latest\n\
+             -- `Sync(uint112,uint112)` event per pair. No eth_call, no archive node. Requires the nest to\n\
+             -- index the `Sync` event (`{alias}__sync`). Query it: SELECT * FROM {alias}_reserves\n\
+             CREATE VIEW {alias}_reserves AS\n{};\n",
+            reserves_select(alias)
         )),
         _ => bail!(
             "unknown recipe '{name}' — available: {}",

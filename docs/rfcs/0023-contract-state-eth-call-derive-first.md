@@ -1,15 +1,15 @@
 # RFC-0023: Contract state (eth_call) — derive-first, with a verifiable fallback
 
 - Status: **Accepted** (2026-07-21) — **tiers 1–2 building (2026-07-22)**. **Tier 1**: the derive-first
-  recipe library (`src/recipes.rs`) + `nuthatch recipe list|add` — three ERC-20-generic recipes, all
-  derived from Transfer events with **no eth_call** and derive-correctness proven by e2e: `total_supply`
-  (Σ mints − Σ burns), `balances` (per-address Σ(in) − Σ(out)), `holder_count` (non-zero holders).
+  recipe library (`src/recipes.rs`) + `nuthatch recipe list|add` — **four recipes**, all derived with
+  **no eth_call** and derive-correctness proven by e2e: three ERC-20-generic (`total_supply` = Σ mints −
+  Σ burns; `balances` = per-address Σ(in) − Σ(out); `holder_count` = non-zero holders) plus the
+  protocol-specific **`reserves`** (Uniswap-V2 `getReserves()` = the latest `Sync` per pair).
   **Tier 2**: the immutable-metadata cache (`src/metadata.rs`) + `nuthatch metadata fetch` — `decimals`/
   `symbol`/`name` fetched once (they never change) and cached in `metadata.json`; the pure encode/decode
-  (uint8 / ABI-string) is unit-tested, the RPC fetch is live-verified. Pending: protocol-specific recipes
-  (e.g. Uniswap `reserves`), tier 3 (a *simple* RPC eth_call fallback, sealed + `latest`-guarded), tier 4
-  (hosted verifiable cache). The **local-execution engine** for tier 3/4 is designed in **RFC-0024**
-  (Draft, deferred build).
+  (uint8 / ABI-string) is unit-tested, the RPC fetch is live-verified. Pending: tier 3 (a *simple* RPC
+  eth_call fallback, sealed + `latest`-guarded), tier 4 (hosted verifiable cache). The
+  **local-execution engine** for tier 3/4 is designed in **RFC-0024** (Draft, deferred build).
 - Author: Pete (cargopete)
 - Date: 2026-07-21
 - Depends on: RFC-0018 §1 (authored SQL views — the surface the derive-first recipes are written in),

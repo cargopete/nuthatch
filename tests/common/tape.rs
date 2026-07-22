@@ -108,6 +108,50 @@ pub fn transfers_block(
     }
 }
 
+/// topic0 of Uniswap-V2 `Sync(uint112 reserve0, uint112 reserve1)` (keccak of the canonical signature).
+pub const SYNC_TOPIC0: &str = "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1";
+
+/// A Uniswap-V2 `Sync` log — no indexed params; `data` is the two reserves ABI-encoded (two 32B words).
+pub fn sync_log(
+    address: &str,
+    block: u64,
+    log_index: u64,
+    block_hash: &str,
+    reserve0: u128,
+    reserve1: u128,
+) -> Log {
+    Log {
+        address: address.to_string(),
+        topics: vec![SYNC_TOPIC0.to_string()],
+        data: format!("0x{reserve0:064x}{reserve1:064x}"),
+        block_number: block,
+        block_hash: block_hash.to_string(),
+        tx_hash: format!("0x{:064x}", (block << 20) | log_index),
+        log_index,
+    }
+}
+
+/// A block emitting `syncs` (`(reserve0, reserve1)`) for one pair `address`, log-indexed `0..n`.
+pub fn sync_block(
+    number: u64,
+    variant: u64,
+    timestamp: u64,
+    address: &str,
+    syncs: &[(u128, u128)],
+) -> BlockFixture {
+    let hash = block_hash(number, variant);
+    let logs = syncs
+        .iter()
+        .enumerate()
+        .map(|(i, (r0, r1))| sync_log(address, number, i as u64, &hash, *r0, *r1))
+        .collect();
+    BlockFixture {
+        hash,
+        timestamp,
+        logs,
+    }
+}
+
 /// A block that emits nothing (used to advance the tip past the sealing point without adding rows).
 pub fn empty_block(number: u64, variant: u64, timestamp: u64) -> BlockFixture {
     BlockFixture {
@@ -287,6 +331,35 @@ events = ["Transfer"]
     );
     std::fs::write(dir.join("nuthatch.toml"), toml).expect("write nuthatch.toml");
     Config::load(dir).expect("load scaffolded config")
+}
+
+/// Scaffold a nest whose contract emits Uniswap-V2 `Sync` (for the `reserves` recipe). One `Sync`-only
+/// pair contract at `address`, backfilling from block 1; the decoded table is `{alias}__sync`.
+pub fn scaffold_pair_nest(dir: &Path, name: &str, address: &str) -> Config {
+    let abi_dir = dir.join("abis");
+    std::fs::create_dir_all(&abi_dir).expect("create abis dir");
+    std::fs::write(
+        abi_dir.join("pair.json"),
+        r#"[{"type":"event","name":"Sync","anonymous":false,"inputs":[{"name":"reserve0","type":"uint112","indexed":false},{"name":"reserve1","type":"uint112","indexed":false}]}]"#,
+    )
+    .expect("write pair abi");
+    let toml = format!(
+        r#"[nest]
+name = "{name}"
+chain = "arbitrum-one"
+chain_id = 42161
+rpc_urls = []
+
+[[contracts]]
+alias = "{name}"
+address = "{address}"
+start_block = 1
+abi = "abis/pair.json"
+events = ["Sync"]
+"#
+    );
+    std::fs::write(dir.join("nuthatch.toml"), toml).expect("write nuthatch.toml");
+    Config::load(dir).expect("load scaffolded pair config")
 }
 
 /// The event table a nest named `name` decodes its transfers into (`{alias}__transfer`).
