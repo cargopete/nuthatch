@@ -355,9 +355,17 @@ pub async fn run(
 
 /// Whether the built-in admin UI should be served, given `--no-admin` and the bind address. Extracted
 /// so the roost computes it once for the whole process (RFC-0010 Part A semantics unchanged).
+/// The admin token from the environment, treating unset OR empty/whitespace as "no token": an empty
+/// `NUTHATCH_ADMIN_TOKEN=` must neither enable the admin route off-localhost nor become a null
+/// credential that a bare `?token=` satisfies (SEC).
+fn admin_token_env() -> Option<String> {
+    std::env::var("NUTHATCH_ADMIN_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty())
+}
+
 pub fn admin_enabled(no_admin: bool, listen: &str) -> bool {
-    let enabled =
-        !no_admin && (serve::is_localhost(listen) || std::env::var("NUTHATCH_ADMIN_TOKEN").is_ok());
+    let enabled = !no_admin && (serve::is_localhost(listen) || admin_token_env().is_some());
     if !no_admin && !enabled {
         tracing::warn!(
             "admin UI disabled: bound off-localhost without NUTHATCH_ADMIN_TOKEN set (RFC-0010 Part A)"
@@ -371,7 +379,7 @@ pub fn admin_enabled(no_admin: bool, listen: &str) -> bool {
 /// checking it per request, rather than the env var merely *enabling* the route.
 pub fn admin_required_token(admin_enabled: bool, listen: &str) -> Option<String> {
     if admin_enabled && !serve::is_localhost(listen) {
-        std::env::var("NUTHATCH_ADMIN_TOKEN").ok()
+        admin_token_env()
     } else {
         None
     }
@@ -965,6 +973,12 @@ pub async fn backfill_direct(
                 }
             })
             .collect();
+        // Seal in canonical (block, log_index) order regardless of how the RPC provider returned the
+        // logs. The segment bytes - and therefore its content address - depend on row order; everywhere
+        // else in the pipeline sorts defensively (the hot path re-reads redb in key order; the factory
+        // path's `decode_window` sorts), so without this two providers returning the same logs in a
+        // different order would produce different content hashes for identical data.
+        rows.sort_by_key(|r| (r.block_number, r.log_index));
         // Stamp block_timestamp (batched), identical to the hot path, so segments match byte-for-byte.
         let mut blocks: Vec<u64> = rows.iter().map(|r| r.block_number).collect();
         blocks.sort_unstable();
@@ -1177,6 +1191,9 @@ pub async fn backfill_direct_pipelined(
                 || source.block_timestamps(&blocks),
             )
             .await?;
+            // Seal in canonical (block, log_index) order, not RPC-provider order, so a segment's bytes
+            // (and its content address) are identical across providers - see `backfill_direct`.
+            rows.sort_by_key(|r| (r.block_number, r.log_index));
             let json: Vec<String> = rows
                 .iter_mut()
                 .map(|r| {
@@ -1706,8 +1723,12 @@ impl NestIngest {
             }
         }
 
-        let removed = self.store.rollback_to(ancestor)?;
-        self.store.set_meta(LAST_BLOCK_KEY, &ancestor.to_string())?;
+        // Roll the hot store back to the ancestor AND reset the `last_block` watermark in ONE txn: a
+        // crash between a separate delete and watermark reset would leave `last_block` past the fork and
+        // the rolled-back range permanently un-reindexed (a silent gap).
+        let removed =
+            self.store
+                .rollback_to_and_set_meta(ancestor, LAST_BLOCK_KEY, &ancestor.to_string())?;
         self.metrics.inc_reorgs();
         self.metrics.set_last_block(ancestor);
         tracing::warn!(
@@ -2308,7 +2329,7 @@ fn rebuild_balances(
     // segment yet has no view - that just means it has nothing cold to seed, so skip on error.
     let mut cold_addrs = 0usize;
     for (table, from_col, to_col, val_col) in &transfer_tables {
-        match crate::analytics::net_balances(dir, table, from_col, to_col, val_col) {
+        match crate::analytics::net_balances(dir, table, from_col, to_col, val_col, store.sealed_through()) {
             Ok(nets) => {
                 cold_addrs += nets.len();
                 for (addr, net) in nets {
@@ -2381,7 +2402,7 @@ fn rebuild_exposure(
     // Cold seed: pre-summed exposure per (address, label, direction), folded in DuckDB.
     let mut cold = 0usize;
     for (table, from_col, to_col, val_col) in &transfer_tables {
-        match crate::analytics::cold_exposure(dir, table, from_col, to_col, val_col) {
+        match crate::analytics::cold_exposure(dir, table, from_col, to_col, val_col, store.sealed_through()) {
             Ok(rows) => {
                 cold += rows.len();
                 for (key, amount, count) in rows {
@@ -2452,7 +2473,7 @@ fn rebuild_velocity(
 
     let mut cold = 0usize;
     for (table, from_col, val_col) in &transfer_tables {
-        match crate::analytics::cold_velocity(dir, table, from_col, val_col, window) {
+        match crate::analytics::cold_velocity(dir, table, from_col, val_col, window, store.sealed_through()) {
             Ok(rows) => {
                 cold += rows.len();
                 for (key, volume, count) in rows {

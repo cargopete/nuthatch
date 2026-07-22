@@ -371,6 +371,59 @@ impl Store {
         Ok(removed)
     }
 
+    /// Reorg rollback **and** watermark reset in ONE write transaction (hardening the reorg path, the
+    /// mirror of [`prune_and_set_meta`] for the forward path). Drops every entity and checkpoint
+    /// strictly above `block` and writes `meta_key = meta_val` (the caller passes `last_block =
+    /// ancestor`). Atomicity is essential: `rollback_to` + a *separate* `set_meta` could commit the
+    /// delete and then lose the watermark reset to a `kill -9`, leaving `last_block` pointing past the
+    /// fork - so the rolled-back blocks of the new canonical branch would never be re-indexed and the
+    /// indexed range would carry a permanent, silent gap. As one txn, a crash lands cleanly on either
+    /// side: pre-commit the whole rollback replays on restart; post-commit it is fully applied.
+    pub fn rollback_to_and_set_meta(
+        &self,
+        block: u64,
+        meta_key: &str,
+        meta_val: &str,
+    ) -> Result<u64> {
+        let wtx = self.db.begin_write()?;
+        let mut removed = 0u64;
+        {
+            let mut entities = wtx.open_table(ENTITIES)?;
+            let doomed: Vec<String> = entities
+                .iter()?
+                .filter_map(|row| row.ok())
+                .filter_map(|(k, _)| {
+                    let key = k.value().to_string();
+                    let b: u64 = key.split('-').next()?.parse().ok()?;
+                    (b > block).then_some(key)
+                })
+                .collect();
+            for k in doomed {
+                entities.remove(k.as_str())?;
+                removed += 1;
+            }
+
+            let mut blocks = wtx.open_table(BLOCKS)?;
+            let doomed: Vec<String> = blocks
+                .iter()?
+                .filter_map(|row| row.ok())
+                .filter_map(|(k, _)| {
+                    let key = k.value().to_string();
+                    let b: u64 = key.parse().ok()?;
+                    (b > block).then_some(key)
+                })
+                .collect();
+            for k in doomed {
+                blocks.remove(k.as_str())?;
+            }
+
+            let mut m = wtx.open_table(META)?;
+            m.insert(meta_key, meta_val)?;
+        }
+        wtx.commit()?;
+        Ok(removed)
+    }
+
     /// Prune sealed entities from the hot store: remove entity rows whose block is in `[from, to]`.
     /// Returns the number of rows removed. Called once every table in the range has been sealed to
     /// its own Parquet segment (the whole range is safe to drop; the data survives in Parquet and is
@@ -532,6 +585,26 @@ mod tests {
         assert_eq!(store.count().unwrap(), 5); // blocks 10 + 11
         assert!(store.get_block_hash(12).unwrap().is_none());
         assert_eq!(store.get_block_hash(11).unwrap().as_deref(), Some("h11"));
+    }
+
+    #[test]
+    fn rollback_to_and_set_meta_applies_both_in_one_txn() {
+        let (store, _d) = temp_store();
+        apply_block(&store, 10, 3, "h10");
+        apply_block(&store, 11, 2, "h11");
+        apply_block(&store, 12, 4, "h12");
+        store.set_meta("last_block", "12").unwrap();
+
+        // The reorg path must roll the hot store back AND reset the watermark together - never across
+        // two txns (a crash between would strand `last_block` at 12 and permanently skip the re-org'd
+        // range). One call does both.
+        let removed = store.rollback_to_and_set_meta(11, "last_block", "11").unwrap();
+        assert_eq!(removed, 4); // block 12's four entities dropped
+        assert_eq!(store.count().unwrap(), 5); // blocks 10 + 11 survive
+        assert!(store.get_block_hash(12).unwrap().is_none());
+        assert_eq!(store.get_block_hash(11).unwrap().as_deref(), Some("h11"));
+        // The watermark moved in the same transaction.
+        assert_eq!(store.get_meta("last_block").unwrap().as_deref(), Some("11"));
     }
 
     proptest! {

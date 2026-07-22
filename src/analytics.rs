@@ -52,6 +52,17 @@ pub fn query(dir: &Path, sql: &str) -> Result<Vec<Value>> {
     Ok(run(dir, sql, None, &HotRows::new(), u64::MAX)?.rows)
 }
 
+/// Run a trusted read-only query over **only the segments finalized at/below `sealed_through`** (the
+/// same watermark filter `define_views` applies). The warm-restart view rebuilds use this instead of
+/// [`query`] (which reads *every* segment): their cold seed must stay disjoint from the hot replay, and
+/// a crash in the seal->prune window leaves already-sealed rows still in the hot store. Folding all
+/// segments here would then count those rows twice - permanently double-counting balances and the
+/// compliance exposure/velocity views. Bounding to the persisted watermark keeps cold (<= watermark)
+/// and hot (everything still in the store) partitioned regardless of crash timing.
+fn query_cold(dir: &Path, sql: &str, sealed_through: u64) -> Result<Vec<Value>> {
+    Ok(run(dir, sql, None, &HotRows::new(), sealed_through)?.rows)
+}
+
 /// Run a read-only query under a resource guard, over the **sealed segments only** - the cold path used
 /// by trusted callers and the `/table` endpoint's cold fill (which merges hot itself). See [`QueryGuard`].
 pub fn query_guarded(dir: &Path, sql: &str, guard: QueryGuard) -> Result<QueryOutput> {
@@ -205,18 +216,49 @@ fn collect(conn: &Connection, sql: &str, cap: Option<usize>) -> Result<(Vec<Valu
         .unwrap_or_default();
 
     let hard = cap.map(|c| c + 1);
+    // A row cap alone bounds row *count*, not row *width*: the materialised `Vec<Value>` lives Rust-side,
+    // outside DuckDB's `memory_limit`, so `SELECT repeat('A', 20000000) FROM range(50000)` would accrue
+    // ~1 TB before the wall-clock guard fires - breaching the <=2 GB per-cursor budget and, in a roost,
+    // OOM-killing co-tenants. The guarded (untrusted `/sql`) path therefore also caps cumulative result
+    // bytes. Trusted unguarded queries (`cap = None`: registry-built folds, cold seeds) are never
+    // byte-capped, so a large token's balance rebuild is never silently truncated.
+    let byte_cap = cap.map(|_| SQL_MAX_RESULT_BYTES);
     let mut out = Vec::new();
+    let mut bytes = 0usize;
     while let Some(row) = rows.next().context("row read failed")? {
         let mut obj = Map::new();
         for (i, name) in column_names.iter().enumerate() {
-            obj.insert(name.clone(), value_to_json(row.get_ref(i)?));
+            let v = value_to_json(row.get_ref(i)?);
+            if byte_cap.is_some() {
+                bytes += name.len() + value_bytes(&v);
+            }
+            obj.insert(name.clone(), v);
         }
         out.push(Value::Object(obj));
         if hard.is_some_and(|h| out.len() >= h) {
             return Ok((out, true));
         }
+        if byte_cap.is_some_and(|max| bytes >= max) {
+            return Ok((out, true));
+        }
     }
     Ok((out, false))
+}
+
+/// The per-result Rust-side byte ceiling for the guarded `/sql` surface (64 MiB). Comfortably above any
+/// legitimate 50k-row result, far below the per-cursor RAM budget - the backstop against a wide-cell
+/// `SELECT` inflating the materialised buffer past the budget (see `collect`).
+const SQL_MAX_RESULT_BYTES: usize = 64 * 1024 * 1024;
+
+/// A cheap lower-bound byte estimate of a materialised cell - dominated by string payloads, which is
+/// exactly the wide-cell attack vector. Numbers/bools/null count a small fixed cost.
+fn value_bytes(v: &Value) -> usize {
+    match v {
+        Value::String(s) => s.len(),
+        Value::Array(a) => 8 + a.iter().map(value_bytes).sum::<usize>(),
+        Value::Object(o) => 8 + o.iter().map(|(k, x)| k.len() + value_bytes(x)).sum::<usize>(),
+        _ => 8,
+    }
 }
 
 /// Skip leading whitespace and SQL comments (`-- line` and `/* block */`) so the read-only guard
@@ -325,6 +367,7 @@ pub fn net_balances(
     from_col: &str,
     to_col: &str,
     value_col: &str,
+    sealed_through: u64,
 ) -> Result<Vec<(String, i128)>> {
     // `to` receives (+value), `from` sends (−value); TRY_CAST yields NULL (skipped) for the rare
     // value that overflows i128, mirroring the caller's i128 parse-or-skip.
@@ -336,7 +379,7 @@ pub fn net_balances(
          ) GROUP BY addr HAVING SUM(d) <> 0"
     );
     let mut out = Vec::new();
-    for r in query(dir, &sql)? {
+    for r in query_cold(dir, &sql, sealed_through)? {
         if let (Some(addr), Some(net)) = (r["addr"].as_str(), r["net"].as_str()) {
             if let Ok(n) = net.parse::<i128>() {
                 out.push((addr.to_string(), n));
@@ -358,6 +401,7 @@ pub fn cold_exposure(
     from_col: &str,
     to_col: &str,
     value_col: &str,
+    sealed_through: u64,
 ) -> Result<Vec<(String, i128, i128)>> {
     // Outbound: the sender has exposure to the labels of a labeled recipient. Inbound: the recipient
     // has exposure from the labels of a labeled sender. COUNT/SUM per (address, label, direction).
@@ -373,7 +417,7 @@ pub fn cold_exposure(
          ) GROUP BY addr, label, dir"
     );
     let mut out = Vec::new();
-    for r in query(dir, &sql)? {
+    for r in query_cold(dir, &sql, sealed_through)? {
         let (Some(addr), Some(label), Some(dir_s), Some(cnt)) = (
             r["addr"].as_str(),
             r["label"].as_str(),
@@ -402,6 +446,7 @@ pub fn cold_velocity(
     from_col: &str,
     value_col: &str,
     window: u64,
+    sealed_through: u64,
 ) -> Result<Vec<(String, i128, i128)>> {
     let w = window.max(1);
     // window_start = (block // W) * W; sum outbound volume + count per (sender, window).
@@ -411,7 +456,7 @@ pub fn cold_velocity(
          FROM \"{table}\" GROUP BY addr, ws"
     );
     let mut out = Vec::new();
-    for r in query(dir, &sql)? {
+    for r in query_cold(dir, &sql, sealed_through)? {
         let (Some(addr), Some(ws), Some(cnt)) =
             (r["addr"].as_str(), r["ws"].as_u64(), r["cnt"].as_i64())
         else {
@@ -1278,7 +1323,7 @@ template="pool"
         crate::seal::seal_range(dir.path(), &entities, 1, 1).unwrap();
 
         let map: std::collections::HashMap<String, i128> =
-            net_balances(dir.path(), "t__transfer", "from", "to", "value")
+            net_balances(dir.path(), "t__transfer", "from", "to", "value", u64::MAX)
                 .unwrap()
                 .into_iter()
                 .collect();
@@ -1323,7 +1368,7 @@ template="pool"
         assert_eq!(l[0]["n"], Value::from(1u64));
 
         let exp: std::collections::HashMap<String, (i128, i128)> =
-            cold_exposure(dir.path(), "t__transfer", "from", "to", "value")
+            cold_exposure(dir.path(), "t__transfer", "from", "to", "value", u64::MAX)
                 .unwrap()
                 .into_iter()
                 .map(|(k, amt, cnt)| (k, (amt, cnt)))
@@ -1539,5 +1584,62 @@ template="pool"
         assert_eq!(rows[0]["b"], Value::from(10u64));
         assert_eq!(rows[0]["recip"], Value::from("0xb"));
         assert_eq!(rows[0]["appr"], Value::from("0xd"));
+    }
+
+    #[test]
+    fn cold_fold_respects_the_sealed_through_watermark() {
+        // Regression for the warm-restart double-count: the cold fold must be bounded by the persisted
+        // `sealed_through`, not read every segment. A crash in the seal->prune window leaves a segment
+        // durable while the watermark is still stale AND the same rows still sit in the hot store; if
+        // the cold fold ignored the watermark, the rebuild would count those rows twice.
+        let dir = tempfile::tempdir().unwrap();
+        let seg: Vec<String> = vec![
+            r#"{"table":"t__transfer","from":"0x0","to":"0xa","value":"100","block_number":3,"tx_hash":"0x1","log_index":0}"#.to_string(),
+        ];
+        crate::seal::seal_range(dir.path(), &seg, 1, 6).unwrap();
+
+        // Stale watermark (below the segment's range): the fold contributes nothing. With no segment at
+        // or below the watermark the table view has no backing at all, so this returns Err - which
+        // `rebuild_balances` treats identically to an empty result ("no cold seed"), leaving the hot
+        // replay to own those rows exactly once. Either way, the sealed rows must NOT be folded in.
+        let stale = net_balances(dir.path(), "t__transfer", "from", "to", "value", 0).unwrap_or_default();
+        assert!(
+            !stale.contains(&("0xa".to_string(), 100i128)),
+            "a stale watermark must exclude not-yet-finalized segments from the cold fold"
+        );
+
+        // Watermark at/above the segment: the fold includes it.
+        let done = net_balances(dir.path(), "t__transfer", "from", "to", "value", 6).unwrap();
+        assert!(done.contains(&("0xa".to_string(), 100i128)));
+        assert!(done.contains(&("0x0".to_string(), -100i128)));
+    }
+
+    #[test]
+    fn sql_caps_result_bytes_not_just_rows() {
+        // Regression for the unbounded-result-buffer DoS: a row cap bounds count, not width. 100 rows of
+        // ~1 MiB each (~100 MiB) is far under the 50k row cap but past the 64 MiB byte cap, so the
+        // guarded surface must stop early and flag truncation rather than materialise it all Rust-side.
+        let dir = tempfile::tempdir().unwrap();
+        let guard = QueryGuard {
+            timeout: Duration::from_secs(30),
+            max_rows: 50_000,
+        };
+        let out = query_guarded(
+            dir.path(),
+            "SELECT repeat('A', 1000000) AS x FROM range(100)",
+            guard,
+        )
+        .unwrap();
+        assert!(out.truncated, "a wide result must be flagged truncated by the byte cap");
+        assert!(
+            out.rows.len() < 100,
+            "the byte cap must stop before materialising all 100 wide rows (got {})",
+            out.rows.len()
+        );
+        assert!(!out.rows.is_empty());
+
+        // A trusted, unguarded query (cap = None) is never byte-capped - it must return all rows.
+        let all = query(dir.path(), "SELECT repeat('A', 1000000) AS x FROM range(100)").unwrap();
+        assert_eq!(all.len(), 100, "unguarded trusted queries are not byte-capped");
     }
 }

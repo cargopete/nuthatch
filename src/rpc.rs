@@ -132,7 +132,7 @@ impl RpcClient {
                 }
                 Err(e) => {
                     self.mark_unhealthy(j);
-                    tracing::debug!("rpc {url} failed for {method}: {e:#}");
+                    tracing::debug!("rpc {} failed for {method}: {e:#}", redact_url(url));
                     last_err = e;
                 }
             }
@@ -155,7 +155,7 @@ impl RpcClient {
                 }
                 Err(e) => {
                     self.mark_unhealthy(j);
-                    tracing::debug!("rpc {url} failed for batch: {e:#}");
+                    tracing::debug!("rpc {} failed for batch: {e:#}", redact_url(url));
                     last_err = e;
                 }
             }
@@ -423,9 +423,24 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// Reduce an RPC URL to `scheme://host[:port]` for logging - provider endpoints routinely carry the API
+/// key in the path (`.../v3/<KEY>`) or query string, and the failure log fires on exactly the outages an
+/// operator debugs with `RUST_LOG=debug`. Log *where* it failed, never the key. Returns a slice of the
+/// original (the `scheme://host` prefix), so it is zero-alloc.
+fn redact_url(url: &str) -> &str {
+    match url.split_once("://") {
+        // Truncate at the first '/' or '?' after the scheme, i.e. keep scheme://host[:port] only.
+        Some((scheme, rest)) => {
+            let host_len = rest.find(['/', '?']).unwrap_or(rest.len());
+            &url[..scheme.len() + 3 + host_len]
+        }
+        None => url.split(['/', '?']).next().unwrap_or(url),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{merge_rpcs, RpcClient};
+    use super::{merge_rpcs, redact_url, RpcClient};
 
     fn v<const N: usize>(xs: [&str; N]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
@@ -477,5 +492,20 @@ mod tests {
         assert_eq!(merge_rpcs(&v(["a"]), v(["a", "b"])), v(["a", "b"]));
         // Repeated preferred entries collapse too.
         assert_eq!(merge_rpcs(&v(["m", "m", "n"]), v(["n"])), v(["m", "n"]));
+    }
+
+    #[test]
+    fn redact_url_keeps_only_scheme_and_host() {
+        // The API key in the path or query must never survive into a log line.
+        assert_eq!(
+            redact_url("https://mainnet.infura.io/v3/SECRETKEY"),
+            "https://mainnet.infura.io"
+        );
+        assert_eq!(
+            redact_url("https://eth.g.alchemy.com/v2/KEY?token=x"),
+            "https://eth.g.alchemy.com"
+        );
+        assert_eq!(redact_url("http://localhost:8545"), "http://localhost:8545");
+        assert_eq!(redact_url("https://host:8545/"), "https://host:8545");
     }
 }
