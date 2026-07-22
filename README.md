@@ -185,8 +185,8 @@ who need more - none of it in the way of the happy path:
 ## Running it in production
 
 nuthatch is built to be **fronted**, not exposed raw - gateways, auth, and metering are the operator's
-layer; nuthatch ships the *guards* (query timeout, row cap, concurrency limit, a filesystem-access
-denylist on `/sql`) and *signals* (`/metrics`) that make fronting it safe. It binds `127.0.0.1` by
+layer; nuthatch ships the *guards* (query timeout, row cap, result-byte cap, concurrency limit, a
+filesystem-access denylist on `/sql`) and *signals* (`/metrics`) that make fronting it safe. It binds `127.0.0.1` by
 default; `--listen` elsewhere and put a gateway in front. See [`docs/operators.md`](docs/operators.md).
 
 - **Footprint:** ≤2 GB RAM single-chain, single static binary, graceful SIGTERM shutdown with
