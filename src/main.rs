@@ -126,6 +126,17 @@ async fn main() -> Result<()> {
                 .await
             }
         },
+        cli::Command::Recipe(args) => match args.what {
+            cli::RecipeWhat::List => {
+                nuthatch::recipes::list_cli();
+                Ok(())
+            }
+            cli::RecipeWhat::Add(a) => nuthatch::recipes::add_cli(
+                std::path::Path::new(&a.dir),
+                &a.name,
+                a.alias.as_deref(),
+            ),
+        },
     }
 }
 

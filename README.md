@@ -171,6 +171,11 @@ who need more — none of it in the way of the happy path:
   Either way, updating a nest stops being a subgraph-style genesis resync — and when a compatible
   update's decode is unchanged, the new version **mounts the old's sealed content-addressed segments**
   instead of re-indexing history at all: a true no-re-index upgrade subgraphs structurally can't do.
+- **Derive-first — the `eth_call` you don't need** (RFC-0023). >70% of subgraphs call `eth_call` for
+  reads that are *derivable* from the events they already index — they fetch only because they have no
+  incremental-view engine. Nuthatch does: `nuthatch recipe add total_supply` drops in a derived view
+  that computes an ERC-20's `totalSupply()` as Σ minted − Σ burned from Transfer events — deterministic,
+  free, no archive node. It derives what a subgraph pays an archive node to fetch.
 - **Metrics.** Prometheus `/metrics` — tip lag, rows decoded/sealed, reorgs, query counts, RSS.
 
 ---

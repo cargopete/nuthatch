@@ -33,7 +33,7 @@ Statuses last reconciled against the [progress log](../progress-log.md) on 2026-
 | [0020](0020-nest-lifecycle-and-the-n-1-upgrade.md) | Nest lifecycle and the N-1 upgrade — kill the subgraph resync tax | 0012, 0019, 0018 §1, 0013 §3 | **Implemented** (2026-07-21) — roadmap thread 4 — **all 4 slices** (`nest diff` · `nest upgrade`: compatible hot-swap, breaking → new endpoint + deprecation, and segment reuse for decode-unchanged updates). The N-1 problem is solved |
 | [0021](0021-the-multichain-roost.md) | The multichain roost — one runtime, many chains, one cursor each | 0012, 0009 | **Accepted** (2026-07-21); §0 amendment applied — **slice 1 shipped**: `[[chains]]` config, per-chain grouping, per-cursor runtime + budget; single-chain parity holds |
 | [0022](0022-distributed-scaled-mode.md) | Distributed scaled mode — read/write planes, writer pool, dynamic placement | 0013, 0019, 0021 | **Accepted** (2026-07-21) — roadmap thread 2B; §0 brief amendment applied; design-now-build-later |
-| [0023](0023-contract-state-eth-call-derive-first.md) | Contract state (eth_call) — derive-first, with a verifiable fallback | 0018 §1, 0001, 0013 §3, 0019 | **Accepted** (2026-07-21) — roadmap thread 1; tiers 1+2 buildable, 3+4 designed |
+| [0023](0023-contract-state-eth-call-derive-first.md) | Contract state (eth_call) — derive-first, with a verifiable fallback | 0018 §1, 0001, 0013 §3, 0019 | **Accepted** (2026-07-21) — roadmap thread 1; **tier 1 opened**: recipe library + `nuthatch recipe` (`total_supply` derived, no eth_call); tiers 2–4 pending |
 
 ## Conventions
 

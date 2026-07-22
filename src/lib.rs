@@ -30,6 +30,7 @@ pub mod metrics;
 pub mod pack;
 pub mod progress;
 pub mod project;
+pub mod recipes;
 pub mod registry;
 pub mod roost;
 pub mod rpc;

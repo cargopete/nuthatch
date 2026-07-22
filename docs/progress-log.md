@@ -2,6 +2,18 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-22 - RFC-0023 tier 1: derive-first recipes — the eth_call you don't need.** The Foundation
+  says >70% of subgraphs use `eth_call`, but most of those reads are *derivable* from the events a nest
+  already indexes (subgraphs fetch them only because they have no incremental-view engine — nuthatch
+  does). New `src/recipes.rs` + `nuthatch recipe list|add`: a recipe is an authored `CREATE VIEW`
+  (RFC-0018 §1) that computes a read from indexed events. Flagship `total_supply` derives the ERC-20
+  `totalSupply()` a subgraph fetches via eth_call as **Σ minted − Σ burned** (Transfers from/to the zero
+  address) — deterministic, free, no archive node. `recipe add total_supply` drops the view into the
+  nest's `views/`. **Derive-correctness proven** by e2e: over fixture mints/burns the derived value
+  equals the hand-computed Σmints−Σburns (1300), byte-for-byte what an eth_call would return. Turns
+  "nuthatch can't do the 70%" into "nuthatch derives what subgraphs pay an archive node to fetch." 3 new
+  tests, 229 lib + 6 e2e green, clippy + fmt clean. Pending: more recipes (reserves, holders), tier 2
+  (metadata cache), tiers 3–4 (eth_call fallback + hosted cache).
 - **2026-07-22 - RFC-0021 §2: cross-cursor reorg isolation, proven.** The correctness invariant the
   multichain roost rests on (and a CLAUDE.md non-negotiable): a reorg on one chain must never reach into
   another's data. New e2e runs **two independent cursors (two chains) in one process** — exactly how a

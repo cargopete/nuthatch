@@ -48,8 +48,12 @@ pub enum Command {
     Audit(AuditArgs),
     /// Package a nest as a content-addressed blob — the deploy unit (RFC-0012).
     Nest(NestArgs),
-    /// Run a roost: many nests on one chain behind one API, each under `/<name>/…` (RFC-0012).
+    /// Run a roost: many nests across one or more chains behind one API, each under `/<name>/…`
+    /// (RFC-0012, RFC-0021 — one isolated cursor per chain).
     Roost(RoostArgs),
+    /// Derive-first recipes (RFC-0023): add a view that computes a read (e.g. `total_supply`) from
+    /// indexed events instead of fetching it with an `eth_call`. No archive node, deterministic, free.
+    Recipe(RecipeArgs),
     /// Regenerate the builder skill's machine-generated references from clap metadata (RFC-0017).
     /// Hidden: a dev/authoring tool, not part of the user-facing two-command story.
     #[command(hide = true)]
@@ -109,6 +113,32 @@ pub struct RoostDevArgs {
 pub struct NestArgs {
     #[command(subcommand)]
     pub what: NestWhat,
+}
+
+#[derive(Args)]
+pub struct RecipeArgs {
+    #[command(subcommand)]
+    pub what: RecipeWhat,
+}
+
+#[derive(Subcommand)]
+pub enum RecipeWhat {
+    /// List the available derive-first recipes.
+    List,
+    /// Add a recipe's derived view to a nest's `views/` (never clobbers an existing file).
+    Add(RecipeAddArgs),
+}
+
+#[derive(Args)]
+pub struct RecipeAddArgs {
+    /// The recipe name (see `nuthatch recipe list`), e.g. `total_supply`.
+    pub name: String,
+    /// The contract alias whose table the view derives over. Defaults to the nest's first contract.
+    #[arg(long)]
+    pub alias: Option<String>,
+    /// The nest directory.
+    #[arg(long, default_value = ".")]
+    pub dir: String,
 }
 
 #[derive(Subcommand)]

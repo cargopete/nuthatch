@@ -499,6 +499,86 @@ async fn breaking_upgrade_serves_both_versions_with_old_deprecated() {
     server.abort();
 }
 
+/// RFC-0023 tier 1 — derive-first: the `total_supply` recipe computes ERC-20 `totalSupply()` from the
+/// Transfer events already indexed (Σ minted − Σ burned), with **no eth_call**. Derive-correctness: the
+/// derived value equals the hand-computed mints − burns — the thing a subgraph pays an archive node to
+/// fetch, nuthatch derives for free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn total_supply_recipe_derives_mints_minus_burns() {
+    use nuthatch::recipes;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = scaffold_nest(dir.path(), "usdc", USDC);
+    let tape = Arc::new(TapeSource::new());
+    let zero = recipes::ZERO_ADDRESS;
+    let (a1, a2) = (account(1), account(2));
+
+    // mint 1000 → a1, mint 500 → a2, burn 200 from a1, and a normal a1→a2 transfer (no supply change).
+    tape.insert_block(
+        1,
+        transfers_block(1, 0, 1_700_000_001, USDC, &[(zero, a1.as_str(), 1000)]),
+    );
+    tape.insert_block(
+        2,
+        transfers_block(2, 0, 1_700_000_002, USDC, &[(zero, a2.as_str(), 500)]),
+    );
+    tape.insert_block(
+        3,
+        transfers_block(3, 0, 1_700_000_003, USDC, &[(a1.as_str(), zero, 200)]),
+    );
+    tape.insert_block(
+        4,
+        transfers_block(
+            4,
+            0,
+            1_700_000_004,
+            USDC,
+            &[(a1.as_str(), a2.as_str(), 100)],
+        ),
+    );
+    tape.advance_tip_to(4);
+    tape.advance_finalized_to(4);
+    tape.insert_block(5, empty_block(5, 0, 1_700_000_005));
+    tape.advance_tip_to(5);
+
+    let rt = indexer::spawn_nest(
+        tape.clone(),
+        dir.path().to_path_buf(),
+        cfg,
+        None,
+        false,
+        1,
+        Some(2),
+        false,
+        None,
+    )
+    .await
+    .expect("spawn_nest");
+    let store = rt.state.store.clone();
+    assert!(
+        wait_until(POLL_TIMEOUT, || store.sealed_through() >= 4).await,
+        "transfers did not seal"
+    );
+
+    // Derived totalSupply = 1000 + 500 − 200 = 1300. No eth_call, no archive node.
+    let rows = analytics::query(dir.path(), &recipes::total_supply_select("usdc")).unwrap();
+    let v = &rows[0]["total_supply"];
+    let got = v
+        .as_i64()
+        .map(|n| n.to_string())
+        .or_else(|| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| v.to_string());
+    assert_eq!(
+        got, "1300",
+        "derived total_supply must equal Σ mints − Σ burns"
+    );
+
+    rt.ingest.abort();
+    if let Some(w) = rt.alert_worker {
+        w.abort();
+    }
+}
+
 /// RFC-0020 slice 4 — segment reuse: a compatible update whose decode is unchanged mounts the old
 /// version's sealed segments instead of re-indexing. Here a fresh nest, given ONLY the old's segments +
 /// watermark (never having indexed a block itself), serves the sealed history — the true no-re-index
