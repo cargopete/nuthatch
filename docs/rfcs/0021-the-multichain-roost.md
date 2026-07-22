@@ -3,8 +3,9 @@
 - Status: **Accepted** (2026-07-21) — §0 brief amendment applied to `CLAUDE.md` 2026-07-21. **Slice 1
   shipped 2026-07-21**: multichain config (`[[chains]]`), `group_by_chain` (one isolated cursor per
   chain), the per-cursor runtime (one `spawn_roost` per chain, fate-shared via `select_all`), and the
-  **per-cursor RSS budget**. Single-chain roosts stay byte-identical to solo (parity e2e green). Pending:
-  a live two-chain run + a cross-cursor reorg-isolation property test.
+  **per-cursor RSS budget**. Single-chain roosts stay byte-identical to solo (parity e2e green). The
+  **cross-cursor reorg-isolation property (§2) is now proven** (2026-07-22): a reorg on one chain leaves
+  another's data byte-identical. Pending: only a live two-chain run (VPS).
 - Author: Pete (cargopete)
 - Date: 2026-07-21
 - Depends on: RFC-0012 (the roost — one runtime, many nests, shared serving; and the per-nest isolation

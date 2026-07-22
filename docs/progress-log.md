@@ -2,6 +2,15 @@
 
 Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-order-vertical-slices-each-ends-runnable).
 
+- **2026-07-22 - RFC-0021 §2: cross-cursor reorg isolation, proven.** The correctness invariant the
+  multichain roost rests on (and a CLAUDE.md non-negotiable): a reorg on one chain must never reach into
+  another's data. New e2e runs **two independent cursors (two chains) in one process** — exactly how a
+  roost hosts one isolated cursor per chain (each its own source/stores/tip/finality/reorg) — reorgs
+  chain A above a fork, waits for A to *actually* reconverge (block 10 carries the replacement hash, so
+  the assertion isn't vacuous), and asserts chain B is **byte-identical** and still at its own tip.
+  Isolation was by construction (separate sources + stores per cursor); this guards it against
+  regression. Test-only — no runtime change. 3 e2e_reorg tests green, clippy + fmt clean. RFC-0021's
+  only remaining item is a live two-chain run.
 - **2026-07-21 - RFC-0021 slice 1: the multichain roost — one isolated cursor per chain.** A roost can
   now host nests across **multiple chains** in one runtime: `roost.toml` gains `[[chains]]` (each chain +
   its own rpc_urls), nests declare their own chain, and `group_by_chain` groups them — **one isolated

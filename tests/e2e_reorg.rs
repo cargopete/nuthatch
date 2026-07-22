@@ -216,3 +216,63 @@ async fn reorg_below_finality_halts() {
         w.abort();
     }
 }
+
+/// RFC-0021 §2 — **cross-cursor reorg isolation.** Two independent cursors (two chains) run in one
+/// process, exactly as a multichain roost hosts one isolated cursor per chain (each its own source,
+/// stores, tip, finality, reorg boundary). A reorg on chain A must leave chain B's data
+/// **byte-identical** — one chain's reorg can never reach across into another's. Isolation is by
+/// construction; this proves it, and guards the CLAUDE.md per-cursor-isolation non-negotiable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reorg_on_one_chain_leaves_the_other_untouched() {
+    let fork = 5u64;
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let tape_a = Arc::new(TapeSource::new());
+    let tape_b = Arc::new(TapeSource::new());
+    for b in 1..=10u64 {
+        tape_a.insert_block(b, canonical_block(b));
+        tape_b.insert_block(b, canonical_block(b));
+    }
+    tape_a.advance_tip_to(10);
+    tape_b.advance_tip_to(10);
+
+    let (rt_a, store_a) = spawn_indexed(dir_a.path(), tape_a.clone(), 10).await;
+    let (rt_b, store_b) = spawn_indexed(dir_b.path(), tape_b.clone(), 10).await;
+
+    // Snapshot chain B before touching chain A.
+    let b_before = store_b.entities_in_range(1, 10).unwrap();
+
+    // Reorg chain A above `fork` with distinct replacement blocks.
+    let replacement: Vec<BlockFixture> = ((fork + 1)..=10).map(replacement_block).collect();
+    tape_a.reorg(fork, replacement);
+
+    // Wait until cursor A has actually reconverged (block 10 carries the replacement hash) — otherwise
+    // the isolation assertion would be vacuous (nothing happened on A).
+    let want_hash = block_hash(10, 1);
+    let converged = wait_until(POLL_TIMEOUT, || {
+        matches!(
+            store_a.get_entity(&nuthatch::store::Store::entity_key(10, 0)),
+            Ok(Some(raw)) if serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| v["block_hash"].as_str().map(|h| h == want_hash))
+                .unwrap_or(false)
+        )
+    })
+    .await;
+    assert!(converged, "chain A did not reconverge after its reorg");
+
+    // Chain B must be byte-identical — it never saw a reorg — and still at its tip.
+    let b_after = store_b.entities_in_range(1, 10).unwrap();
+    assert_eq!(
+        b_before, b_after,
+        "chain B's data must be untouched by chain A's reorg (per-cursor isolation)"
+    );
+    assert_eq!(
+        store_b.get_meta("last_block").unwrap().as_deref(),
+        Some("10"),
+        "chain B stays at its own tip"
+    );
+
+    shutdown(rt_a);
+    shutdown(rt_b);
+}
