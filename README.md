@@ -10,7 +10,7 @@
 ```sh
 cargo install --git https://github.com/nuthatch-indexer/nuthatch nuthatch
 
-nuthatch init 0xA0b86991c6218b36c1D19D4a2e9Eb0cE3606eB48   # USDC - chain auto-detected
+nuthatch init 0xA0b86991c6218b36c1D19D4a2e9Eb0cE3606eB48 --alias usdc   # USDC - chain auto-detected
 nuthatch dev            # backfills from deployment, follows the tip, serves an API
 nuthatch sql "SELECT count(*), sum(CAST(value AS DECIMAL(38,0))) FROM usdc__transfer"
 ```
@@ -85,7 +85,7 @@ curl 'localhost:8288/sql?q=SELECT%20count(*)%20FROM%20usdc__transfer'
 ## How it works (the 30-second version)
 
 ```
-RPC (or colocated reth ExEx)  →  deterministic decode  →  redb hot store (tip)
+RPC ingestion  →  deterministic decode  →  redb hot store (tip)
                                                             │
                                         past finality  →  content-addressed Parquet segments
                                                             │
@@ -199,7 +199,7 @@ default; `--listen` elsewhere and put a gateway in front. See [`docs/operators.m
 
 ## Project
 
-- **Design** lives in [RFCs](docs/rfcs/) (0001-0015); the north star and the CLI/UX direction are
+- **Design** lives in [RFCs](docs/rfcs/) (0001-0024); the north star and the CLI/UX direction are
   [RFC-0015](docs/rfcs/0015-the-delightful-core.md). Deferred/leftover work is in
   [`docs/backlog.md`](docs/backlog.md); the running log is [`docs/progress-log.md`](docs/progress-log.md).
 - **Governance:** a grant-funded public good (NLnet / EF-ESP), AGPL-3.0. No hosted service, no token, no
