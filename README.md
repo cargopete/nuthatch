@@ -52,8 +52,8 @@ tiny*. That combination is the point - not any single feature.
 cargo install --git https://github.com/nuthatch-indexer/nuthatch nuthatch
 ```
 
-Prebuilt binaries are attached to CI builds; a `curl | sh` installer is on the roadmap
-(RFC-0015). Chains: Ethereum, Arbitrum One, and Base - **omit `--chain` and nuthatch probes each
+Prebuilt binaries (macOS Apple Silicon, Linux x86_64) ship with each release, or install in one line:
+`curl -fsSL https://nuthatch-indexer.com/install.sh | sh`. Chains: Ethereum, Arbitrum One, and Base - **omit `--chain` and nuthatch probes each
 for your contract's bytecode and picks the one it lives on.** Point at your own node with `--rpc`.
 
 ---
@@ -199,7 +199,7 @@ default; `--listen` elsewhere and put a gateway in front. See [`docs/operators.m
 
 ## Project
 
-- **Design** lives in [RFCs](docs/rfcs/) (0001-0024); the north star and the CLI/UX direction are
+- **Design** lives in [RFCs](docs/rfcs/) (0001-0025); the north star and the CLI/UX direction are
   [RFC-0015](docs/rfcs/0015-the-delightful-core.md). Deferred/leftover work is in
   [`docs/backlog.md`](docs/backlog.md); the running log is [`docs/progress-log.md`](docs/progress-log.md).
 - **Governance:** a grant-funded public good (NLnet / EF-ESP), AGPL-3.0. No hosted service, no token, no

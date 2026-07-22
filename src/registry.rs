@@ -175,6 +175,24 @@ pub struct TableSchema {
     pub columns: Vec<ColumnSchema>,
 }
 
+impl TableSchema {
+    /// Whether this table is ERC-20/721 `Transfer`-shaped: named `*__transfer`, whose three *event*
+    /// params (the non-implicit columns) are `address, address, uint`. The schema-level mirror of
+    /// [`EventDecoder::transfer_columns`], so the balance-derived MCP tools are gated (RFC-0025) on the
+    /// same signal the balance view itself is built from.
+    pub fn is_transfer_shaped(&self) -> bool {
+        if !self.table.ends_with("__transfer") {
+            return false;
+        }
+        let params: Vec<&ColumnSchema> = self
+            .columns
+            .iter()
+            .filter(|c| c.sol_type != "implicit")
+            .collect();
+        params.len() == 3 && params[0].sol_type == "address" && params[1].sol_type == "address"
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ColumnSchema {
     pub name: String,

@@ -100,7 +100,7 @@ async fn handle(req: &Value, client: &reqwest::Client, base: &str) -> Option<Val
         "initialize" => Some(ok(id?, initialize_result(req))),
         "notifications/initialized" => None,
         "ping" => Some(ok(id?, json!({}))),
-        "tools/list" => Some(ok(id?, json!({ "tools": tool_specs() }))),
+        "tools/list" => Some(ok(id?, json!({ "tools": tool_specs(&fetch_shape(client, base).await) }))),
         "tools/call" => {
             let id = id?;
             let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -127,7 +127,7 @@ async fn handle(req: &Value, client: &reqwest::Client, base: &str) -> Option<Val
             }
         }
         // Prompts (RFC-0016 §6): canned, argument-taking analysis flows that name real tools.
-        "prompts/list" => Some(ok(id?, json!({ "prompts": prompt_specs() }))),
+        "prompts/list" => Some(ok(id?, json!({ "prompts": prompt_specs(&fetch_shape(client, base).await) }))),
         "prompts/get" => {
             let id = id?;
             let name = req
@@ -186,17 +186,49 @@ async fn read_resource(uri: &str, client: &reqwest::Client, base: &str) -> Resul
     get(client, &format!("{base}{path}")).await
 }
 
+/// A nest's capability *shape* (RFC-0025): which capability-gated surfaces are live. Fetched from the
+/// running nest so the advertised tool/prompt surface matches what will actually return data, instead
+/// of advertising every tool to every nest and letting the inert ones return `{"count":0}`.
+struct Shape {
+    /// A transfer-shaped decoder exists (the balance view's own gate) - `balance`/`top_balances`.
+    transfers: bool,
+    /// RFC-0008 compliance is configured - `flags`/`exposure`/`screen_status` and `investigate-address`.
+    compliance: bool,
+}
+
+/// Fetch the nest's shape from `GET /shape`. If the endpoint is missing (an older nest) or unreachable,
+/// default to advertising **everything** - never hide a tool because a probe failed. The safe default
+/// is the current, unconditional behaviour, so a stale nest degrades to exactly today's surface.
+async fn fetch_shape(client: &reqwest::Client, base: &str) -> Shape {
+    let all = Shape { transfers: true, compliance: true };
+    let Ok(body) = get(client, &format!("{base}/shape")).await else {
+        return all;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&body) else {
+        return all;
+    };
+    Shape {
+        transfers: v.get("transfers").and_then(Value::as_bool).unwrap_or(true),
+        compliance: v.get("compliance").and_then(Value::as_bool).unwrap_or(true),
+    }
+}
+
 /// The argument-taking prompts (RFC-0016 §6) - canned analysis flows that name real tools. Rendered
-/// entirely client-side (no network), so they work the instant a client lists them.
-fn prompt_specs() -> Value {
-    json!([
-        { "name": "profile-contract", "description": "An activity overview of the indexed contract(s).",
-          "arguments": [] },
-        { "name": "investigate-address", "description": "Balances, exposure, flags, and screening for one address.",
-          "arguments": [ { "name": "address", "description": "The 0x address to investigate.", "required": true } ] },
-        { "name": "verify-a-number", "description": "Re-derive a figure from scratch with provenance.",
-          "arguments": [ { "name": "claim", "description": "The number/claim to verify.", "required": true } ] },
-    ])
+/// entirely client-side (no network), so they work the instant a client lists them. `investigate-address`
+/// is compliance-shaped (exposure/flags/screening), so it's advertised only where that surface is live
+/// (RFC-0025) - otherwise following it would walk an agent into no-ops.
+fn prompt_specs(shape: &Shape) -> Value {
+    let mut prompts = vec![
+        json!({ "name": "profile-contract", "description": "An activity overview of the indexed contract(s).",
+          "arguments": [] }),
+    ];
+    if shape.compliance {
+        prompts.push(json!({ "name": "investigate-address", "description": "Balances, exposure, flags, and screening for one address.",
+          "arguments": [ { "name": "address", "description": "The 0x address to investigate.", "required": true } ] }));
+    }
+    prompts.push(json!({ "name": "verify-a-number", "description": "Re-derive a figure from scratch with provenance.",
+          "arguments": [ { "name": "claim", "description": "The number/claim to verify.", "required": true } ] }));
+    Value::Array(prompts)
 }
 
 /// Render a prompt into MCP `prompts/get` result form (a list of user-role messages). Returns `None`
@@ -233,33 +265,43 @@ fn render_prompt(name: &str, args: &Value) -> Option<Value> {
 
 /// The tool surface. Not a thin single-endpoint wrapper - schema discovery, SQL, point-reads, and
 /// the IVM views, each with an LLM-friendly description.
-pub fn tool_specs() -> Value {
-    json!([
-        { "name": "status", "description": "Index status: contract, chain, transfers indexed, holders, last & sealed block.",
-          "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "schema", "description": "The data model - how tables/views are named and queried. Read this first, then `tables` for the exact tables and columns.",
-          "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "tables", "description": "List every decoded table (`{alias}__{event}`) with its columns, Solidity types, and topic0.",
-          "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "table", "description": "Recent rows of one table, merged across the hot tip and sealed segments.",
-          "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "limit": { "type": "integer", "default": 50 } }, "required": ["name"] } },
-        { "name": "sql", "description": "Run a read-only SQL query over the live tip ∪ sealed history. Each event is a DuckDB view named `{alias}__{event}` (e.g. \"usdc__transfer\") with block_number, log_index, tx_hash, address + the event's params. Call `schema` first. SELECT/WITH only. Returns a compact table + a provenance stamp; capped at `limit` rows (default 200).",
-          "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "A SELECT or WITH query." }, "limit": { "type": "integer", "description": "Max rows to return (default 200).", "default": 200 } }, "required": ["query"] } },
-        { "name": "explain", "description": "Validate a SQL query WITHOUT executing it - binds tables/columns/types and returns {valid:true} or an error with a fix hint. Cheaper than `sql`; use it to check a query before running it.",
-          "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "A SELECT or WITH query to validate." } }, "required": ["query"] } },
-        { "name": "entity", "description": "Look up one transfer by its id, formatted `{block:012}-{logindex:06}`.",
-          "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } },
-        { "name": "balance", "description": "Derived token balance for an address (IVM view; i128 base units, returned as a decimal string).",
-          "inputSchema": { "type": "object", "properties": { "address": { "type": "string" } }, "required": ["address"] } },
-        { "name": "top_balances", "description": "Top holder balances, descending (IVM view; i128 base units as decimal strings).",
-          "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 20 } } } },
-        { "name": "flags", "description": "Compliance flags (RFC-0008 C3): `kind=threshold` (single transfers over the configured amount) or `kind=velocity` (addresses over the windowed-volume threshold). Amounts are i128 base units as decimal strings.",
-          "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["threshold", "velocity"] }, "limit": { "type": "integer", "default": 50 } } } },
-        { "name": "exposure", "description": "Direct counterparty-exposure of an address to the labeled set (RFC-0008 C1): inbound/outbound count + summed amount per label.",
-          "inputSchema": { "type": "object", "properties": { "address": { "type": "string" } }, "required": ["address"] } },
-        { "name": "screen_status", "description": "Sanctions-screening result for an address (RFC-0008 C2): the `sanction_hit` annotations against it, with the list-snapshot version each was screened against. Answers 'was X flagged, and against which list version?'",
-          "inputSchema": { "type": "object", "properties": { "address": { "type": "string" } }, "required": ["address"] } }
-    ])
+fn tool_specs(shape: &Shape) -> Value {
+    // The seven generic tools - meaningful on every nest, so always advertised.
+    let mut tools = vec![
+        json!({ "name": "status", "description": "Index status: contract, chain, transfers indexed, holders, last & sealed block.",
+          "inputSchema": { "type": "object", "properties": {} } }),
+        json!({ "name": "schema", "description": "The data model - how tables/views are named and queried. Read this first, then `tables` for the exact tables and columns.",
+          "inputSchema": { "type": "object", "properties": {} } }),
+        json!({ "name": "tables", "description": "List every decoded table (`{alias}__{event}`) with its columns, Solidity types, and topic0.",
+          "inputSchema": { "type": "object", "properties": {} } }),
+        json!({ "name": "table", "description": "Recent rows of one table, merged across the hot tip and sealed segments.",
+          "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "limit": { "type": "integer", "default": 50 } }, "required": ["name"] } }),
+        json!({ "name": "sql", "description": "Run a read-only SQL query over the live tip ∪ sealed history. Each event is a DuckDB view named `{alias}__{event}` (e.g. \"usdc__transfer\") with block_number, log_index, tx_hash, address + the event's params. Call `schema` first. SELECT/WITH only. Returns a compact table + a provenance stamp; capped at `limit` rows (default 200).",
+          "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "A SELECT or WITH query." }, "limit": { "type": "integer", "description": "Max rows to return (default 200).", "default": 200 } }, "required": ["query"] } }),
+        json!({ "name": "explain", "description": "Validate a SQL query WITHOUT executing it - binds tables/columns/types and returns {valid:true} or an error with a fix hint. Cheaper than `sql`; use it to check a query before running it.",
+          "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "A SELECT or WITH query to validate." } }, "required": ["query"] } }),
+        json!({ "name": "entity", "description": "Look up one transfer by its id, formatted `{block:012}-{logindex:06}`.",
+          "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } }),
+    ];
+    // ERC-20-shaped tools (RFC-0025): advertised only where a transfer-shaped decoder exists - the same
+    // gate the balance view uses - so they never return an empty `{"count":0}` that an agent misreads
+    // as "the index is empty".
+    if shape.transfers {
+        tools.push(json!({ "name": "balance", "description": "Derived token balance for an address (IVM view; i128 base units, returned as a decimal string).",
+          "inputSchema": { "type": "object", "properties": { "address": { "type": "string" } }, "required": ["address"] } }));
+        tools.push(json!({ "name": "top_balances", "description": "Top holder balances, descending (IVM view; i128 base units as decimal strings).",
+          "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 20 } } } }));
+    }
+    // Compliance tools (RFC-0008): advertised only where compliance is configured (RFC-0025).
+    if shape.compliance {
+        tools.push(json!({ "name": "flags", "description": "Compliance flags (RFC-0008 C3): `kind=threshold` (single transfers over the configured amount) or `kind=velocity` (addresses over the windowed-volume threshold). Amounts are i128 base units as decimal strings.",
+          "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["threshold", "velocity"] }, "limit": { "type": "integer", "default": 50 } } } }));
+        tools.push(json!({ "name": "exposure", "description": "Direct counterparty-exposure of an address to the labeled set (RFC-0008 C1): inbound/outbound count + summed amount per label.",
+          "inputSchema": { "type": "object", "properties": { "address": { "type": "string" } }, "required": ["address"] } }));
+        tools.push(json!({ "name": "screen_status", "description": "Sanctions-screening result for an address (RFC-0008 C2): the `sanction_hit` annotations against it, with the list-snapshot version each was screened against. Answers 'was X flagged, and against which list version?'",
+          "inputSchema": { "type": "object", "properties": { "address": { "type": "string" } }, "required": ["address"] } }));
+    }
+    Value::Array(tools)
 }
 
 async fn call_tool(params: &Value, client: &reqwest::Client, base: &str) -> Result<String> {
@@ -511,6 +553,8 @@ mod tests {
         let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle(&list, &client, "http://127.0.0.1:1").await.unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
+        // The base is unreachable here, so `fetch_shape` fails its probe and falls back to advertising
+        // everything (RFC-0025) - the safe default, identical to the pre-RFC-0025 unconditional surface.
         assert_eq!(tools.len(), 12);
         assert!(tools.iter().any(|t| t["name"] == "sql"));
         assert!(tools.iter().any(|t| t["name"] == "explain"));
@@ -519,6 +563,40 @@ mod tests {
         assert!(tools.iter().any(|t| t["name"] == "flags"));
         assert!(tools.iter().any(|t| t["name"] == "exposure"));
         assert!(tools.iter().any(|t| t["name"] == "screen_status"));
+    }
+
+    #[test]
+    fn tool_and_prompt_surface_follows_shape() {
+        let names = |v: &Value| {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // Bare nest (e.g. a Uniswap-V3 pool: Swap events, no transfers, no compliance): the 7 generic
+        // tools only, and the compliance-shaped `investigate-address` prompt is withheld.
+        let bare = Shape { transfers: false, compliance: false };
+        let t = names(&tool_specs(&bare));
+        assert_eq!(t.len(), 7);
+        for hidden in ["balance", "top_balances", "flags", "exposure", "screen_status"] {
+            assert!(!t.contains(&hidden.to_string()), "{hidden} must be hidden on a bare nest");
+        }
+        let p = names(&prompt_specs(&bare));
+        assert_eq!(p, vec!["profile-contract", "verify-a-number"]);
+
+        // Token nest: the balance tools appear; compliance stays hidden.
+        let token = Shape { transfers: true, compliance: false };
+        let t = names(&tool_specs(&token));
+        assert_eq!(t.len(), 9);
+        assert!(t.contains(&"balance".to_string()) && t.contains(&"top_balances".to_string()));
+        assert!(!t.contains(&"flags".to_string()));
+
+        // Compliance-configured token nest: the full 12, and `investigate-address` returns.
+        let full = Shape { transfers: true, compliance: true };
+        assert_eq!(names(&tool_specs(&full)).len(), 12);
+        assert!(names(&prompt_specs(&full)).contains(&"investigate-address".to_string()));
     }
 
     #[tokio::test]

@@ -128,6 +128,7 @@ pub fn router(backing: SharedNest) -> Router {
         .route("/exposure/{address}", get(exposure))
         .route("/flags", get(flags))
         .route("/nest", get(nest))
+        .route("/shape", get(shape))
         .route("/_admin", get(admin_index))
         .route("/_admin/", get(admin_index))
         .route("/_admin/events", get(admin_events))
@@ -275,6 +276,21 @@ async fn admin_index(State(s): State<AppState>, Query(q): Query<AdminQuery>) -> 
 /// `GET /nest` - static nest metadata for the admin UI's Nest tab (RFC-0010 Part A).
 async fn nest(State(s): State<AppState>) -> impl IntoResponse {
     Json((*s.nest_info).clone())
+}
+
+/// The nest's capability *shape* (RFC-0025): which capability-gated MCP surfaces are live, so the
+/// `nuthatch mcp` bridge advertises only the tools that will actually return data - never, say,
+/// `top_balances` on a Uniswap-pool nest, which would answer `{"count":0}` and read to an agent as
+/// "the index is empty". Derived from what the nest *has* - a transfer-shaped decoder (the same gate
+/// the balance view uses) and whether RFC-0008 compliance is configured - so the surface stays honest
+/// by construction, with no operator knob.
+async fn shape(State(s): State<AppState>) -> Json<Value> {
+    let transfers = s.tables.iter().any(|t| t.is_transfer_shaped());
+    let compliance = s.threshold.is_some()
+        || s.velocity_threshold.is_some()
+        || s.dir.join(crate::labels::LABELS_DIR).is_dir()
+        || s.dir.join(crate::lists::LISTS_DIR).is_dir();
+    Json(json!({ "transfers": transfers, "compliance": compliance }))
 }
 
 /// Whether `listen` binds only the loopback interface.
