@@ -41,6 +41,8 @@ tracks:
 | 0012 Multi-nest roost | Implemented | One acceptance item: a **sustained** byte-identical-vs-solo table-parity run over a longer range | — (a live run; public RPC ok) |
 | 0013 Storage/query | §3 shipped (DuckDB union) | DataFusion convergence (§2/§4, benchmark-gated, scaled-side first); Turso (§1, triple-gated) | scaled mode + a benchmark |
 | 0014 Firehose | Deferred | State-diff + trace extraction | **0003 → reth node** |
+| 0023 eth_call | Tier 1 building | Tier 2 (metadata cache), a *simple* RPC tier-3 fallback, tier 4 (hosted cache); more recipes (reserves) | — (tiers 1–2 + simple tier-3 buildable) |
+| 0024 eth_call engine | Draft (deferred build) | The revm demand-driven state engine — **accepted design, deferred build** until the residue is measured large / archive-RPC-free operation is demanded / 0003 lands | RFC-0003 (best path) or a `--state-rpc` archive endpoint (Stage 1) |
 
 ## Track 1 — Infra (the shared blocker)
 

@@ -34,6 +34,7 @@ Statuses last reconciled against the [progress log](../progress-log.md) on 2026-
 | [0021](0021-the-multichain-roost.md) | The multichain roost — one runtime, many chains, one cursor each | 0012, 0009 | **Accepted** (2026-07-21); §0 amendment applied — **slice 1 shipped**: `[[chains]]` config, per-chain grouping, per-cursor runtime + budget; single-chain parity holds |
 | [0022](0022-distributed-scaled-mode.md) | Distributed scaled mode — read/write planes, writer pool, dynamic placement | 0013, 0019, 0021 | **Accepted** (2026-07-21) — roadmap thread 2B; §0 brief amendment applied; design-now-build-later |
 | [0023](0023-contract-state-eth-call-derive-first.md) | Contract state (eth_call) — derive-first, with a verifiable fallback | 0018 §1, 0001, 0013 §3, 0019 | **Accepted** (2026-07-21) — roadmap thread 1; **tier 1 opened**: recipe library + `nuthatch recipe` (`total_supply` derived, no eth_call); tiers 2–4 pending |
+| [0024](0024-eth-call-execution-engine.md) | The eth_call execution engine — a demand-driven state cache, not an archive node | 0023, 0001, 0013 §3, 0009 | **Draft** (2026-07-22) — the engine RFC-0023 §3/§4 deferred; **accepted design, deferred build** (build derive-first + a simple RPC tier-3 first; revm engine only if the residue is large / archive-RPC-free operation is demanded / 0003 lands) |
 
 ## Conventions
 
