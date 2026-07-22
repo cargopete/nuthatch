@@ -14,6 +14,24 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   "nuthatch can't do the 70%" into "nuthatch derives what subgraphs pay an archive node to fetch." 3 new
   tests, 229 lib + 6 e2e green, clippy + fmt clean. Pending: more recipes (reserves, holders), tier 2
   (metadata cache), tiers 3–4 (eth_call fallback + hosted cache).
+- **2026-07-22 - RFC-0024 (Draft): the eth_call execution engine — accepted design, deferred build.**
+  Landed the design that realizes RFC-0023 §3/§4's deferred local-execution path: a **demand-driven
+  state cache** (not a smaller archive node) — a nest touches the same slots at sequential blocks, so a
+  per-nest cache warms fast. `StateSource` trait + blanket `revm::DatabaseRef`; staged sources
+  (RPC-fork MVP → local flat window → proof-verifying); three cache tiers spilling to sealed Parquet;
+  declared-calls prefetch (graph-node analogue); host-side ingestion only (components never call). Framed
+  per the review: **the derive-first path stays zero-dependency** (a first-class Non-goal — the engine is
+  strictly opt-in for the irreducible residue), Arbitrum gets an RPC-proxy caching win (not local
+  execution) until an arb-revm fork exists, and the **build is sequenced** derive-first → a *simple* RPC
+  tier-3 → measure the residue → the revm engine only on demonstrated demand / RFC-0003. Index + backlog
+  rows added.
+- **2026-07-22 - RFC-0023 tier 2: the immutable-metadata cache.** `decimals`/`symbol`/`name` are
+  write-once ERC-20 constants — tier 1 can't derive them from events, so fetch once and remember. New
+  `src/metadata.rs` + `nuthatch metadata fetch`: bare-selector `eth_call`, pure decode (uint8 last-byte /
+  ABI-string via alloy), cached in `metadata.json` keyed by lowercased address — immutable, so a cached
+  contract is never re-fetched. The one place a plain call is fine (the value is time-invariant, and it's
+  *metadata*, never data feeding entity derivation). Encode/decode + cache round-trip unit-tested; the RPC
+  fetch is live-verified. 3 new tests, 232 lib green, clippy + fmt clean.
 - **2026-07-22 - RFC-0023 tier 1: two more recipes — `balances` and `holder_count`.** The derive-first
   library now covers the ERC-20-generic trio, all from Transfer events (Σ(in) − Σ(out), the same shape
   the IVM balance view maintains): `balances` (each non-zero holder + its current balance — the

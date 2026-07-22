@@ -137,6 +137,11 @@ async fn main() -> Result<()> {
                 a.alias.as_deref(),
             ),
         },
+        cli::Command::Metadata(args) => match args.what {
+            cli::MetadataWhat::Fetch(a) => {
+                nuthatch::metadata::fetch_cli(std::path::Path::new(&a.dir), a.rpc).await
+            }
+        },
     }
 }
 

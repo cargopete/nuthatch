@@ -54,6 +54,9 @@ pub enum Command {
     /// Derive-first recipes (RFC-0023): add a view that computes a read (e.g. `total_supply`) from
     /// indexed events instead of fetching it with an `eth_call`. No archive node, deterministic, free.
     Recipe(RecipeArgs),
+    /// Fetch + cache a token's immutable metadata — `decimals`/`symbol`/`name` (RFC-0023 tier 2). Called
+    /// once (they never change) and remembered in `metadata.json`; the constants tier 1 can't derive.
+    Metadata(MetadataArgs),
     /// Regenerate the builder skill's machine-generated references from clap metadata (RFC-0017).
     /// Hidden: a dev/authoring tool, not part of the user-facing two-command story.
     #[command(hide = true)]
@@ -119,6 +122,28 @@ pub struct NestArgs {
 pub struct RecipeArgs {
     #[command(subcommand)]
     pub what: RecipeWhat,
+}
+
+#[derive(Args)]
+pub struct MetadataArgs {
+    #[command(subcommand)]
+    pub what: MetadataWhat,
+}
+
+#[derive(Subcommand)]
+pub enum MetadataWhat {
+    /// Fetch + cache immutable metadata for every contract in the nest (skips already-cached ones).
+    Fetch(MetadataFetchArgs),
+}
+
+#[derive(Args)]
+pub struct MetadataFetchArgs {
+    /// The nest directory.
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+    /// Override `rpc_urls` at runtime (repeatable); tried ahead of the configured endpoints.
+    #[arg(long)]
+    pub rpc: Vec<String>,
 }
 
 #[derive(Subcommand)]

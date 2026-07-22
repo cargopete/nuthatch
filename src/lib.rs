@@ -26,6 +26,7 @@ pub mod labels;
 pub mod lifecycle;
 pub mod lists;
 pub mod mcp;
+pub mod metadata;
 pub mod metrics;
 pub mod pack;
 pub mod progress;

@@ -175,7 +175,9 @@ who need more — none of it in the way of the happy path:
   reads that are *derivable* from the events they already index — they fetch only because they have no
   incremental-view engine. Nuthatch does: `nuthatch recipe add total_supply` drops in a derived view
   that computes an ERC-20's `totalSupply()` as Σ minted − Σ burned from Transfer events — deterministic,
-  free, no archive node. It derives what a subgraph pays an archive node to fetch.
+  free, no archive node. It derives what a subgraph pays an archive node to fetch. For the handful of
+  reads that *aren't* derivable but never change — `decimals`/`symbol`/`name` — `nuthatch metadata fetch`
+  calls once and caches forever.
 - **Metrics.** Prometheus `/metrics` — tip lag, rows decoded/sealed, reorgs, query counts, RSS.
 
 ---
