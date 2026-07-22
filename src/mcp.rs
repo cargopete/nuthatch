@@ -100,7 +100,10 @@ async fn handle(req: &Value, client: &reqwest::Client, base: &str) -> Option<Val
         "initialize" => Some(ok(id?, initialize_result(req))),
         "notifications/initialized" => None,
         "ping" => Some(ok(id?, json!({}))),
-        "tools/list" => Some(ok(id?, json!({ "tools": tool_specs(&fetch_shape(client, base).await) }))),
+        "tools/list" => Some(ok(
+            id?,
+            json!({ "tools": tool_specs(&fetch_shape(client, base).await) }),
+        )),
         "tools/call" => {
             let id = id?;
             let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -127,7 +130,10 @@ async fn handle(req: &Value, client: &reqwest::Client, base: &str) -> Option<Val
             }
         }
         // Prompts (RFC-0016 §6): canned, argument-taking analysis flows that name real tools.
-        "prompts/list" => Some(ok(id?, json!({ "prompts": prompt_specs(&fetch_shape(client, base).await) }))),
+        "prompts/list" => Some(ok(
+            id?,
+            json!({ "prompts": prompt_specs(&fetch_shape(client, base).await) }),
+        )),
         "prompts/get" => {
             let id = id?;
             let name = req
@@ -200,7 +206,10 @@ struct Shape {
 /// default to advertising **everything** - never hide a tool because a probe failed. The safe default
 /// is the current, unconditional behaviour, so a stale nest degrades to exactly today's surface.
 async fn fetch_shape(client: &reqwest::Client, base: &str) -> Shape {
-    let all = Shape { transfers: true, compliance: true };
+    let all = Shape {
+        transfers: true,
+        compliance: true,
+    };
     let Ok(body) = get(client, &format!("{base}/shape")).await else {
         return all;
     };
@@ -577,24 +586,42 @@ mod tests {
 
         // Bare nest (e.g. a Uniswap-V3 pool: Swap events, no transfers, no compliance): the 7 generic
         // tools only, and the compliance-shaped `investigate-address` prompt is withheld.
-        let bare = Shape { transfers: false, compliance: false };
+        let bare = Shape {
+            transfers: false,
+            compliance: false,
+        };
         let t = names(&tool_specs(&bare));
         assert_eq!(t.len(), 7);
-        for hidden in ["balance", "top_balances", "flags", "exposure", "screen_status"] {
-            assert!(!t.contains(&hidden.to_string()), "{hidden} must be hidden on a bare nest");
+        for hidden in [
+            "balance",
+            "top_balances",
+            "flags",
+            "exposure",
+            "screen_status",
+        ] {
+            assert!(
+                !t.contains(&hidden.to_string()),
+                "{hidden} must be hidden on a bare nest"
+            );
         }
         let p = names(&prompt_specs(&bare));
         assert_eq!(p, vec!["profile-contract", "verify-a-number"]);
 
         // Token nest: the balance tools appear; compliance stays hidden.
-        let token = Shape { transfers: true, compliance: false };
+        let token = Shape {
+            transfers: true,
+            compliance: false,
+        };
         let t = names(&tool_specs(&token));
         assert_eq!(t.len(), 9);
         assert!(t.contains(&"balance".to_string()) && t.contains(&"top_balances".to_string()));
         assert!(!t.contains(&"flags".to_string()));
 
         // Compliance-configured token nest: the full 12, and `investigate-address` returns.
-        let full = Shape { transfers: true, compliance: true };
+        let full = Shape {
+            transfers: true,
+            compliance: true,
+        };
         assert_eq!(names(&tool_specs(&full)).len(), 12);
         assert!(names(&prompt_specs(&full)).contains(&"investigate-address".to_string()));
     }
