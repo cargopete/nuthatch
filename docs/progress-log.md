@@ -14,6 +14,13 @@ Newest first. One entry per push, tracking the [build order](CLAUDE.md#build-ord
   "nuthatch can't do the 70%" into "nuthatch derives what subgraphs pay an archive node to fetch." 3 new
   tests, 229 lib + 6 e2e green, clippy + fmt clean. Pending: more recipes (reserves, holders), tier 2
   (metadata cache), tiers 3–4 (eth_call fallback + hosted cache).
+- **2026-07-22 - RFC-0023 tier 1: two more recipes — `balances` and `holder_count`.** The derive-first
+  library now covers the ERC-20-generic trio, all from Transfer events (Σ(in) − Σ(out), the same shape
+  the IVM balance view maintains): `balances` (each non-zero holder + its current balance — the
+  `balanceOf` per address a subgraph loops eth_calls for) and `holder_count` (how many non-zero holders).
+  A shared `net_balance_subquery` builds both. Derive-correctness proven in the same e2e: over the
+  mint/burn fixtures, a1 = 700, a2 = 600, holder_count = 2 (zero address excluded) — exactly the chain
+  truth, no eth_call. `nuthatch recipe list` shows all three. 229 lib + e2e green, clippy + fmt clean.
 - **2026-07-22 - RFC-0021 §2: cross-cursor reorg isolation, proven.** The correctness invariant the
   multichain roost rests on (and a CLAUDE.md non-negotiable): a reorg on one chain must never reach into
   another's data. New e2e runs **two independent cursors (two chains) in one process** — exactly how a

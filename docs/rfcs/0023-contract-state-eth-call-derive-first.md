@@ -1,10 +1,11 @@
 # RFC-0023: Contract state (eth_call) — derive-first, with a verifiable fallback
 
-- Status: **Accepted** (2026-07-21) — **tier 1 opened 2026-07-22**: the derive-first recipe library
-  (`src/recipes.rs`) + `nuthatch recipe list|add`, with `total_supply` as the flagship (ERC-20
-  `totalSupply()` derived as Σ mints − Σ burns from Transfer events — no eth_call). Derive-correctness
-  proven by e2e. Pending: more tier-1 recipes (reserves, holder counts), tier 2 (metadata cache), tiers
-  3–4 (eth_call fallback + hosted verifiable cache).
+- Status: **Accepted** (2026-07-21) — **tier 1 building (2026-07-22)**: the derive-first recipe library
+  (`src/recipes.rs`) + `nuthatch recipe list|add`. Three ERC-20-generic recipes shipped, all derived
+  from Transfer events with **no eth_call** and derive-correctness proven by e2e: `total_supply`
+  (Σ mints − Σ burns), `balances` (per-address Σ(in) − Σ(out)), `holder_count` (non-zero holders).
+  Pending: protocol-specific recipes (e.g. Uniswap `reserves`), tier 2 (metadata cache), tiers 3–4
+  (eth_call fallback + hosted verifiable cache).
 - Author: Pete (cargopete)
 - Date: 2026-07-21
 - Depends on: RFC-0018 §1 (authored SQL views — the surface the derive-first recipes are written in),

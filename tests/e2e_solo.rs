@@ -573,6 +573,41 @@ async fn total_supply_recipe_derives_mints_minus_burns() {
         "derived total_supply must equal Σ mints − Σ burns"
     );
 
+    // Balances: a1 = 1000 − 200 − 100 = 700; a2 = 500 + 100 = 600. Two non-zero holders.
+    let num = |v: &serde_json::Value| -> String {
+        v.as_i64()
+            .map(|n| n.to_string())
+            .or_else(|| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| v.to_string())
+    };
+    let bals = analytics::query(dir.path(), &recipes::balances_select("usdc")).unwrap();
+    let by_addr: std::collections::HashMap<String, String> = bals
+        .iter()
+        .map(|r| {
+            (
+                r["addr"].as_str().unwrap().to_lowercase(),
+                num(&r["balance"]),
+            )
+        })
+        .collect();
+    assert_eq!(
+        by_addr.get(&a1.to_lowercase()).map(String::as_str),
+        Some("700")
+    );
+    assert_eq!(
+        by_addr.get(&a2.to_lowercase()).map(String::as_str),
+        Some("600")
+    );
+    assert_eq!(
+        by_addr.len(),
+        2,
+        "exactly two non-zero holders (zero address excluded)"
+    );
+
+    // holder_count agrees.
+    let hc = analytics::query(dir.path(), &recipes::holder_count_select("usdc")).unwrap();
+    assert_eq!(num(&hc[0]["holders"]), "2", "derived holder_count");
+
     rt.ingest.abort();
     if let Some(w) = rt.alert_worker {
         w.abort();

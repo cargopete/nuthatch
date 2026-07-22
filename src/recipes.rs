@@ -21,11 +21,51 @@ pub struct Recipe {
     pub about: &'static str,
 }
 
-/// The recipe library. Grows as more derivable reads are covered (reserves, holder counts, …).
-pub const RECIPES: &[Recipe] = &[Recipe {
-    name: "total_supply",
-    about: "ERC-20 totalSupply(), derived from Transfer mints/burns — no eth_call",
-}];
+/// The recipe library. Grows as more derivable reads are covered (reserves, …).
+pub const RECIPES: &[Recipe] = &[
+    Recipe {
+        name: "total_supply",
+        about: "ERC-20 totalSupply(), derived from Transfer mints/burns — no eth_call",
+    },
+    Recipe {
+        name: "balances",
+        about: "per-address token balance (current holders), derived from Transfers — no eth_call",
+    },
+    Recipe {
+        name: "holder_count",
+        about: "number of non-zero holders, derived from Transfers — no eth_call",
+    },
+];
+
+/// A per-address net-balance subquery over `{alias}__transfer`: +value to `to`, −value from `from`
+/// (the same Σ(in) − Σ(out) the IVM balance view maintains). The building block for `balances` and
+/// `holder_count`.
+fn net_balance_subquery(alias: &str) -> String {
+    let t = format!("{alias}__transfer");
+    format!(
+        "SELECT addr, SUM(d) AS balance FROM (\
+           SELECT lower(\"to\") AS addr, TRY_CAST(\"value\" AS HUGEINT) AS d FROM \"{t}\" \
+           UNION ALL \
+           SELECT lower(\"from\") AS addr, -TRY_CAST(\"value\" AS HUGEINT) AS d FROM \"{t}\"\
+         ) GROUP BY addr"
+    )
+}
+
+/// The `SELECT` body of the `balances` recipe: each non-zero holder and its current balance.
+pub fn balances_select(alias: &str) -> String {
+    format!(
+        "SELECT addr, balance FROM ({}) WHERE addr <> '{ZERO_ADDRESS}' AND balance <> 0",
+        net_balance_subquery(alias)
+    )
+}
+
+/// The `SELECT` body of the `holder_count` recipe: how many non-zero holders there are.
+pub fn holder_count_select(alias: &str) -> String {
+    format!(
+        "SELECT COUNT(*) AS holders FROM ({}) WHERE addr <> '{ZERO_ADDRESS}' AND balance <> 0",
+        net_balance_subquery(alias)
+    )
+}
 
 /// The `SELECT` body of the `total_supply` recipe over a contract's `{alias}__transfer` table:
 /// Σ(value where `from` = 0x0) − Σ(value where `to` = 0x0). Exposed so it can be queried directly (and
@@ -51,6 +91,19 @@ pub fn view_sql(name: &str, alias: &str) -> Result<String> {
              -- node. Query it: SELECT total_supply FROM {alias}_total_supply\n\
              CREATE VIEW {alias}_total_supply AS\n{};\n",
             total_supply_select(alias)
+        )),
+        "balances" => Ok(format!(
+            "-- Recipe: balances (RFC-0023 tier 1) — each address's current token balance, DERIVED from\n\
+             -- the Transfer events already indexed as Σ(in) − Σ(out). No eth_call `balanceOf` per address.\n\
+             -- Query it: SELECT * FROM {alias}_balances ORDER BY balance DESC\n\
+             CREATE VIEW {alias}_balances AS\n{};\n",
+            balances_select(alias)
+        )),
+        "holder_count" => Ok(format!(
+            "-- Recipe: holder_count (RFC-0023 tier 1) — the number of non-zero holders, DERIVED from the\n\
+             -- Transfer events already indexed. No eth_call. Query it: SELECT * FROM {alias}_holder_count\n\
+             CREATE VIEW {alias}_holder_count AS\n{};\n",
+            holder_count_select(alias)
         )),
         _ => bail!(
             "unknown recipe '{name}' — available: {}",
