@@ -29,19 +29,20 @@ lists = ["<list-hash>"]       # sanctions/watch-list snapshots to screen against
 [flags]                       # optional (RFC-0008 C3); amounts are base units as strings
 threshold = "1000000000000"       # single-transfer flag ≥ this
 velocity_amount = "5000000000000" # windowed-volume flag ≥ this
-velocity_window = 3600            # window in seconds
+velocity_window = 7200            # window in BLOCKS, not seconds (≈24h at 12s blocks); default 7200
 
 [[templates]]                 # optional (RFC-0009 factories)
 name = "pool"                 # shared table prefix for discovered children
 abi = "abis/pool.json"
-filter = "Swap"               # optional event allowlist for children
+filter = "topic0"             # optional backfill-STRATEGY override (not an event allowlist):
+                              #   force topic0-only fetch for many-children templates
 
 [[factories]]                 # optional (RFC-0009)
-watch = "0xFactory…"          # contract that emits the creation event
-event = "PoolCreated"
+watch = "factory"             # ALIAS of the watched [[contracts]] (or a template, for nesting)
+event = "PoolCreated"         #   — NOT an address
 child_param = "pool"          # the event param holding the new child's address
 template = "pool"             # which [[templates]] the child uses
-start = 12369621             # optional start block for factory watching
+start = 12369621             # optional: ignore discoveries before this block
 
 [[webhooks]]                  # optional (RFC-0010 Part B)
 name = "large-transfers"
@@ -54,7 +55,7 @@ since = "registration"        # optional: "genesis" | "registration" | a block n
 secret = "…"                  # optional HMAC signing secret
 
 [[alerts]]                    # optional (RFC-0008 C5)
-kinds = ["threshold", "sanction_hit"]
+kinds = ["threshold_flag", "sanction_hit"]   # the only two valid kinds (match the emitted annotations)
 url = "https://…"
 ```
 
@@ -82,14 +83,40 @@ reserved_words = ["from", "to"]   # double-quote these in SQL
 big_ints = ["value"]              # use value_dec for SUM/AVG/compare
 ```
 
-## `roost.toml` — many nests, one process (RFC-0012)
+## `roost.toml` — many nests, one process (RFC-0012; multichain RFC-0021)
+
+Single-chain form — all mounted nests share ONE chain, ONE cursor:
 
 ```toml
 [roost]
 name = "my-roost"
-chain = "mainnet"             # all nests share ONE chain (one cursor)
+chain = "mainnet"             # the one chain (one cursor)
 chain_id = 1
 rpc_urls = ["https://…"]
 nests = ["usdc", "weth"]      # subdirectories under nests/ to mount
-max_rss_mb = 2048             # optional per-runtime RAM ceiling (default 2048)
+max_rss_mb = 2048             # optional per-CURSOR RAM ceiling (default 2048)
 ```
+
+Multichain form (RFC-0021) — one isolated cursor per chain. Omit the top-level
+`chain`/`chain_id`/`rpc_urls`; list chains under `[[chains]]` (a top-level array, beside `[roost]`),
+and let each nest declare its own `chain` in its `nuthatch.toml`:
+
+```toml
+[roost]
+name = "my-roost"
+nests = ["usdc", "base-app"]  # usdc → mainnet, base-app → base (per each nest's own chain)
+max_rss_mb = 2048             # per-cursor; a roost's total budget is Σ cursors
+
+[[chains]]
+chain = "mainnet"
+chain_id = 1
+rpc_urls = ["https://…"]
+
+[[chains]]
+chain = "base"
+chain_id = 8453
+rpc_urls = ["https://…"]
+```
+
+Exactly one form: top-level `chain` **or** `[[chains]]`, never both (ambiguous) or neither. The
+single-cursor law holds per chain — never multiplex two chains behind one cursor.
