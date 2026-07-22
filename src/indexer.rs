@@ -2279,7 +2279,7 @@ fn velocity_retraction_batch(
 /// state, not durable state - so rather than persist it (and risk drift from the canonical store),
 /// we reconstruct it from the facts that *are* durable, using the same circuit that maintains it
 /// live. Cold (sealed, immutable) segments are folded to one net-per-address row directly in DuckDB
-/// - no need to replay millions of transfers - and only the small un-sealed hot tail is replayed
+/// (no need to replay millions of transfers), and only the small un-sealed hot tail is replayed
 /// transfer-by-transfer. Hot and cold are disjoint (sealed rows are pruned from hot), so nothing is
 /// double-counted; the result is identical to a view grown from genesis.
 fn rebuild_balances(
